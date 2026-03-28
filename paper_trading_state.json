@@ -1,0 +1,118 @@
+{
+  "balance": 984.0,
+  "positions": {
+    "sgE95snhRs": [
+      {
+        "trade_id": 1,
+        "timestamp": "2026-03-28T15:13:55.628066",
+        "market_id": "sgE95snhRs",
+        "outcome": "YES",
+        "amount": 50,
+        "probability": 0.4098360655737705,
+        "payout_if_win": 122.0,
+        "profit_if_win": 72.0,
+        "profit_if_lose": -50,
+        "status": "WIN",
+        "actual_outcome": "YES",
+        "profit": 72.0
+      },
+      {
+        "trade_id": 3,
+        "timestamp": "2026-03-28T15:19:28.230783",
+        "market_id": "sgE95snhRs",
+        "outcome": "YES",
+        "amount": 50,
+        "probability": 0.4098360655737705,
+        "payout_if_win": 122.0,
+        "profit_if_win": 72.0,
+        "profit_if_lose": -50,
+        "status": "WIN",
+        "actual_outcome": "YES",
+        "profit": 72.0
+      }
+    ],
+    "CInylu26lR": [
+      {
+        "trade_id": 2,
+        "timestamp": "2026-03-28T15:13:55.893159",
+        "market_id": "CInylu26lR",
+        "outcome": "NO",
+        "amount": 30,
+        "probability": 0.5,
+        "payout_if_win": 60.0,
+        "profit_if_win": 30.0,
+        "profit_if_lose": -30,
+        "status": "OPEN"
+      }
+    ],
+    "N0hL8ZlU0C": [
+      {
+        "trade_id": 4,
+        "timestamp": "2026-03-28T15:19:28.231931",
+        "market_id": "N0hL8ZlU0C",
+        "outcome": "NO",
+        "amount": 30,
+        "probability": 0.3,
+        "payout_if_win": 42.85714285714286,
+        "profit_if_win": 12.857142857142861,
+        "profit_if_lose": -30,
+        "status": "OPEN"
+      }
+    ]
+  },
+  "trade_history": [
+    {
+      "trade_id": 1,
+      "timestamp": "2026-03-28T15:13:55.628066",
+      "market_id": "sgE95snhRs",
+      "outcome": "YES",
+      "amount": 50,
+      "probability": 0.4098360655737705,
+      "payout_if_win": 122.0,
+      "profit_if_win": 72.0,
+      "profit_if_lose": -50,
+      "status": "WIN",
+      "actual_outcome": "YES",
+      "profit": 72.0
+    },
+    {
+      "trade_id": 2,
+      "timestamp": "2026-03-28T15:13:55.893159",
+      "market_id": "CInylu26lR",
+      "outcome": "NO",
+      "amount": 30,
+      "probability": 0.5,
+      "payout_if_win": 60.0,
+      "profit_if_win": 30.0,
+      "profit_if_lose": -30,
+      "status": "OPEN"
+    },
+    {
+      "trade_id": 3,
+      "timestamp": "2026-03-28T15:19:28.230783",
+      "market_id": "sgE95snhRs",
+      "outcome": "YES",
+      "amount": 50,
+      "probability": 0.4098360655737705,
+      "payout_if_win": 122.0,
+      "profit_if_win": 72.0,
+      "profit_if_lose": -50,
+      "status": "WIN",
+      "actual_outcome": "YES",
+      "profit": 72.0
+    },
+    {
+      "trade_id": 4,
+      "timestamp": "2026-03-28T15:19:28.231931",
+      "market_id": "N0hL8ZlU0C",
+      "outcome": "NO",
+      "amount": 30,
+      "probability": 0.3,
+      "payout_if_win": 42.85714285714286,
+      "profit_if_win": 12.857142857142861,
+      "profit_if_lose": -30,
+      "status": "OPEN"
+    }
+  ],
+  "saved_at": "2026-03-28T15:19:45.188904"
+}

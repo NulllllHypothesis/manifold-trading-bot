@@ -1,0 +1,21 @@
+{
+  "demo_completed_at": "2026-03-28T15:19:49.196212",
+  "final_balance": 984.0,
+  "total_trades": 4,
+  "performance_summary": {
+    "total_trades": 4,
+    "resolved_trades": 2,
+    "open_trades": 2,
+    "win_trades": 2,
+    "lose_trades": 0,
+    "win_rate": 1.0,
+    "total_pnl": 144.0,
+    "current_balance": 984.0,
+    "return_pct": -1.6,
+    "avg_win": 72.0,
+    "avg_loss": 0,
+    "profit_factor": Infinity,
+    "largest_win": 72.0,
+    "largest_loss": 0
+  }
+}
