@@ -1,5 +1,5 @@
 {
-  "balance": 984.0,
+  "balance": 959.0,
   "positions": {
     "sgE95snhRs": [
       {
@@ -29,6 +29,18 @@
         "status": "WIN",
         "actual_outcome": "YES",
         "profit": 72.0
+      },
+      {
+        "trade_id": 5,
+        "timestamp": "2026-03-28T15:36:11.261445",
+        "market_id": "sgE95snhRs",
+        "outcome": "YES",
+        "amount": 25,
+        "probability": 0.5,
+        "payout_if_win": 50.0,
+        "profit_if_win": 25.0,
+        "profit_if_lose": -25,
+        "status": "OPEN"
       }
     ],
     "CInylu26lR": [
@@ -112,7 +124,19 @@
       "profit_if_win": 12.857142857142861,
       "profit_if_lose": -30,
       "status": "OPEN"
+    },
+    {
+      "trade_id": 5,
+      "timestamp": "2026-03-28T15:36:11.261445",
+      "market_id": "sgE95snhRs",
+      "outcome": "YES",
+      "amount": 25,
+      "probability": 0.5,
+      "payout_if_win": 50.0,
+      "profit_if_win": 25.0,
+      "profit_if_lose": -25,
+      "status": "OPEN"
     }
   ],
-  "saved_at": "2026-03-28T15:19:45.188904"
+  "saved_at": "2026-03-28T15:36:11.261493"
 }

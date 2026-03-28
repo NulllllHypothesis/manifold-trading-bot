@@ -37,9 +37,10 @@ def explore_markets():
             question = market.get('question', 'Unknown')[:60] + '...'
             prob = market.get('probability', 0) * 100
             volume = market.get('volume', 0)
+            market_id = market.get('id', 'Unknown')[:8] + '...'
             
             print(f"{i}. {question}")
-            print(f"   Probability: {prob:.1f}% | Volume: ${volume:.0f}")
+            print(f"   ID: {market_id} | Probability: {prob:.1f}% | Volume: ${volume:.0f}")
         
         return markets
     except Exception as e:
@@ -129,9 +130,10 @@ def run_strategy_scanner():
         prob = opp.get('current_probability', 0) * 100
         action = opp.get('recommended_action')
         confidence = opp.get('confidence', 0) * 100
+        market_id = opp.get('market_id', 'Unknown')[:8] + '...'
         
         print(f"\n{i}. {question}")
-        print(f"   Current: {prob:.1f}% YES")
+        print(f"   ID: {market_id} | Current: {prob:.1f}% YES")
         print(f"   Action: {action} (Confidence: {confidence:.0f}%)")
         
         signals = opp.get('signals', {})
@@ -169,8 +171,25 @@ def interactive_mode():
         elif choice == "3":
             print("\nPlace Paper Trade:")
             market_id = input("Market ID: ").strip()
+            if not market_id:
+                print("❌ Market ID cannot be empty")
+                continue
+                
             outcome = input("Outcome (YES/NO): ").strip().upper()
-            amount = float(input("Amount: ").strip())
+            if outcome not in ["YES", "NO"]:
+                print("❌ Outcome must be YES or NO")
+                continue
+                
+            amount_str = input("Amount: ").strip()
+            if not amount_str:
+                print("❌ Amount cannot be empty")
+                continue
+                
+            try:
+                amount = float(amount_str)
+            except ValueError:
+                print("❌ Amount must be a number")
+                continue
             
             # Get current probability
             try:

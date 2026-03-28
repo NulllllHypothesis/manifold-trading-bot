@@ -233,7 +233,18 @@ class PaperTrader:
         if open_positions:
             print(f"\nOpen Positions: {len(open_positions)}")
             for pos in open_positions[-5:]:  # Show last 5
-                print(f"  Market {pos['market_id'][:8]}...: {pos['outcome']} ${pos['amount']} @ {pos['probability']:.1%}")
+                market_id = pos['market_id']
+                try:
+                    # Try to get market info
+                    market = api_client.get_market(market_id)
+                    question = market.get('question', 'Unknown Market')
+                    if len(question) > 50:
+                        question = question[:47] + "..."
+                    print(f"  📊 {question}")
+                    print(f"    ID: {market_id[:8]}... | {pos['outcome']} ${pos['amount']} @ {pos['probability']:.1%}")
+                except:
+                    # Fallback to ID if API fails
+                    print(f"  Market {market_id[:8]}...: {pos['outcome']} ${pos['amount']} @ {pos['probability']:.1%}")
     
     def get_market_analysis(self, market_id: str) -> Dict:
         """Get analysis for a specific market"""
