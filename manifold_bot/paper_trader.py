@@ -132,6 +132,7 @@ class PaperTrader:
         
         positions = self.positions[market_id]
         total_pnl = 0
+        updated_trade_ids = []
         
         for trade in positions:
             if trade['status'] != 'OPEN':
@@ -153,6 +154,21 @@ class PaperTrader:
                 trade['profit'] = profit
                 total_pnl += profit
                 print(f"Trade {trade['trade_id']}: LOSE ${profit:.2f}")
+            
+            updated_trade_ids.append(trade['trade_id'])
+        
+        # Also update trade_history to stay consistent
+        for trade in self.trade_history:
+            if trade['trade_id'] in updated_trade_ids:
+                # Find the corresponding position to copy status
+                for pos in positions:
+                    if pos['trade_id'] == trade['trade_id']:
+                        trade['status'] = pos['status']
+                        if 'actual_outcome' in pos:
+                            trade['actual_outcome'] = pos['actual_outcome']
+                        if 'profit' in pos:
+                            trade['profit'] = pos['profit']
+                        break
         
         # Update balance
         self.balance += total_pnl
@@ -193,16 +209,35 @@ class PaperTrader:
         avg_loss = lose_trades['profit'].mean() if len(lose_trades) > 0 else 0
         profit_factor = abs(win_trades['profit'].sum() / lose_trades['profit'].sum()) if len(lose_trades) > 0 and lose_trades['profit'].sum() != 0 else float('inf')
         
+        # Calculate money in open trades
+        open_trades = df[df['status'] == 'OPEN']
+        money_in_open = open_trades['amount'].sum() if len(open_trades) > 0 else 0
+        
+        # Calculate potential P&L for open trades (simplified)
+        potential_pnl = 0
+        for _, trade in open_trades.iterrows():
+            if trade['outcome'] == 'YES':
+                potential_payout = trade['amount'] / trade['probability'] if trade['probability'] > 0 else 0
+                potential_profit = potential_payout - trade['amount']
+            else:
+                potential_payout = trade['amount'] / (1 - trade['probability']) if trade['probability'] < 1 else 0
+                potential_profit = potential_payout - trade['amount']
+            potential_pnl += potential_profit
+        
         self.performance_metrics = {
             'total_trades': len(df),
             'resolved_trades': len(resolved_trades),
-            'open_trades': len(df) - len(resolved_trades),
+            'open_trades': len(open_trades),
             'win_trades': len(win_trades),
             'lose_trades': len(lose_trades),
             'win_rate': win_rate,
-            'total_pnl': total_pnl,
+            'realized_pnl': total_pnl,  # Renamed for clarity
             'current_balance': self.balance,
-            'return_pct': ((self.balance - self.initial_balance) / self.initial_balance * 100),
+            'initial_balance': self.initial_balance,
+            'net_return_pct': ((self.balance - self.initial_balance) / self.initial_balance * 100),
+            'money_in_open_trades': money_in_open,
+            'potential_pnl_open': potential_pnl,
+            'total_exposure': money_in_open + abs(total_pnl),
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'profit_factor': profit_factor,
@@ -216,17 +251,37 @@ class PaperTrader:
         """Print portfolio summary"""
         metrics = self.get_performance_metrics()
         
-        print("\n" + "="*50)
-        print("PORTFOLIO SUMMARY")
-        print("="*50)
-        print(f"Initial Balance: ${self.initial_balance:.2f}")
-        print(f"Current Balance: ${self.balance:.2f}")
-        print(f"Total P&L: ${metrics.get('total_pnl', 0):.2f}")
-        print(f"Return: {metrics.get('return_pct', 0):.2f}%")
-        print(f"Total Trades: {metrics.get('total_trades', 0)}")
-        print(f"Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
-        print(f"Profit Factor: {metrics.get('profit_factor', 0):.2f}")
-        print("="*50)
+        print("\n" + "="*60)
+        print("📊 PORTFOLIO SUMMARY")
+        print("="*60)
+        
+        # Balance section
+        print("💰 BALANCE:")
+        print(f"  Initial: ${self.initial_balance:.2f}")
+        print(f"  Current: ${self.balance:.2f}")
+        print(f"  Net Return: {metrics.get('net_return_pct', 0):.2f}%")
+        
+        # Realized P&L section
+        print("\n✅ REALIZED P&L (Closed Trades):")
+        print(f"  Total: ${metrics.get('realized_pnl', 0):.2f}")
+        print(f"  Wins: {metrics.get('win_trades', 0)}")
+        print(f"  Losses: {metrics.get('lose_trades', 0)}")
+        print(f"  Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
+        
+        # Open positions section
+        print("\n⏳ OPEN POSITIONS:")
+        print(f"  Count: {metrics.get('open_trades', 0)}")
+        print(f"  Invested: ${metrics.get('money_in_open_trades', 0):.2f}")
+        print(f"  Potential P&L: ${metrics.get('potential_pnl_open', 0):.2f}")
+        
+        # Risk metrics
+        print("\n📈 PERFORMANCE:")
+        print(f"  Total Trades: {metrics.get('total_trades', 0)}")
+        print(f"  Avg Win: ${metrics.get('avg_win', 0):.2f}")
+        print(f"  Avg Loss: ${metrics.get('avg_loss', 0):.2f}")
+        print(f"  Profit Factor: {metrics.get('profit_factor', 0):.2f}")
+        
+        print("="*60)
         
         # Show open positions
         open_positions = [p for p in self.trade_history if p.get('status') == 'OPEN']
