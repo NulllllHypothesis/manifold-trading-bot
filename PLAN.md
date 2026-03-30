@@ -1,5 +1,19 @@
 # Manifold Trading Bot — Project Plan
 
+## Quick Start for Devs
+
+```bash
+git clone https://github.com/amirghari/manifold-trading-bot && cd manifold-trading-bot
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # then open .env and add your Manifold API key
+python3 tests/test_manifold.py # verify everything works
+```
+
+> Get your Manifold API key at: https://manifold.markets/profile (bottom of the page)
+
+---
+
 ## Repo
 `https://github.com/amirghari/manifold-trading-bot`
 
