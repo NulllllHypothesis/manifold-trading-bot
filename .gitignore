@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .openclaw/
 
+# Local environment variables — never commit this
+.env
+
 # Runtime data files (generated at runtime, not committed)
 market_research.json
 auto_trades.json
