@@ -49,6 +49,9 @@ manifold-trading-bot/
 │   ├── AUTOMATION_README.md     # Automation system setup guide
 │   └── README.md                # Legacy detailed reference
 │
+├── memory/                      # Session logs — read by OpenClaw on startup
+│   └── YYYY-MM-DD.md            # Daily notes: what changed, current state, what's next
+│
 ├── requirements.txt             # Python dependencies
 └── LICENSE                      # MIT License
 ```
@@ -146,6 +149,12 @@ python3 tests/test_automation.py    # Automation scripts
 ```
 
 The pre-push git hook runs these automatically before every `git push` (when dependencies are installed).
+
+## Session Memory
+
+The `memory/` directory contains dated session logs (`YYYY-MM-DD.md`). OpenClaw reads today's and yesterday's file automatically on every startup — this is how it stays aware of recent changes, current project state, and what to work on next without anyone having to brief it each time.
+
+New team members should also read the latest file in `memory/` after pulling — it covers what was built, what changed, live cron job IDs, and what's remaining.
 
 ## License
 
