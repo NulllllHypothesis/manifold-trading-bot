@@ -21,14 +21,14 @@ python3 tests/test_manifold.py # verify everything works
 **Null Hypothesis** — working in the OpenClaw shared workspace on a Linux server.
 
 ## Server
-- **Host:** `100.116.161.112` — user: `hackathon` / pass: `hackathon2026`
+- **Host:** See `.env` for `SANDBOX_IP`, `SANDBOX_PASS` (user: `hackathon`)
 - **Workspace:** `~/.openclaw/workspace/`
 - **Local LLM (free):** `http://localhost:11434` — model `deepseek-r1:14b`
 - **DeepSeek API:** `https://api.deepseek.com` — model `deepseek-chat`
 
 ## SSH Tunnel (run on your laptop)
 ```bash
-ssh -L 5000:localhost:5000 hackathon@100.116.161.112
+ssh -L 5000:localhost:5000 hackathon@$SANDBOX_IP
 ```
 
 ## Git Workflow

@@ -6,8 +6,8 @@ Repo: https://github.com/amirghari/manifold-trading-bot
 
 ## Infrastructure (Tailscale VPN)
 
-- Homelab: `ssh aleksi@100.98.186.88`
-- Hackathon sandbox: `sshpass -p 'hackathon2026' ssh -o StrictHostKeyChecking=no hackathon@100.116.161.112`
+- Homelab: `ssh aleksi@$HOMELAB_IP` (IP in `.env`)
+- Hackathon sandbox: `sshpass -p "$SANDBOX_PASS" ssh -o StrictHostKeyChecking=no hackathon@$SANDBOX_IP` (credentials in `.env`)
 - Sandbox is 100% isolated from host — cannot see Kevin or host credentials
 - sshpass required for non-interactive SSH (install: `brew install hudochenkov/sshpass/sshpass`)
 
@@ -102,7 +102,7 @@ Full command set: `acp`, `agent`, `agents`, `approvals`, `backup`, `browser`, `c
 ## Read Telegram Bot Messages
 
 ```bash
-sshpass -p 'hackathon2026' ssh -o StrictHostKeyChecking=no hackathon@100.116.161.112 'python3 /usr/local/bin/telegram-reader.py --last 20'
+sshpass -p "$SANDBOX_PASS" ssh -o StrictHostKeyChecking=no hackathon@$SANDBOX_IP 'python3 /usr/local/bin/telegram-reader.py --last 20'
 ```
 Options: `--last N`, `--since HOURS`, `--all`
 
@@ -151,8 +151,8 @@ BOOTSTRAP.md                          # Should have been deleted after first con
 ### Environment Variables
 
 Set in `/etc/profile.d/hackathon.sh` (sourced for login shells, NOT by the gateway process):
-- `MANIFOLD_API_KEY=22a41d7d-10e8-44bf-93d6-5dff623f27a9`
-- `DEEPSEEK_API_KEY=sk-85c6f0fcbfc74432b10439abf82275af`
+- `MANIFOLD_API_KEY` — Manifold Markets API key (DO NOT commit to repo)
+- `DEEPSEEK_API_KEY` — DeepSeek API key (DO NOT commit to repo)
 - `PIP_BREAK_SYSTEM_PACKAGES=1`
 
 **Known issue**: The gateway process (started by `runuser` at container boot) does NOT source `/etc/profile.d/`. Cron sessions inherit the gateway's environment, so `MANIFOLD_API_KEY` is not available during cron runs. This causes a warning but doesn't break paper trading (PaperTrader doesn't need the API key for simulated trades).
