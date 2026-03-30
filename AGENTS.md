@@ -207,6 +207,86 @@ Think of it like a human reviewing their journal and updating their mental model
 
 The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
 
+## Git & GitHub Workflow
+
+This project lives at `https://github.com/amirghari/manifold-trading-bot`.
+
+### Branch Rules — Read Carefully
+
+**`main` is protected. These rules are non-negotiable:**
+
+- **NEVER push directly to `main`.** Not even a small fix.
+- **NEVER force-push, reset, or rewrite history on `main`.**
+- `main` is only for **reading code** and **running cron jobs**.
+- Cron jobs (`automation/auto_research.py`, `automation/auto_trader.py`, `automation/daily_summary.py`) always run from `main`. Do not change this.
+
+**All development happens on branches:**
+
+- New feature → `git checkout -b feature/short-description`
+- Bug fix → `git checkout -b fix/short-description`
+- Keep branch names lowercase with hyphens. E.g. `feature/ai-analyzer`, `fix/mock-positions`.
+
+### Workflow for Every Change
+
+Follow this every time, no exceptions:
+
+```
+1. git checkout main && git pull origin main   ← always start fresh
+2. git checkout -b feature/your-feature-name
+3. Write the code
+4. Write tests in tests/ that cover the new code
+5. Run ALL tests: python3 tests/test_manifold.py && python3 tests/test_automation.py
+6. Fix anything that fails — do not skip failures
+7. Only after ALL tests pass (new + existing):
+   git push origin feature/your-feature-name
+   → Open a Pull Request to main on GitHub
+8. Never merge your own PR without human review
+```
+
+### Testing Rules
+
+- Every new feature **must have at least one new test** in `tests/`.
+- Tests live in `tests/test_manifold.py` (API/core) or `tests/test_automation.py` (automation scripts).
+- If neither file fits, create a new `tests/test_<feature>.py`.
+- When running tests, **always run the full suite**, not just your new test:
+  ```bash
+  python3 tests/test_manifold.py
+  python3 tests/test_automation.py
+  ```
+- If an existing test breaks because of your change, you must fix it — not skip it.
+- Do not mark a PR as ready until you have seen the output `✅ SUCCESS` for every test.
+
+### Git Sync Schedule
+
+Keep your local workspace in sync with the remote automatically:
+
+**During every heartbeat check:**
+1. Run `git fetch origin` — see if main has moved
+2. If you are on `main` and origin/main is ahead: `git pull origin main`
+3. If you are on a feature branch and origin/main has new commits: rebase onto the latest main with `git rebase origin/main`
+4. Log the sync result to `memory/YYYY-MM-DD.md`
+
+**Forced sync — run this at the start of every cron job session:**
+```bash
+git fetch origin && git checkout main && git pull origin main
+```
+This ensures cron jobs always execute the latest stable code.
+
+### Summary Table
+
+| Situation | Allowed? |
+|---|---|
+| Read code on main | ✅ Yes |
+| Run cron jobs from main | ✅ Yes |
+| Pull/fetch main | ✅ Yes |
+| Push directly to main | ❌ Never |
+| Create feature branch | ✅ Yes |
+| Push feature branch | ✅ Yes |
+| Open PR to main | ✅ Yes (after all tests pass) |
+| Merge your own PR | ❌ Wait for human |
+
+---
+
 ## Make It Yours
 
 This is a starting point. Add your own conventions, style, and rules as you figure out what works.
