@@ -5,6 +5,10 @@ Watch demo - shows multiple bot features in action
 
 import time
 import sys
+import os
+
+# Add project root to path so manifold_bot package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def print_step(step, description):
     print(f"\n{'='*60}")

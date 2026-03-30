@@ -4,8 +4,12 @@ End-to-end demo of the Manifold Paper Trading Bot
 """
 
 import sys
+import os
 import time
 from datetime import datetime
+
+# Add project root to path so manifold_bot package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 print("="*60)
 print("MANIFOLD PAPER TRADING BOT - END-TO-END DEMO")

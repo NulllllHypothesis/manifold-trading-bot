@@ -3,6 +3,11 @@
 Show detailed portfolio with market information
 """
 
+import os
+import sys
+# Add project root to path so manifold_bot package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.manifold_api import api_client
 

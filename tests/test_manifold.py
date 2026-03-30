@@ -4,7 +4,9 @@ Quick test script for Manifold API setup
 """
 
 import sys
-sys.path.insert(0, '/home/hackathon/.openclaw/workspace')
+import os
+# Add project root to path so manifold_bot package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
 
