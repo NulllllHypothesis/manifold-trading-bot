@@ -10,9 +10,9 @@ class TradingStrategies:
     """Collection of trading strategies"""
     
     @staticmethod
-    def momentum_strategy(market: Dict, lookback_hours: int = 24) -> Optional[str]:
+    def probability_direction_strategy(market: Dict, lookback_hours: int = 24) -> Optional[str]:
         """
-        Momentum strategy: Bet in direction of recent price movement
+        Probability Direction: Bet in direction of current probability bias
         
         Returns:
             "YES", "NO", or None (no trade)
@@ -169,19 +169,20 @@ def analyze_market_for_trading(market: Dict) -> Dict:
     # Apply strategies
     signals = {}
     
-    # Momentum signal
-    momentum = TradingStrategies.momentum_strategy(market)
-    if momentum:
-        signals['momentum'] = momentum
+    # Probability direction signal
+    prob_direction = TradingStrategies.probability_direction_strategy(market)
+    if prob_direction:
+        signals['prob_direction'] = prob_direction
     
     # Mean reversion signal
     mean_rev = TradingStrategies.mean_reversion_strategy(market)
     if mean_rev:
         signals['mean_reversion'] = mean_rev
     
-    # Volume analysis (simplified)
-    if market.get('volume', 0) > 1000:  # High volume threshold
-        signals['high_volume'] = True
+    # Volume spike signal
+    vol_spike = TradingStrategies.volume_spike_strategy(market, avg_volume=500)
+    if vol_spike:
+        signals['volume_spike'] = vol_spike
     
     # Combine signals
     analysis['signals'] = signals

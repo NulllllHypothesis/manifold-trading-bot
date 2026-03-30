@@ -101,9 +101,9 @@ def demo_paper_trading():
     # Show portfolio
     trader.print_portfolio_summary()
     
-    # Demo resolving a market
-    print("\nDemo: Resolving market 1 as YES...")
-    trader.resolve_market(market1['id'], "YES")
+    # Check if any markets have resolved on Manifold
+    print("\nChecking for resolved markets on Manifold...")
+    trader.auto_resolve_markets()
     
     # Show updated portfolio
     trader.print_portfolio_summary()

@@ -1,4 +1,9 @@
 __pycache__/
 *.pyc
-*.json
 .openclaw/
+
+# Runtime data files (generated at runtime, not committed)
+market_research.json
+auto_trades.json
+last_telegram_message.txt
+telegram_daily_summary.txt

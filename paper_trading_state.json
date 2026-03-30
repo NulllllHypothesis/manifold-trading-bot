@@ -1,5 +1,5 @@
 {
-  "balance": 959.0,
+  "balance": 1069.0,
   "positions": {
     "sgE95snhRs": [
       {
@@ -40,7 +40,23 @@
         "payout_if_win": 50.0,
         "profit_if_win": 25.0,
         "profit_if_lose": -25,
-        "status": "OPEN"
+        "status": "WIN",
+        "actual_outcome": "YES",
+        "profit": 25.0
+      },
+      {
+        "trade_id": 6,
+        "timestamp": "2026-03-28T15:38:28.225253",
+        "market_id": "sgE95snhRs",
+        "outcome": "YES",
+        "amount": 50,
+        "probability": 0.5,
+        "payout_if_win": 100.0,
+        "profit_if_win": 50.0,
+        "profit_if_lose": -50,
+        "status": "WIN",
+        "actual_outcome": "YES",
+        "profit": 50.0
       }
     ],
     "CInylu26lR": [
@@ -54,7 +70,23 @@
         "payout_if_win": 60.0,
         "profit_if_win": 30.0,
         "profit_if_lose": -30,
-        "status": "OPEN"
+        "status": "LOSE",
+        "actual_outcome": "YES",
+        "profit": -30
+      },
+      {
+        "trade_id": 7,
+        "timestamp": "2026-03-28T15:38:28.226412",
+        "market_id": "CInylu26lR",
+        "outcome": "NO",
+        "amount": 30,
+        "probability": 0.5,
+        "payout_if_win": 60.0,
+        "profit_if_win": 30.0,
+        "profit_if_lose": -30,
+        "status": "LOSE",
+        "actual_outcome": "YES",
+        "profit": -30
       }
     ],
     "N0hL8ZlU0C": [
@@ -97,7 +129,9 @@
       "payout_if_win": 60.0,
       "profit_if_win": 30.0,
       "profit_if_lose": -30,
-      "status": "OPEN"
+      "status": "LOSE",
+      "actual_outcome": "YES",
+      "profit": -30
     },
     {
       "trade_id": 3,
@@ -135,8 +169,37 @@
       "payout_if_win": 50.0,
       "profit_if_win": 25.0,
       "profit_if_lose": -25,
-      "status": "OPEN"
+      "status": "WIN",
+      "profit": 25.0
+    },
+    {
+      "trade_id": 6,
+      "timestamp": "2026-03-28T15:38:28.225253",
+      "market_id": "sgE95snhRs",
+      "outcome": "YES",
+      "amount": 50,
+      "probability": 0.5,
+      "payout_if_win": 100.0,
+      "profit_if_win": 50.0,
+      "profit_if_lose": -50,
+      "status": "WIN",
+      "actual_outcome": "YES",
+      "profit": 50.0
+    },
+    {
+      "trade_id": 7,
+      "timestamp": "2026-03-28T15:38:28.226412",
+      "market_id": "CInylu26lR",
+      "outcome": "NO",
+      "amount": 30,
+      "probability": 0.5,
+      "payout_if_win": 60.0,
+      "profit_if_win": 30.0,
+      "profit_if_lose": -30,
+      "status": "LOSE",
+      "actual_outcome": "YES",
+      "profit": -30
     }
   ],
-  "saved_at": "2026-03-28T15:36:11.261493"
+  "saved_at": "2026-03-28T15:48:55.401263"
 }

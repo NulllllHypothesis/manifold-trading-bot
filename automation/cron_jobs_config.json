@@ -1,0 +1,71 @@
+{
+  "created_at": "2026-03-29T19:24:46.674595",
+  "jobs": {
+    "market-research-hourly": {
+      "name": "Manifold Market Research",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run hourly market research for Manifold trading bot. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_research.py",
+        "model": "deepseek/deepseek-chat",
+        "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
+    "auto-trading-hourly": {
+      "name": "Manifold Auto Trading",
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Execute automated trading based on latest research. Run: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_trader.py",
+        "model": "deepseek/deepseek-chat",
+        "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
+    "daily-summary": {
+      "name": "Daily Trading Summary",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 19 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py",
+        "model": "deepseek/deepseek-chat",
+        "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    }
+  }
+}

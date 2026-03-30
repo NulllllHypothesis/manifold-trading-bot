@@ -27,8 +27,8 @@ class TradingDashboard:
         report = {
             'summary': {
                 'current_balance': metrics.get('current_balance', 0),
-                'total_pnl': metrics.get('total_pnl', 0),
-                'return_pct': metrics.get('return_pct', 0),
+                'realized_pnl': metrics.get('realized_pnl', 0),
+                'net_return_pct': metrics.get('net_return_pct', 0),
                 'win_rate': metrics.get('win_rate', 0),
                 'profit_factor': metrics.get('profit_factor', 0),
                 'sharpe_ratio': self._calculate_sharpe_ratio(),
@@ -119,14 +119,14 @@ class TradingDashboard:
             
             market_id = trade.get('market_id')
             if market_id not in market_pnl:
-                market_pnl[market_id] = {'total_pnl': 0, 'trades': 0}
+                market_pnl[market_id] = {'realized_pnl': 0, 'trades': 0}
             
-            market_pnl[market_id]['total_pnl'] += trade['profit']
+            market_pnl[market_id]['realized_pnl'] += trade['profit']
             market_pnl[market_id]['trades'] += 1
         
         # Sort by P&L
         sorted_markets = sorted(market_pnl.items(), 
-                               key=lambda x: x[1]['total_pnl'], 
+                               key=lambda x: x[1]['realized_pnl'], 
                                reverse=True)[:limit]
         
         result = []
@@ -136,9 +136,9 @@ class TradingDashboard:
                 result.append({
                     'market_id': market_id,
                     'question': market.get('question', 'Unknown')[:60] + '...',
-                    'total_pnl': data['total_pnl'],
+                    'realized_pnl': data['realized_pnl'],
                     'trades': data['trades'],
-                    'avg_pnl_per_trade': data['total_pnl'] / data['trades'] if data['trades'] > 0 else 0
+                    'avg_pnl_per_trade': data['realized_pnl'] / data['trades'] if data['trades'] > 0 else 0
                 })
             except:
                 continue
@@ -148,7 +148,7 @@ class TradingDashboard:
     def _get_worst_markets(self, limit: int = 5) -> List[Dict]:
         """Get worst performing markets by P&L"""
         markets = self._get_top_markets(limit * 2)  # Get more to filter
-        return sorted(markets, key=lambda x: x['total_pnl'])[:limit]
+        return sorted(markets, key=lambda x: x['realized_pnl'])[:limit]
     
     def _get_daily_performance(self) -> List[Dict]:
         """Get daily P&L performance"""
@@ -242,7 +242,7 @@ class TradingDashboard:
         top_markets = self._get_top_markets(5)
         if top_markets:
             market_names = [m['question'][:30] + '...' for m in top_markets]
-            market_pnls = [m['total_pnl'] for m in top_markets]
+            market_pnls = [m['realized_pnl'] for m in top_markets]
             
             colors = ['green' if pnl >= 0 else 'red' for pnl in market_pnls]
             
@@ -271,8 +271,8 @@ class TradingDashboard:
         
         print(f"\n📊 PERFORMANCE SUMMARY")
         print(f"   Current Balance: ${summary['current_balance']:.2f}")
-        print(f"   Total P&L: ${summary['total_pnl']:.2f}")
-        print(f"   Return: {summary['return_pct']:.2f}%")
+        print(f"   Total P&L: ${summary['realized_pnl']:.2f}")
+        print(f"   Return: {summary['net_return_pct']:.2f}%")
         print(f"   Win Rate: {summary['win_rate']*100:.1f}%")
         print(f"   Profit Factor: {summary['profit_factor']:.2f}")
         print(f"   Sharpe Ratio: {summary['sharpe_ratio']:.3f}")
@@ -290,11 +290,11 @@ class TradingDashboard:
         
         print(f"\n🏆 TOP MARKETS")
         for market in report['top_performing_markets'][:3]:
-            print(f"   ${market['total_pnl']:.2f}: {market['question']}")
+            print(f"   ${market['realized_pnl']:.2f}: {market['question']}")
         
         print(f"\n⚠️  WORST MARKETS")
         for market in report['worst_performing_markets'][:3]:
-            print(f"   ${market['total_pnl']:.2f}: {market['question']}")
+            print(f"   ${market['realized_pnl']:.2f}: {market['question']}")
         
         print(f"\n📅 DAILY PERFORMANCE")
         for day in report['daily_performance'][-3:]:  # Last 3 days

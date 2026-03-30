@@ -1,3 +1,4 @@
+import os
 """
 Paper Trading Bot for Manifold Markets
 Simulates trading without using real play money.
@@ -22,7 +23,7 @@ class PaperTrader:
         self.performance_metrics = {}
         
         # Load/save state
-        self.state_file = "paper_trading_state.json"
+        self.state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_trading_state.json")
         self.load_state()
     
     def load_state(self):
@@ -179,6 +180,30 @@ class PaperTrader:
         
         self.save_state()
     
+
+    def auto_resolve_markets(self):
+        """Auto-check Manifold for resolved markets and update positions"""
+        resolved_count = 0
+        for market_id in list(self.positions.keys()):
+            open_positions = [p for p in self.positions[market_id] if p.get('status') == 'OPEN']
+            if not open_positions:
+                continue
+            try:
+                market = api_client.get_market(market_id)
+                if market.get('isResolved', False):
+                    resolution = market.get('resolution', '')
+                    if resolution in ['YES', 'NO']:
+                        print(f"Auto-resolving {market.get('question', market_id)[:50]}... as {resolution}")
+                        self.resolve_market(market_id, resolution)
+                        resolved_count += 1
+            except Exception as e:
+                print(f"Error checking market {market_id}: {e}")
+        if resolved_count:
+            print(f"Auto-resolved {resolved_count} market(s)")
+        else:
+            print("No markets to auto-resolve")
+        return resolved_count
+
     def get_performance_metrics(self) -> Dict:
         """Calculate performance metrics"""
         if not self.trade_history:

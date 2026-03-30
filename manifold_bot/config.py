@@ -1,12 +1,14 @@
 """
 Manifold Markets API Configuration
-Store your API key securely here.
 """
+import os
 
-MANIFOLD_API_KEY = "22a41d7d-10e8-44bf-93d6-5dff623f27a9"
+MANIFOLD_API_KEY = os.environ.get("MANIFOLD_API_KEY", "")
+if not MANIFOLD_API_KEY:
+    print("WARNING: MANIFOLD_API_KEY not set. Export it: export MANIFOLD_API_KEY=your-key-here")
+
 MANIFOLD_API_BASE = "https://api.manifold.markets"
 
-# API endpoints
 ENDPOINTS = {
     "markets": "/v0/markets",
     "market": "/v0/market/{marketId}",
@@ -19,7 +21,6 @@ ENDPOINTS = {
     "search_markets": "/v0/search-markets"
 }
 
-# Trading parameters
-INITIAL_BALANCE = 1000  # Starting play money
+INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
 MAX_BET_AMOUNT = 100
