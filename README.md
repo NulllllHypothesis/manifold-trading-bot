@@ -149,4 +149,4 @@ The pre-push git hook runs these automatically before every `git push` (when dep
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+MIT License — Copyright (c) 2026 Null Hypothesis. See [LICENSE](LICENSE).
