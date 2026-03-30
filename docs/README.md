@@ -19,9 +19,9 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure API Key
-Your Manifold API key is already configured in `config.py`:
-```python
-MANIFOLD_API_KEY = "22a41d7d-10e8-44bf-93d6-5dff623f27a9"
+Set your Manifold API key as an environment variable:
+```bash
+export MANIFOLD_API_KEY="your-key-here"
 ```
 
 ### 3. Test Connection

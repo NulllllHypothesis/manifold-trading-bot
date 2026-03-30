@@ -10,3 +10,17 @@ market_research.json
 auto_trades.json
 last_telegram_message.txt
 telegram_daily_summary.txt
+
+# Paper trading state files (runtime data, never committed)
+paper_trading_state*.json
+manifold_bot/paper_trading_state.json
+
+# Root-level script copies (stale duplicates — canonical copies are in automation/)
+/auto_research.py
+/auto_trader.py
+/daily_summary.py
+/send_telegram.py
+/setup_cron_jobs.py
+/test_automation.py
+/AUTOMATION_README.md
+/cron_jobs_config.json

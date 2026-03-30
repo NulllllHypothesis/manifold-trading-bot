@@ -270,8 +270,7 @@ def main():
 if __name__ == "__main__":
     try:
         num_trades = main()
-        print(f"\nExit code: {0 if num_trades > 0 else 1}")
-        sys.exit(0 if num_trades > 0 else 1)
+        sys.exit(0)
     except Exception as e:
         print(f"Fatal error: {e}")
         sys.exit(1)

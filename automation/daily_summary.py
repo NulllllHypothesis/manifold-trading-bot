@@ -20,7 +20,7 @@ class DailySummary:
     """Generate daily trading summary"""
 
     def __init__(self):
-        self.state_file = "paper_trading_state_fixed.json"
+        self.state_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "manifold_bot", "paper_trading_state.json")
         self.research_file = "market_research.json"
         self.trade_log_file = "auto_trades.json"
 
