@@ -190,6 +190,17 @@ class MarketResearcher:
 def main():
     """Main function"""
     researcher = MarketResearcher()
+
+    # Skip research if at max positions (5)
+    open_positions = sum(
+        1 for trades in researcher.trader.positions.values()
+        if any(t.get('status') == 'OPEN' for t in (trades if isinstance(trades, list) else [trades]))
+    )
+    max_positions = 5
+    if open_positions >= max_positions:
+        print(f"At max positions ({open_positions}/{max_positions}). Skipping research.")
+        return 0
+
     recommendations = researcher.run_hourly_research()
 
     # Return number of recommendations for cron job monitoring
