@@ -88,14 +88,12 @@ class MarketResearcher:
                     })
 
                 # Volume spike — use median volume to resist outlier inflation
-                volumes = sorted(m.get('volume') or 0 for m in markets)
+                import statistics as _stats
                 missing_vol = sum(1 for m in markets if m.get('volume') is None)
                 if missing_vol:
                     print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
-                mid = len(volumes) // 2
-                # ~mid == -(mid+1): for even lists averages the two middle values;
-                # for odd lists volumes[mid] == volumes[~mid] only when len==1, otherwise mid != ~mid.
-                avg_volume = (volumes[mid] + volumes[~mid]) / 2 if volumes else 0
+                volumes = [m.get('volume') or 0 for m in markets]
+                avg_volume = _stats.median(volumes) if volumes else 0
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
                     strategies.append({
@@ -205,8 +203,9 @@ class MarketResearcher:
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
                         # AI disagrees — scale penalty by AI confidence.
-                        # Low-confidence AI (0.5) barely penalizes; high-confidence AI (0.95) penalizes hard.
-                        penalty = 0.4 + (1 - ai['confidence']) * 0.4  # range: 0.4 (certain) to 0.8 (uncertain)
+                        # penalty multiplier range: 0.4 (AI certain, confidence=1.0) to 0.8 (AI uncertain, confidence=0.0)
+                        # High AI confidence → lower multiplier → harder penalty on stat score.
+                        penalty = 0.4 + (1 - ai['confidence']) * 0.4
                         rec['confidence'] = round(stat_conf * penalty, 3)
                     # if ai returned something unexpected, leave confidence unchanged
 

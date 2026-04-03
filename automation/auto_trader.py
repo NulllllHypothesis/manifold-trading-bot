@@ -43,8 +43,8 @@ class AutoTrader:
             with open(self.research_file, 'r') as f:
                 data = json.load(f)
             latest = data.get('latest')
-            # schema_version is inside 'latest' (written by save_research as part of research_data).
-            # data.get('schema_version') would miss it — the correct path is data['latest']['schema_version'].
+            # File structure: { "latest": { "schema_version": 2, ... }, "history": [...] }
+            # schema_version is nested inside 'latest', so we read it from there.
             schema = (latest or {}).get('schema_version', 1)
             if schema < 2:
                 # OpenClaw captures stdout and forwards it to Telegram — this alert reaches the group

@@ -202,12 +202,13 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertGreater(result, 0.64)
 
     def test_ai_disagree_high_confidence_penalizes_harder(self):
-        # High-confidence AI (0.95) penalizes harder than low-confidence (0.55)
+        # High-confidence AI (0.95) → penalty multiplier 0.42 → smaller result (harder penalty)
+        # Low-confidence  AI (0.55) → penalty multiplier 0.58 → larger result (softer penalty)
         penalty_high = 0.4 + (1 - 0.95) * 0.4  # 0.42
         penalty_low  = 0.4 + (1 - 0.55) * 0.4  # 0.58
         result_high = self._blend(0.70, 0.95, 'YES', 'NO')
         result_low  = self._blend(0.70, 0.55, 'YES', 'NO')
-        self.assertLess(result_high, result_low)
+        self.assertLess(result_high, result_low)  # certain AI penalizes more
         self.assertAlmostEqual(result_high, round(0.70 * penalty_high, 3))
 
     def test_ai_disagree_penalizes_confidence(self):
