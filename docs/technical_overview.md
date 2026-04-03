@@ -2,6 +2,8 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
+> **Last updated: 2026-04-03** — AI integration complete (see Part 3 and Part 4 for changes).
+
 ---
 
 ## Part 1 — What Is This Thing, In Plain English
@@ -45,9 +47,13 @@ Every hour at :00 UTC
 │  auto_research.py runs          │
 │  - Calls Manifold API           │
 │  - Gets 100 markets             │
-│  - Scores each with 3 strategies│
-│  - Saves results to             │
-│    market_research.json         │
+│  - Filters: resolved, low liq   │
+│  - Scores with 3 strategies     │
+│  - Sorts by confidence          │
+│  - AI analysis on top 5 ──────► deepseek-r1:14b (local, free)
+│    (YES/NO/SKIP + reasoning)    │  ~60s per market on CPU
+│  - Blends stat + AI confidence  │
+│  - Saves to market_research.json│
 └─────────────────────────────────┘
         │
         │  (15 minutes pass)
@@ -141,11 +147,47 @@ Opposite logic: if something is at 85% probability, it's probably overpriced. Be
 if current_volume > avg_volume * 2:
     return "YES" if probability > 0.5 else "NO"
 ```
-If a market suddenly has a lot of activity (2x the average), something is happening — bet in the direction the market is already leaning. The problem: `avg_volume` is hardcoded to 100, so every market with volume over 200 triggers this. It fires constantly.
+If a market suddenly has a lot of activity (2x the average of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now calculated from the actual batch of markets fetched each run (was hardcoded to 100 before, which caused it to fire on nearly everything).
 
 **The voting system** — `analyze_market_for_trading()` runs all 3 strategies on a market, counts the YES votes vs NO votes, and sets `confidence = votes_for_winner / total_votes`. So if 2 strategies say NO and 1 says YES, confidence is 0.67 (67%).
 
 **The honest problem with this:** The confidence scores cluster around 0.65 because almost everything that passes the volume spike threshold gets a 65% score (only 1 of 1 strategies fired, so 1/1 = 100%... wait, actually the issue is different — see Part 4 for the real breakdown).
+
+---
+
+#### `manifold_bot/ai_analyzer.py` ← new
+**What it does:** Sends a market question to a local AI model and asks whether it's mispriced.
+
+Two backends, tried in order:
+1. **Ollama** at `localhost:11434` — runs `deepseek-r1:14b` locally on the server. Free, no API cost, ~60 seconds per market on CPU.
+2. **DeepSeek API** — fallback only if Ollama is unreachable. Uses `DEEPSEEK_API_KEY` already on the server.
+
+What it sends to the AI (simplified):
+```
+Question: "Will X happen by 2027?"
+Current probability: 72%
+Volume: $5,200
+Liquidity: $1,400
+Close date: 2027-01-01
+
+Is this mispriced? Should we bet YES, NO, or skip?
+```
+
+What it gets back:
+```json
+{
+  "recommendation": "NO",
+  "confidence": 0.78,
+  "estimated_true_probability": 0.45,
+  "reasoning": "72% seems high — similar events have resolved NO 60% of the time.",
+  "risk_factors": "Could change if new legislation passes."
+}
+```
+
+**How confidence blending works in auto_research.py:**
+- AI agrees with statistical signal → `confidence = 0.4 × stat + 0.6 × AI`
+- AI disagrees → `confidence = stat × 0.4` (penalised, very unlikely to reach 65% threshold)
+- AI says SKIP → statistical confidence unchanged, no AI boost
 
 ---
 
@@ -271,68 +313,47 @@ Log of every trade the bot has actually executed. 8 trades total so far.
 
 ---
 
-## Part 4 — What's Actually Wrong With The Algorithm
+## Part 4 — Algorithm Problems: What Was Wrong, What's Fixed
 
-This is the honest part. The strategies work in theory but have real problems in practice.
+### ✅ Fixed — Volume Spike Hardcoded Threshold
 
-### Problem 1 — Volume Spike Dominates Everything
+`avg_volume` was hardcoded to `100`, which caused the volume spike strategy to fire on almost every market with any activity. It now uses the real average volume of the 100 markets fetched each run, so only genuinely unusual volume triggers it.
 
-The `avg_volume` threshold is hardcoded to `100`. Manifold markets routinely have volume well above 200. So `volume_spike_strategy` fires on basically every market with any activity. When it's the only signal that fired on a market, the confidence is `1/1 = 1.0` (100%). But then `auto_research.py` hardcodes its confidence to `0.65`:
+### ✅ Fixed — No Real Signal (AI integration added)
 
-```python
-volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
-if volume_rec:
-    strategies.append({
-        'strategy': 'volume_spike',
-        'recommendation': volume_rec,
-        'confidence': 0.65  # ← hardcoded, ignores the voting result
-    })
-```
+The old strategies only looked at the current probability number — they had no idea what the market question actually said. `ai_analyzer.py` now reads the question and reasons about whether the probability makes sense. The top 5 candidates each run get AI-scored, and confidence is blended:
+- AI agrees → boosted confidence (harder to game with weak stats)
+- AI disagrees → penalised to 40% (very unlikely to pass the 65% trading threshold)
 
-So no matter what, volume spike markets get exactly 65% confidence. This floods the recommendations list with mediocre signals all at the same score.
+### Still present — Mean Reversion and Probability Direction Conflict
 
-### Problem 2 — No Real Signal
-
-All 3 strategies only look at the **current probability** number. None of them look at:
-- How the probability has **changed over time** (trend)
-- What the **question actually says** (content/context)
-- Whether the market has **good resolution criteria** (will it actually close?)
-- What related markets are doing
-- Any external data (news, outcomes in similar past markets)
-
-A market at 72% probability could be at 72% because it's genuinely likely, or because it was at 30% last week and shot up on news. The strategies can't tell the difference.
-
-### Problem 3 — Mean Reversion and Probability Direction Conflict
-
-These two strategies fundamentally disagree. If a market is at 75%:
+These two strategies fundamentally disagree at the same probability levels. If a market is at 75%:
 - Probability Direction says: "Bet YES — momentum is up"
 - Mean Reversion says: "Bet NO — it's too high, it'll come down"
 
-When both fire on the same market with opposite signals, they cancel out (1 YES vs 1 NO = tie = skip). Neither strategy is provably better. They just add noise.
+When both fire they cancel out (tie = skip). The AI layer above them partially compensates for this — if the stats cancel out but AI has conviction, AI can still push the score.
 
-### Problem 4 — All Current Bets Are NO at 50%
+### Still present — All Current Bets Are NO at 50%
 
-Looking at the state file: every single open position is a NO bet placed at exactly 50% probability. That means:
-- Payout if win: `$X / 0.50 = 2x` — barely better than a coin flip
-- These are the worst-value trades possible on a prediction market
-
-The bot found markets at 50% and said "bet NO" via volume spike (prob < 0.5 at the exact threshold). It's essentially flipping coins.
+Every open position is a NO bet at exactly 50% probability — payout of 2x, barely better than a coin flip. These were placed before the AI integration. Future trades will require AI agreement, which should avoid this.
 
 ---
 
-## Part 5 — What Needs To Change
+## Part 5 — What's Next
 
-To make this actually good, here's what matters, in priority order:
+**Done:**
+- ✅ AI integration (DeepSeek local model)
+- ✅ Volume spike avg fixed
 
-**1. Real confidence scoring** — Replace hardcoded `0.65` with a score derived from actual market properties: how far from 50% the probability is, how much volume, how close to resolution, etc.
+**Still todo, in priority order:**
 
-**2. AI-powered market reading** — Send the actual question text to DeepSeek (the LLM already running on the server) and ask: "Does this market look mispriced? What do you think the real probability is?" This is the single highest-value change.
+**1. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No signal there.
 
-**3. Drop mean reversion OR probability direction** — They conflict. Pick one philosophy: momentum trading OR contrarian. The current setup has both and they cancel each other out half the time.
+**2. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
 
-**4. Fix the volume spike avg** — Calculate actual average volume from the fetched markets rather than hardcoding 100.
+**3. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
 
-**5. Avoid 50% markets** — Add a filter: don't trade any market where the probability is between 45-55%. There's no signal there.
+**4. SQLite storage** — Replace the flat JSON state files with a proper database.
 
 ---
 
