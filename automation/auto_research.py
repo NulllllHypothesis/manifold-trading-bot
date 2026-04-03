@@ -19,6 +19,11 @@ from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 
+# Confidence threshold must match auto_trader.py min_confidence (0.65).
+# Cap is set one step below so weak-stat markets can never slip through.
+_TRADING_THRESHOLD = 0.65
+_WEAK_STAT_CAP = _TRADING_THRESHOLD - 0.01  # 0.64
+
 class MarketResearcher:
     """Automated market research and analysis"""
 
@@ -78,7 +83,7 @@ class MarketResearcher:
                         'confidence': 0.7
                     })
 
-                # Volume spike strategy — use median volume of fetched markets as baseline
+                # Volume spike strategy — use mean volume of fetched markets as baseline
                 avg_volume = sum(m.get('volume', 0) for m in markets) / max(len(markets), 1)
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
@@ -144,13 +149,18 @@ class MarketResearcher:
                     ai = ai_results.get(rec['market_id'])
                     is_ai_candidate = rec['market_id'] in top_candidate_ids
 
-                    # Mark clearly whether AI actually ran or this market was out of scope
+                    # ai_was_candidate: was this market sent to AI at all?
+                    # ai_returned_skip: AI ran but said SKIP (vs not in top 5)
+                    rec['ai_was_candidate'] = is_ai_candidate
+                    rec['ai_returned_skip'] = False
+
                     if not ai or ai['recommendation'] == 'SKIP':
                         rec['ai_recommendation'] = 'SKIP'
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
-                        rec['ai_ran'] = is_ai_candidate  # True = ran but said SKIP; False = not in top 5
+                        if is_ai_candidate:
+                            rec['ai_returned_skip'] = True
                         continue
 
                     rec['ai_recommendation'] = ai['recommendation']
@@ -158,23 +168,20 @@ class MarketResearcher:
                     rec['ai_reasoning'] = ai['reasoning']
                     rec['ai_source'] = ai['source']
                     rec['ai_estimated_probability'] = ai['estimated_true_probability']
-                    rec['ai_ran'] = True
 
                     # Blend statistical + AI confidence
-                    # Require stat_conf >= 0.55 before AI can boost above threshold —
-                    # prevents a weak stat signal getting lifted purely by AI confidence
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
-                        if stat_conf >= 0.55:
-                            # AI agrees and stats are reasonable — blend with AI weighted higher
-                            rec['confidence'] = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
-                        else:
-                            # Stats too weak — AI can only bring it up to a capped level
-                            rec['confidence'] = round(min(0.4 * stat_conf + 0.6 * ai['confidence'], 0.64), 3)
+                        blended = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
+                        if stat_conf < 0.55:
+                            # Stat signal too weak — cap below trading threshold
+                            blended = min(blended, _WEAK_STAT_CAP)
+                        rec['confidence'] = blended
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
-                    else:
-                        # AI disagrees — penalise confidence significantly
+                    elif ai['recommendation'] in ('YES', 'NO'):
+                        # AI has a real opposing opinion — penalize
                         rec['confidence'] = round(stat_conf * 0.4, 3)
+                    # if ai returned something unexpected, leave confidence unchanged
 
             # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
@@ -189,6 +196,7 @@ class MarketResearcher:
     def save_research(self, recommendations: List[Dict]):
         """Save research results to file"""
         research_data = {
+            'schema_version': 2,  # v2 adds ai_was_candidate, ai_returned_skip, ai_recommendation fields
             'timestamp': datetime.now().isoformat(),
             'recommendations': recommendations,
             'total_markets_analyzed': len(recommendations)
