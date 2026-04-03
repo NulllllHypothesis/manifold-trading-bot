@@ -123,13 +123,13 @@ class MarketResearcher:
             # Sort by confidence (highest first) before AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
-            # AI analysis — run on top candidates only (cap to avoid slow runtimes)
-            top_candidates = recommendations[:20]
+            # AI analysis — only top 5 candidates (local model is CPU-only, ~60s per market)
+            top_candidates = recommendations[:5]
             candidate_markets = [m for m in markets if m.get('id') in {r['market_id'] for r in top_candidates}]
 
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
-                ai_results = batch_analyze(candidate_markets, max_markets=20, delay=0.5)
+                ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0.5)
 
                 for rec in recommendations:
                     ai = ai_results.get(rec['market_id'])
