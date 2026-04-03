@@ -157,12 +157,15 @@ class TestConfidenceBlending(unittest.TestCase):
         """Replicate the blending logic from auto_research.py inline."""
         from manifold_bot.config import MIN_CONFIDENCE
         WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # 0.64
-        STAT_BOOST_FLOOR = MIN_CONFIDENCE        # 0.65 — stat must be trade-worthy before AI can boost
+        STAT_BOOST_FLOOR = MIN_CONFIDENCE        # 0.65
+        MAX_AI_BOOST = MIN_CONFIDENCE + 0.10    # 0.75
 
         if ai_rec == stat_rec:
             blended = round(0.4 * stat_conf + 0.6 * ai_conf, 3)
-            if stat_conf < STAT_BOOST_FLOOR:   # < only: stat=0.65 already passes, no cap needed
+            if stat_conf < STAT_BOOST_FLOOR:
                 blended = min(blended, WEAK_STAT_CAP)
+            elif stat_conf <= STAT_BOOST_FLOOR + 0.001:
+                blended = min(blended, MAX_AI_BOOST)
             return blended
         elif ai_rec in ('YES', 'NO'):
             # Penalty scales with AI confidence: certain AI penalizes harder
@@ -187,10 +190,11 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertLess(result, 0.65)
         self.assertEqual(result, 0.64)
 
-    def test_stat_exactly_at_floor_is_not_capped(self):
-        # stat=0.65 (exactly at floor) → < does NOT fire, AI can boost freely
+    def test_stat_exactly_at_floor_is_capped_at_max_boost(self):
+        # stat=0.65 (exactly at floor) → capped at _MAX_AI_BOOST (0.75), not freely boosted
         result = self._blend(0.65, 0.99, 'NO', 'NO')
-        self.assertGreater(result, 0.64)
+        self.assertGreater(result, 0.65)   # can go above threshold (modest boost allowed)
+        self.assertLessEqual(result, 0.75) # but capped at MAX_AI_BOOST
 
     def test_stat_above_floor_is_not_capped(self):
         # stat=0.66 (above floor) → AI can boost freely

@@ -109,7 +109,7 @@ Pick whatever interests you. Create a branch, build it, open a PR.
   - If AI agrees with stats: confidence boosted (60% AI / 40% stat blend)
   - If AI disagrees: confidence penalised to 40% of original (effectively blocked from trading)
 - [x] Fixed volume spike `avg_volume` — now uses **median** of fetched markets (mean was skewed by outliers)
-- [x] 23 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
+- [x] 24 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
 - [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 5 markets to stay within hourly window)
 - [x] `MIN_CONFIDENCE` moved to `config.py` — single source of truth for trading threshold across trader + researcher
 - [x] DeepSeek API fallback: 2s rate-limit delay enforced regardless of caller, warning logged when used

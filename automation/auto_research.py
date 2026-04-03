@@ -22,10 +22,11 @@ from manifold_bot.config import MIN_CONFIDENCE
 
 # Single source of truth for the trading threshold — imported from config.py.
 # auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
-_WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets: 0.64
-# Floor is set equal to MIN_CONFIDENCE: stat signal must already be trade-worthy
-# before AI can boost it further. Prevents AI inflating a borderline stat score.
+_WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets (stat < floor): 0.64
+# Stat must be strictly above floor before AI can boost freely.
+# At exactly 0.65, AI is still capped to MAX_AI_BOOST to prevent turbo-boosting a borderline signal.
 _STAT_BOOST_FLOOR = MIN_CONFIDENCE       # 0.65
+_MAX_AI_BOOST = MIN_CONFIDENCE + 0.10   # max blended confidence for exactly-floor markets: 0.75
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -92,6 +93,8 @@ class MarketResearcher:
                 if missing_vol:
                     print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
                 mid = len(volumes) // 2
+                # ~mid == -(mid+1): for even lists averages the two middle values;
+                # for odd lists volumes[mid] == volumes[~mid] only when len==1, otherwise mid != ~mid.
                 avg_volume = (volumes[mid] + volumes[~mid]) / 2 if volumes else 0
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
@@ -191,9 +194,13 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         blended = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
-                        if stat_conf < _STAT_BOOST_FLOOR:   # < only: stat=0.65 already passes threshold, no cap needed
-                            # Stat signal too weak — cap below trading threshold
+                        if stat_conf < _STAT_BOOST_FLOOR:
+                            # Stat too weak — cap below trading threshold
                             blended = min(blended, _WEAK_STAT_CAP)
+                        elif stat_conf <= _STAT_BOOST_FLOOR + 0.001:
+                            # Borderline (exactly at floor ± float noise) — modest boost only
+                            blended = min(blended, _MAX_AI_BOOST)
+                        # stat_conf clearly above floor: AI can boost freely
                         rec['confidence'] = blended
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
