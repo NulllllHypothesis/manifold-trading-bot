@@ -142,23 +142,46 @@ class MarketResearcher:
             top_candidate_ids = {r['market_id'] for r in top_candidates}
             candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
 
-            # Warn if market objects didn't match — means Manifold returned a different ID field
+            # Guard: if the count doesn't match, the market objects use a different ID field
+            # (e.g. 'slug' or 'url') and AI analysis cannot be reliably performed.
+            # Rather than silently writing schema_version=2 with all ai_was_candidate=False
+            # (which would cause auto_trader.py to trade without AI validation), we raise a
+            # clear error so the caller can catch it and write schema_version=1 instead,
+            # causing the trader's schema guard to correctly block trading.
             if len(candidate_markets) != len(top_candidates):
                 sample_keys = list(markets[0].keys())[:8] if markets else []
-                print(f"  Warning: expected {len(top_candidates)} candidate markets, found {len(candidate_markets)}. "
-                      f"AI pass may be partial. Sample market keys: {sample_keys}")
+                raise ValueError(
+                    f"candidate_markets length mismatch: expected {len(top_candidates)}, "
+                    f"got {len(candidate_markets)}. Market objects may not use 'id' as their "
+                    f"primary key. Sample market keys: {sample_keys}. "
+                    f"Cannot safely write schema_version=2; aborting AI pass to prevent "
+                    f"unvalidated trading."
+                )
 
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
+                ai_results = {}
                 try:
-                    # delay=0 for Ollama (local CPU, ~60s/market throttles naturally).
-                    # If DeepSeek API fallback is active, batch_analyze auto-applies 2s delay.
-                    ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0)
+                    # delay=2 makes the rate-limit intent explicit at the call site for both
+                    # Ollama and any DeepSeek API fallback. Ollama may no-op the delay
+                    # internally, but the caller's intent is clear and not reliant on
+                    # undocumented internal behaviour.
+                    # per_market_timeout=90 prevents a hung Ollama call from stalling the
+                    # hourly cron job indefinitely.
+                    ai_results = batch_analyze(
+                        candidate_markets,
+                        max_markets=5,
+                        delay=2,
+                        per_market_timeout=90,
+                    )
                     # Warn if any result came from the paid API fallback
                     for r in ai_results.values():
                         if r.get('source') == 'deepseek_api':
                             print("  Warning: AI fallback to DeepSeek API was used — Ollama may be down. Check server.")
                             break
+                except TimeoutError as e:
+                    print(f"  Warning: AI analysis timed out ({e}), continuing without AI scores")
+                    ai_results = {}
                 except Exception as e:
                     print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
                     ai_results = {}
@@ -183,8 +206,12 @@ class MarketResearcher:
 
                     rec['ai_recommendation'] = ai['recommendation']
                     rec['ai_confidence'] = ai['confidence']
-                    # Sanitize: strip non-printable chars, cap length, ASCII-safe for JSON/display
-                    rec['ai_reasoning'] = ''.join(c for c in ai.get('reasoning', '') if c.isprintable())[:300]
+                    # Sanitize: guarantee ASCII-safe output for JSON/log/Telegram display.
+                    # Encode to ASCII replacing any non-ASCII bytes (including Unicode
+                    # printable-but-dangerous chars like U+202E RLO or zero-width joiners),
+                    # then decode back to str and cap at 300 characters.
+                    ai_reasoning = ai.get('reasoning', '')[:500].encode('ascii', errors='replace').decode('ascii')[:300]
+                    rec['ai_reasoning'] = ai_reasoning
                     rec['ai_source'] = ai['source']
                     rec['ai_estimated_probability'] = ai['estimated_true_probability']
 
@@ -195,19 +222,19 @@ class MarketResearcher:
                         if stat_conf < _STAT_BOOST_FLOOR:
                             # Stat too weak — cap below trading threshold
                             blended = min(blended, _WEAK_STAT_CAP)
-                        elif stat_conf <= _STAT_BOOST_FLOOR + 0.001:
-                            # Borderline (exactly at floor ± float noise) — modest boost only
-                            blended = min(blended, _MAX_AI_BOOST)
-                        # stat_conf clearly above floor: AI can boost freely
+                        else:
+                            blended = min(blended, stat_conf + 0.10)
                         rec['confidence'] = blended
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
-                        # AI disagrees — scale penalty by AI confidence.
-                        # Formula: penalty = 0.4 + (1 - ai_conf) * 0.4
-                        #   ai_conf=1.0 → penalty=0.40 (AI certain → hardest penalty, keeps 40% of stat score)
-                        #   ai_conf=0.0 → penalty=0.80 (AI uncertain → softest penalty, keeps 80% of stat score)
-                        penalty = 0.4 + (1 - ai['confidence']) * 0.4
-                        rec['confidence'] = round(stat_conf * penalty, 3)
+                        # AI disagrees — scale the confidence multiplier by AI confidence.
+                        # Formula: confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
+                        #   ai_conf=1.0 → confidence_multiplier=0.40 (AI certain → hardest reduction, keeps 40% of stat score)
+                        #   ai_conf=0.0 → confidence_multiplier=0.80 (AI uncertain → softest reduction, keeps 80% of stat score)
+                        # Clamp ai_conf to [0.0, 1.0] to guard against malformed AI responses.
+                        ai_conf = max(0.0, min(1.0, ai['confidence']))
+                        confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
+                        rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
                     # if ai returned something unexpected, leave confidence unchanged
 
             # Re-sort after AI pass
@@ -222,8 +249,19 @@ class MarketResearcher:
 
     def save_research(self, recommendations: List[Dict]):
         """Save research results to file"""
+        # Determine schema version based on whether AI candidate fields are present.
+        # If any recommendation is missing 'ai_was_candidate' it means the AI pass was
+        # skipped or aborted (e.g. due to a candidate_markets mismatch), so we must write
+        # schema_version=1 to ensure auto_trader.py's schema guard blocks trading rather
+        # than proceeding without AI validation.
+        has_ai_fields = all(
+            'ai_was_candidate' in rec
+            for rec in recommendations
+        ) if recommendations else False
+        schema_version = 2 if has_ai_fields else 1
+
         research_data = {
-            'schema_version': 2,  # v2 adds ai_was_candidate, ai_returned_skip, ai_recommendation fields
+            'schema_version': schema_version,  # v2 adds ai_was_candidate, ai_returned_skip, ai_recommendation fields
             'timestamp': datetime.now().isoformat(),
             'recommendations': recommendations,
             'total_markets_analyzed': len(recommendations)
@@ -251,7 +289,7 @@ class MarketResearcher:
         with open(self.research_file, 'w') as f:
             json.dump(data, f, indent=2)
 
-        print(f"  Research saved to {self.research_file}")
+        print(f"  Research saved to {self.research_file} (schema_version={schema_version})")
 
     def run_hourly_research(self):
         """Main research loop"""

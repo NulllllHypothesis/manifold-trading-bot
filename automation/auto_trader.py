@@ -42,9 +42,21 @@ class AutoTrader:
         try:
             with open(self.research_file, 'r') as f:
                 data = json.load(f)
-            latest = data.get('latest')
-            # File structure: { "latest": { "schema_version": 2, ... }, "history": [...] }
-            # schema_version is nested inside 'latest', so we read it from there.
+
+            # Determine whether the file is flat (written directly by save_research())
+            # or nested under a 'latest' key.
+            # auto_research.py writes research_data directly to the file (flat structure),
+            # so schema_version lives at the top level of data, not under data['latest'].
+            # We support both layouts for forward-compatibility:
+            #   - Flat:   { "schema_version": 2, "recommendations": [...], ... }
+            #   - Nested: { "latest": { "schema_version": 2, "recommendations": [...] }, "history": [...] }
+            if 'latest' in data:
+                # Nested layout
+                latest = data['latest']
+            else:
+                # Flat layout — the whole object is the research record
+                latest = data
+
             schema = (latest or {}).get('schema_version', 1)
             if schema < 2:
                 # OpenClaw captures stdout and forwards it to Telegram — this alert reaches the group
