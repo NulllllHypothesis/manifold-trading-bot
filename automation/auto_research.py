@@ -125,19 +125,32 @@ class MarketResearcher:
 
             # AI analysis — only top 5 candidates (local model is CPU-only, ~60s per market)
             top_candidates = recommendations[:5]
-            candidate_markets = [m for m in markets if m.get('id') in {r['market_id'] for r in top_candidates}]
+            top_candidate_ids = {r['market_id'] for r in top_candidates}
+            candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
+
+            # Warn if market objects didn't match — means Manifold returned a different ID field
+            if len(candidate_markets) != len(top_candidates):
+                print(f"  Warning: expected {len(top_candidates)} candidate markets, found {len(candidate_markets)}. AI pass may be partial.")
 
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
-                ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0.5)
+                try:
+                    ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0.5)
+                except Exception as e:
+                    print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
+                    ai_results = {}
 
                 for rec in recommendations:
                     ai = ai_results.get(rec['market_id'])
+                    is_ai_candidate = rec['market_id'] in top_candidate_ids
+
+                    # Mark clearly whether AI actually ran or this market was out of scope
                     if not ai or ai['recommendation'] == 'SKIP':
                         rec['ai_recommendation'] = 'SKIP'
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
+                        rec['ai_ran'] = is_ai_candidate  # True = ran but said SKIP; False = not in top 5
                         continue
 
                     rec['ai_recommendation'] = ai['recommendation']
@@ -145,12 +158,19 @@ class MarketResearcher:
                     rec['ai_reasoning'] = ai['reasoning']
                     rec['ai_source'] = ai['source']
                     rec['ai_estimated_probability'] = ai['estimated_true_probability']
+                    rec['ai_ran'] = True
 
                     # Blend statistical + AI confidence
+                    # Require stat_conf >= 0.55 before AI can boost above threshold —
+                    # prevents a weak stat signal getting lifted purely by AI confidence
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
-                        # AI agrees — boost confidence, weight AI higher (60/40)
-                        rec['confidence'] = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
+                        if stat_conf >= 0.55:
+                            # AI agrees and stats are reasonable — blend with AI weighted higher
+                            rec['confidence'] = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
+                        else:
+                            # Stats too weak — AI can only bring it up to a capped level
+                            rec['confidence'] = round(min(0.4 * stat_conf + 0.6 * ai['confidence'], 0.64), 3)
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     else:
                         # AI disagrees — penalise confidence significantly

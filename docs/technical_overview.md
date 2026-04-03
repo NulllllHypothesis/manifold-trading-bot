@@ -147,7 +147,7 @@ Opposite logic: if something is at 85% probability, it's probably overpriced. Be
 if current_volume > avg_volume * 2:
     return "YES" if probability > 0.5 else "NO"
 ```
-If a market suddenly has a lot of activity (2x the average of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now calculated from the actual batch of markets fetched each run (was hardcoded to 100 before, which caused it to fire on nearly everything).
+If a market suddenly has a lot of activity (2x the mean volume of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now calculated as the arithmetic mean of all fetched markets each run (was hardcoded to 100 before, which caused it to fire on nearly everything).
 
 **The voting system** — `analyze_market_for_trading()` runs all 3 strategies on a market, counts the YES votes vs NO votes, and sets `confidence = votes_for_winner / total_votes`. So if 2 strategies say NO and 1 says YES, confidence is 0.67 (67%).
 
