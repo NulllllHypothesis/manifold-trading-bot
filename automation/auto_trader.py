@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
 
 class AutoTrader:
     """Automated trading with risk management"""
@@ -30,7 +30,7 @@ class AutoTrader:
         # Risk management parameters
         self.max_positions = 5
         self.max_position_size = 0.1  # 10% of balance per trade
-        self.min_confidence = 0.65  # 65% confidence minimum
+        self.min_confidence = MIN_CONFIDENCE
         self.cooldown_hours = 6  # Hours before trading same market again
 
     def load_latest_research(self) -> Optional[Dict]:

@@ -24,3 +24,4 @@ ENDPOINTS = {
 INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
 MAX_BET_AMOUNT = 100
+MIN_CONFIDENCE = 0.65  # Trading threshold — must stay in sync with AutoTrader.min_confidence

@@ -18,11 +18,12 @@ from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
+from manifold_bot.config import MIN_CONFIDENCE
 
-# Confidence threshold must match auto_trader.py min_confidence (0.65).
-# Cap is set one step below so weak-stat markets can never slip through.
-_TRADING_THRESHOLD = 0.65
-_WEAK_STAT_CAP = _TRADING_THRESHOLD - 0.01  # 0.64
+# Single source of truth for the trading threshold — imported from config.py.
+# auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
+_WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets: 0.64
+_STAT_BOOST_FLOOR = 0.60                 # stat_conf must be >= this for AI to push above threshold
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -140,7 +141,14 @@ class MarketResearcher:
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
                 try:
-                    ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0.5)
+                    # delay=0 because Ollama is local CPU (~60s/market naturally throttles);
+                    # if DeepSeek API fallback is used, batch_analyze logs a warning per call
+                    ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0)
+                    # Warn if any result came from the paid API fallback
+                    for r in ai_results.values():
+                        if r.get('source') == 'deepseek_api':
+                            print("  Warning: AI fallback to DeepSeek API was used — Ollama may be down. Check server.")
+                            break
                 except Exception as e:
                     print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
                     ai_results = {}
@@ -173,7 +181,7 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         blended = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
-                        if stat_conf < 0.55:
+                        if stat_conf < _STAT_BOOST_FLOOR:
                             # Stat signal too weak — cap below trading threshold
                             blended = min(blended, _WEAK_STAT_CAP)
                         rec['confidence'] = blended
