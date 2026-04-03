@@ -81,7 +81,11 @@ module.exports = async ({ github, context, core }) => {
   }
 
   // ── Step 2: Auto-fix file-specific issues ─────────────────────────────────
-  const fixableIssues = (review.issues || []).filter(i => i.file && i.fix);
+  // Never auto-fix workflow files — GitHub requires a separate `workflows` permission
+  // to push changes to .github/workflows/, and granting it would be overpowered.
+  const fixableIssues = (review.issues || []).filter(
+    i => i.file && i.fix && !i.file.startsWith('.github/workflows/')
+  );
   const fixedFiles = [];
 
   for (const issue of fixableIssues) {
