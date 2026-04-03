@@ -243,7 +243,8 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0) -> D
             source = result["source"]
             print(f"  AI [{source}] {market.get('question', '')[:60]}...")
             print(f"       → {rec} ({conf:.0%} confidence): {result['reasoning'][:80]}")
-            # Apply rate-limiting only when using the paid DeepSeek API fallback
+            # DeepSeek API fallback always enforces 2s regardless of caller-supplied delay.
+            # This is intentional: delay=0 is safe for Ollama (CPU-bound) but not for a paid API.
             effective_delay = 2.0 if source == "deepseek_api" else delay
         else:
             print(f"  AI analysis unavailable for {market_id}")

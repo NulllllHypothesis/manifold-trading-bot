@@ -86,11 +86,13 @@ class MarketResearcher:
                         'confidence': 0.7
                     })
 
-                # Volume spike strategy — use mean volume of fetched markets as baseline
+                # Volume spike — use median volume to resist outlier inflation
+                volumes = sorted(m.get('volume') or 0 for m in markets)
                 missing_vol = sum(1 for m in markets if m.get('volume') is None)
                 if missing_vol:
                     print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
-                avg_volume = sum(m.get('volume') or 0 for m in markets) / max(len(markets), 1)
+                mid = len(volumes) // 2
+                avg_volume = (volumes[mid] + volumes[~mid]) / 2 if volumes else 0
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
                     strategies.append({
@@ -188,7 +190,7 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         blended = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
-                        if stat_conf < _STAT_BOOST_FLOOR:
+                        if stat_conf <= _STAT_BOOST_FLOOR:
                             # Stat signal too weak — cap below trading threshold
                             blended = min(blended, _WEAK_STAT_CAP)
                         rec['confidence'] = blended

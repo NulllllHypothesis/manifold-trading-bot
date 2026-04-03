@@ -108,10 +108,13 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 - [x] Wired into `auto_research.py` — AI runs on top 5 candidates per hourly cycle
   - If AI agrees with stats: confidence boosted (60% AI / 40% stat blend)
   - If AI disagrees: confidence penalised to 40% of original (effectively blocked from trading)
-- [x] Fixed volume spike `avg_volume` — now uses actual average of fetched markets (was hardcoded to 100)
-- [x] 14 tests in `tests/test_ai.py` — all passing
+- [x] Fixed volume spike `avg_volume` — now uses **median** of fetched markets (mean was skewed by outliers)
+- [x] 23 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
 - [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 5 markets to stay within hourly window)
-- [ ] PR to main — pending
+- [x] `MIN_CONFIDENCE` moved to `config.py` — single source of truth for trading threshold across trader + researcher
+- [x] DeepSeek API fallback: 2s rate-limit delay enforced regardless of caller, warning logged when used
+- [x] Schema version guard in `auto_trader.py` — refuses to trade on pre-AI (v1) research files
+- [ ] PR to main — pending agent review approval
 
 > No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
 

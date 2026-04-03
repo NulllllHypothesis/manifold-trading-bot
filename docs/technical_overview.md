@@ -147,7 +147,7 @@ Opposite logic: if something is at 85% probability, it's probably overpriced. Be
 if current_volume > avg_volume * 2:
     return "YES" if probability > 0.5 else "NO"
 ```
-If a market suddenly has a lot of activity (2x the mean volume of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now calculated as the arithmetic mean of all fetched markets each run (was hardcoded to 100 before, which caused it to fire on nearly everything).
+If a market suddenly has a lot of activity (2x the median volume of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now the **median** of all fetched markets each run (was hardcoded to 100 before; switched from mean to median to avoid a few high-volume markets inflating the baseline and suppressing all signals).
 
 **The voting system** — `analyze_market_for_trading()` runs all 3 strategies on a market, counts the YES votes vs NO votes, and sets `confidence = votes_for_winner / total_votes`. So if 2 strategies say NO and 1 says YES, confidence is 0.67 (67%).
 
@@ -185,9 +185,12 @@ What it gets back:
 ```
 
 **How confidence blending works in auto_research.py:**
-- AI agrees with statistical signal → `confidence = 0.4 × stat + 0.6 × AI`
+- AI agrees AND `stat_conf > 0.65` → `confidence = 0.4 × stat + 0.6 × AI` (AI can freely boost)
+- AI agrees AND `stat_conf ≤ 0.65` → blended result is capped at 0.64 (below trading threshold — AI cannot rescue a weak stat signal)
 - AI disagrees → `confidence = stat × 0.4` (penalised, very unlikely to reach 65% threshold)
 - AI says SKIP → statistical confidence unchanged, no AI boost
+
+`MIN_CONFIDENCE = 0.65` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change.
 
 ---
 

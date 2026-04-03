@@ -24,4 +24,8 @@ ENDPOINTS = {
 INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
 MAX_BET_AMOUNT = 100
-MIN_CONFIDENCE = 0.65  # Trading threshold — must stay in sync with AutoTrader.min_confidence
+# Trading confidence threshold.
+# auto_trader.py: AutoTrader.min_confidence = MIN_CONFIDENCE
+# auto_research.py: _WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01  (cap is coupled — changes here affect both)
+# auto_research.py: _STAT_BOOST_FLOOR = MIN_CONFIDENCE      (floor is coupled — changes here affect both)
+MIN_CONFIDENCE = 0.65

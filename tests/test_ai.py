@@ -161,7 +161,7 @@ class TestConfidenceBlending(unittest.TestCase):
 
         if ai_rec == stat_rec:
             blended = round(0.4 * stat_conf + 0.6 * ai_conf, 3)
-            if stat_conf < STAT_BOOST_FLOOR:
+            if stat_conf <= STAT_BOOST_FLOOR:   # <= so exactly-at-floor is also capped
                 blended = min(blended, WEAK_STAT_CAP)
             return blended
         elif ai_rec in ('YES', 'NO'):
@@ -185,9 +185,14 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertLess(result, 0.65)
         self.assertEqual(result, 0.64)
 
-    def test_stat_exactly_at_floor_is_not_capped(self):
-        # stat=0.65 (exactly at floor) → cap does NOT apply
-        result = self._blend(0.65, 0.90, 'NO', 'NO')
+    def test_stat_exactly_at_floor_is_capped(self):
+        # stat=0.65 (exactly at floor, <= applies) → still capped at 0.64
+        result = self._blend(0.65, 0.99, 'NO', 'NO')
+        self.assertLessEqual(result, 0.64)
+
+    def test_stat_above_floor_is_not_capped(self):
+        # stat=0.66 (strictly above floor) → cap does NOT apply, AI can boost freely
+        result = self._blend(0.66, 0.90, 'NO', 'NO')
         self.assertGreater(result, 0.64)
 
     def test_ai_disagree_penalizes_confidence(self):

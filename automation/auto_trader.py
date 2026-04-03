@@ -44,7 +44,9 @@ class AutoTrader:
                 data = json.load(f)
             schema = data.get('schema_version', 1)
             if schema < 2:
-                print(f"Warning: market_research.json is schema v{schema} (pre-AI). Re-run research before trading.")
+                print(f"Error: market_research.json is schema v{schema} (pre-AI integration). "
+                      f"Re-run auto_research.py before trading to get AI-scored recommendations.")
+                return None
             return data.get('latest')
         except Exception as e:
             print(f"Error loading research: {e}")
