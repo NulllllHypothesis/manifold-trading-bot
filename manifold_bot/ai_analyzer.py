@@ -240,13 +240,17 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0) -> D
             results[market_id] = result
             rec = result["recommendation"]
             conf = result["confidence"]
-            print(f"  AI [{result['source']}] {market.get('question', '')[:60]}...")
+            source = result["source"]
+            print(f"  AI [{source}] {market.get('question', '')[:60]}...")
             print(f"       → {rec} ({conf:.0%} confidence): {result['reasoning'][:80]}")
+            # Apply rate-limiting only when using the paid DeepSeek API fallback
+            effective_delay = 2.0 if source == "deepseek_api" else delay
         else:
             print(f"  AI analysis unavailable for {market_id}")
+            effective_delay = delay
 
         count += 1
         if count < len(markets[:max_markets]):
-            time.sleep(delay)
+            time.sleep(effective_delay)
 
     return results

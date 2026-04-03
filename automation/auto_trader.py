@@ -42,7 +42,10 @@ class AutoTrader:
         try:
             with open(self.research_file, 'r') as f:
                 data = json.load(f)
-                return data.get('latest')
+            schema = data.get('schema_version', 1)
+            if schema < 2:
+                print(f"Warning: market_research.json is schema v{schema} (pre-AI). Re-run research before trading.")
+            return data.get('latest')
         except Exception as e:
             print(f"Error loading research: {e}")
             return None

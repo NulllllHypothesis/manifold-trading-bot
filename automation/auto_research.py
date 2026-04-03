@@ -23,7 +23,9 @@ from manifold_bot.config import MIN_CONFIDENCE
 # Single source of truth for the trading threshold — imported from config.py.
 # auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
 _WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets: 0.64
-_STAT_BOOST_FLOOR = 0.60                 # stat_conf must be >= this for AI to push above threshold
+# Floor is set equal to MIN_CONFIDENCE: stat signal must already be trade-worthy
+# before AI can boost it further. Prevents AI inflating a borderline stat score.
+_STAT_BOOST_FLOOR = MIN_CONFIDENCE       # 0.65
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -85,7 +87,10 @@ class MarketResearcher:
                     })
 
                 # Volume spike strategy — use mean volume of fetched markets as baseline
-                avg_volume = sum(m.get('volume', 0) for m in markets) / max(len(markets), 1)
+                missing_vol = sum(1 for m in markets if m.get('volume') is None)
+                if missing_vol:
+                    print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
+                avg_volume = sum(m.get('volume') or 0 for m in markets) / max(len(markets), 1)
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
                     strategies.append({
@@ -136,13 +141,15 @@ class MarketResearcher:
 
             # Warn if market objects didn't match — means Manifold returned a different ID field
             if len(candidate_markets) != len(top_candidates):
-                print(f"  Warning: expected {len(top_candidates)} candidate markets, found {len(candidate_markets)}. AI pass may be partial.")
+                sample_keys = list(markets[0].keys())[:8] if markets else []
+                print(f"  Warning: expected {len(top_candidates)} candidate markets, found {len(candidate_markets)}. "
+                      f"AI pass may be partial. Sample market keys: {sample_keys}")
 
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
                 try:
-                    # delay=0 because Ollama is local CPU (~60s/market naturally throttles);
-                    # if DeepSeek API fallback is used, batch_analyze logs a warning per call
+                    # delay=0 for Ollama (local CPU, ~60s/market throttles naturally).
+                    # If DeepSeek API fallback is active, batch_analyze auto-applies 2s delay.
                     ai_results = batch_analyze(candidate_markets, max_markets=5, delay=0)
                     # Warn if any result came from the paid API fallback
                     for r in ai_results.values():

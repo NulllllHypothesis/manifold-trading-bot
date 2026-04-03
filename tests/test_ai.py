@@ -157,7 +157,7 @@ class TestConfidenceBlending(unittest.TestCase):
         """Replicate the blending logic from auto_research.py inline."""
         from manifold_bot.config import MIN_CONFIDENCE
         WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # 0.64
-        STAT_BOOST_FLOOR = 0.60
+        STAT_BOOST_FLOOR = MIN_CONFIDENCE        # 0.65 — stat must be trade-worthy before AI can boost
 
         if ai_rec == stat_rec:
             blended = round(0.4 * stat_conf + 0.6 * ai_conf, 3)
@@ -169,19 +169,25 @@ class TestConfidenceBlending(unittest.TestCase):
         return stat_conf  # unexpected AI output — unchanged
 
     def test_strong_stat_ai_agree_boosts_above_threshold(self):
-        # stat=0.62, ai=0.90 agree → blended = 0.4*0.62 + 0.6*0.90 = 0.788 > 0.65
-        result = self._blend(0.62, 0.90, 'NO', 'NO')
+        # stat=0.70 (above floor 0.65), ai=0.90 agree → blended = 0.4*0.70 + 0.6*0.90 = 0.82
+        result = self._blend(0.70, 0.90, 'NO', 'NO')
         self.assertGreater(result, 0.65)
 
+    def test_borderline_stat_ai_agree_capped_below_threshold(self):
+        # stat=0.61 (below floor 0.65), ai=0.99 agree → capped at 0.64 despite strong AI
+        result = self._blend(0.61, 0.99, 'YES', 'YES')
+        self.assertLess(result, 0.65)
+        self.assertEqual(result, 0.64)
+
     def test_weak_stat_ai_agree_capped_below_threshold(self):
-        # stat=0.54 (below floor 0.60), ai=0.95 agree → capped at 0.64
+        # stat=0.54 (well below floor), ai=0.95 agree → capped at 0.64
         result = self._blend(0.54, 0.95, 'YES', 'YES')
         self.assertLess(result, 0.65)
         self.assertEqual(result, 0.64)
 
     def test_stat_exactly_at_floor_is_not_capped(self):
-        # stat=0.60 (exactly at floor) → cap does NOT apply
-        result = self._blend(0.60, 0.90, 'NO', 'NO')
+        # stat=0.65 (exactly at floor) → cap does NOT apply
+        result = self._blend(0.65, 0.90, 'NO', 'NO')
         self.assertGreater(result, 0.64)
 
     def test_ai_disagree_penalizes_confidence(self):
@@ -200,10 +206,13 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertAlmostEqual(result, 0.66)
 
     def test_weak_cap_derived_from_min_confidence(self):
-        # Verify the cap is always one tick below the trading threshold
+        # Verify the cap and floor are always derived from the single source of truth
         from manifold_bot.config import MIN_CONFIDENCE
         WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01
+        STAT_BOOST_FLOOR = MIN_CONFIDENCE
         self.assertAlmostEqual(WEAK_STAT_CAP, 0.64)
+        self.assertAlmostEqual(STAT_BOOST_FLOOR, 0.65)
+        self.assertLess(WEAK_STAT_CAP, STAT_BOOST_FLOOR)  # cap must always be below floor
 
 
 if __name__ == '__main__':
