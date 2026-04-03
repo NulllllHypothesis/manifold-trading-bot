@@ -185,12 +185,17 @@ What it gets back:
 ```
 
 **How confidence blending works in auto_research.py:**
-- AI agrees AND `stat_conf > 0.65` → `confidence = 0.4 × stat + 0.6 × AI` (AI can freely boost)
-- AI agrees AND `stat_conf ≤ 0.65` → blended result is capped at 0.64 (below trading threshold — AI cannot rescue a weak stat signal)
-- AI disagrees → `confidence = stat × 0.4` (penalised, very unlikely to reach 65% threshold)
+- AI agrees AND `stat_conf < 0.65` → blended result is capped at 0.64 (below trading threshold — AI cannot rescue a weak stat signal)
+- AI agrees AND `stat_conf ≥ 0.65` → `confidence = 0.4 × stat + 0.6 × AI`, capped at `stat_conf + 0.10` (AI can boost by at most 10 percentage points above the baseline)
+- AI disagrees → `confidence = stat × (0.4 + (1 - ai_conf) × 0.4)` — penalty scales with AI confidence; a very certain AI disagreement keeps only 40% of the stat score
 - AI says SKIP → statistical confidence unchanged, no AI boost
 
 `MIN_CONFIDENCE = 0.65` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change.
+
+**Robustness guards added by agent review:**
+- `batch_analyze` is called with `delay=2` and `per_market_timeout=90` — prevents a hung Ollama call from stalling the hourly cron job
+- If the Manifold API returns markets that don't match by `id` field, the AI pass aborts with a hard error and `schema_version=1` is written, causing `auto_trader.py` to block trading rather than proceed without AI validation
+- `schema_version` is now written dynamically (2 if AI fields present, 1 if AI pass was skipped)
 
 ---
 
@@ -263,6 +268,13 @@ Output file structure (`market_research.json`):
 
 #### `automation/auto_trader.py`
 **What it does:** Reads the research file and decides whether to actually place trades.
+
+**Schema guard** — refuses to trade on pre-AI research. Supports both file layouts written by `auto_research.py`:
+```python
+# Nested layout (normal): { "latest": { "schema_version": 2, ... }, "history": [...] }
+# Flat layout (edge case): { "schema_version": 2, ... }
+```
+If `schema_version < 2` (i.e. AI pass was skipped or aborted), prints a Telegram-visible halt message and returns None.
 
 **Risk management rules (the filter gauntlet):**
 
