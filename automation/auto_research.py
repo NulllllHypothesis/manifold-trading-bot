@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.ai_analyzer import batch_analyze
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -77,8 +78,8 @@ class MarketResearcher:
                         'confidence': 0.7
                     })
 
-                # Volume spike strategy (need average volume - using simple threshold)
-                avg_volume = 100  # Simple threshold for testing
+                # Volume spike strategy — use median volume of fetched markets as baseline
+                avg_volume = sum(m.get('volume', 0) for m in markets) / max(len(markets), 1)
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
                     strategies.append({
@@ -119,7 +120,43 @@ class MarketResearcher:
 
                     recommendations.append(recommendation)
 
-            # Sort by confidence (highest first)
+            # Sort by confidence (highest first) before AI pass
+            recommendations.sort(key=lambda x: x['confidence'], reverse=True)
+
+            # AI analysis — run on top candidates only (cap to avoid slow runtimes)
+            top_candidates = recommendations[:20]
+            candidate_markets = [m for m in markets if m.get('id') in {r['market_id'] for r in top_candidates}]
+
+            if candidate_markets:
+                print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
+                ai_results = batch_analyze(candidate_markets, max_markets=20, delay=0.5)
+
+                for rec in recommendations:
+                    ai = ai_results.get(rec['market_id'])
+                    if not ai or ai['recommendation'] == 'SKIP':
+                        rec['ai_recommendation'] = 'SKIP'
+                        rec['ai_confidence'] = 0.0
+                        rec['ai_reasoning'] = ''
+                        rec['ai_source'] = None
+                        continue
+
+                    rec['ai_recommendation'] = ai['recommendation']
+                    rec['ai_confidence'] = ai['confidence']
+                    rec['ai_reasoning'] = ai['reasoning']
+                    rec['ai_source'] = ai['source']
+                    rec['ai_estimated_probability'] = ai['estimated_true_probability']
+
+                    # Blend statistical + AI confidence
+                    stat_conf = rec['confidence']
+                    if ai['recommendation'] == rec['recommendation']:
+                        # AI agrees — boost confidence, weight AI higher (60/40)
+                        rec['confidence'] = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
+                        rec['strategies'] = rec['strategies'] + ['ai_analysis']
+                    else:
+                        # AI disagrees — penalise confidence significantly
+                        rec['confidence'] = round(stat_conf * 0.4, 3)
+
+            # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
             print(f"  Found {len(recommendations)} trading opportunities")
