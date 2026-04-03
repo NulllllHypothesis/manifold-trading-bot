@@ -7,6 +7,7 @@ Runs hourly to analyze markets and identify trading opportunities.
 import json
 import sys
 import time
+import statistics as _stats
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
@@ -88,7 +89,6 @@ class MarketResearcher:
                     })
 
                 # Volume spike — use median volume to resist outlier inflation
-                import statistics as _stats
                 missing_vol = sum(1 for m in markets if m.get('volume') is None)
                 if missing_vol:
                     print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
@@ -203,8 +203,9 @@ class MarketResearcher:
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
                         # AI disagrees — scale penalty by AI confidence.
-                        # penalty multiplier range: 0.4 (AI certain, confidence=1.0) to 0.8 (AI uncertain, confidence=0.0)
-                        # High AI confidence → lower multiplier → harder penalty on stat score.
+                        # Formula: penalty = 0.4 + (1 - ai_conf) * 0.4
+                        #   ai_conf=1.0 → penalty=0.40 (AI certain → hardest penalty, keeps 40% of stat score)
+                        #   ai_conf=0.0 → penalty=0.80 (AI uncertain → softest penalty, keeps 80% of stat score)
                         penalty = 0.4 + (1 - ai['confidence']) * 0.4
                         rec['confidence'] = round(stat_conf * penalty, 3)
                     # if ai returned something unexpected, leave confidence unchanged
