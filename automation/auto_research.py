@@ -182,7 +182,8 @@ class MarketResearcher:
 
                     rec['ai_recommendation'] = ai['recommendation']
                     rec['ai_confidence'] = ai['confidence']
-                    rec['ai_reasoning'] = ai['reasoning']
+                    # Sanitize: strip non-printable chars, cap length, ASCII-safe for JSON/display
+                    rec['ai_reasoning'] = ''.join(c for c in ai.get('reasoning', '') if c.isprintable())[:300]
                     rec['ai_source'] = ai['source']
                     rec['ai_estimated_probability'] = ai['estimated_true_probability']
 
@@ -190,14 +191,16 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         blended = round(0.4 * stat_conf + 0.6 * ai['confidence'], 3)
-                        if stat_conf <= _STAT_BOOST_FLOOR:
+                        if stat_conf < _STAT_BOOST_FLOOR:   # < only: stat=0.65 already passes threshold, no cap needed
                             # Stat signal too weak — cap below trading threshold
                             blended = min(blended, _WEAK_STAT_CAP)
                         rec['confidence'] = blended
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
-                        # AI has a real opposing opinion — penalize
-                        rec['confidence'] = round(stat_conf * 0.4, 3)
+                        # AI disagrees — scale penalty by AI confidence.
+                        # Low-confidence AI (0.5) barely penalizes; high-confidence AI (0.95) penalizes hard.
+                        penalty = 0.4 + (1 - ai['confidence']) * 0.4  # range: 0.4 (certain) to 0.8 (uncertain)
+                        rec['confidence'] = round(stat_conf * penalty, 3)
                     # if ai returned something unexpected, leave confidence unchanged
 
             # Re-sort after AI pass

@@ -161,11 +161,13 @@ class TestConfidenceBlending(unittest.TestCase):
 
         if ai_rec == stat_rec:
             blended = round(0.4 * stat_conf + 0.6 * ai_conf, 3)
-            if stat_conf <= STAT_BOOST_FLOOR:   # <= so exactly-at-floor is also capped
+            if stat_conf < STAT_BOOST_FLOOR:   # < only: stat=0.65 already passes, no cap needed
                 blended = min(blended, WEAK_STAT_CAP)
             return blended
         elif ai_rec in ('YES', 'NO'):
-            return round(stat_conf * 0.4, 3)
+            # Penalty scales with AI confidence: certain AI penalizes harder
+            penalty = 0.4 + (1 - ai_conf) * 0.4
+            return round(stat_conf * penalty, 3)
         return stat_conf  # unexpected AI output — unchanged
 
     def test_strong_stat_ai_agree_boosts_above_threshold(self):
@@ -174,7 +176,7 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertGreater(result, 0.65)
 
     def test_borderline_stat_ai_agree_capped_below_threshold(self):
-        # stat=0.61 (below floor 0.65), ai=0.99 agree → capped at 0.64 despite strong AI
+        # stat=0.61 (below floor 0.65), ai=0.99 agree → capped at 0.64
         result = self._blend(0.61, 0.99, 'YES', 'YES')
         self.assertLess(result, 0.65)
         self.assertEqual(result, 0.64)
@@ -185,20 +187,30 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertLess(result, 0.65)
         self.assertEqual(result, 0.64)
 
-    def test_stat_exactly_at_floor_is_capped(self):
-        # stat=0.65 (exactly at floor, <= applies) → still capped at 0.64
+    def test_stat_exactly_at_floor_is_not_capped(self):
+        # stat=0.65 (exactly at floor) → < does NOT fire, AI can boost freely
         result = self._blend(0.65, 0.99, 'NO', 'NO')
-        self.assertLessEqual(result, 0.64)
+        self.assertGreater(result, 0.64)
 
     def test_stat_above_floor_is_not_capped(self):
-        # stat=0.66 (strictly above floor) → cap does NOT apply, AI can boost freely
+        # stat=0.66 (above floor) → AI can boost freely
         result = self._blend(0.66, 0.90, 'NO', 'NO')
         self.assertGreater(result, 0.64)
 
+    def test_ai_disagree_high_confidence_penalizes_harder(self):
+        # High-confidence AI (0.95) penalizes harder than low-confidence (0.55)
+        penalty_high = 0.4 + (1 - 0.95) * 0.4  # 0.42
+        penalty_low  = 0.4 + (1 - 0.55) * 0.4  # 0.58
+        result_high = self._blend(0.70, 0.95, 'YES', 'NO')
+        result_low  = self._blend(0.70, 0.55, 'YES', 'NO')
+        self.assertLess(result_high, result_low)
+        self.assertAlmostEqual(result_high, round(0.70 * penalty_high, 3))
+
     def test_ai_disagree_penalizes_confidence(self):
-        # stat=0.70, ai disagrees → 0.70 * 0.4 = 0.28
+        # stat=0.70, ai disagrees at 0.85 confidence → penalty = 0.4 + 0.15*0.4 = 0.46
+        expected = round(0.70 * (0.4 + (1 - 0.85) * 0.4), 3)
         result = self._blend(0.70, 0.85, 'YES', 'NO')
-        self.assertAlmostEqual(result, 0.28)
+        self.assertAlmostEqual(result, expected)
         self.assertLess(result, 0.65)
 
     def test_ai_skip_leaves_confidence_unchanged(self):

@@ -42,12 +42,14 @@ class AutoTrader:
         try:
             with open(self.research_file, 'r') as f:
                 data = json.load(f)
-            schema = data.get('schema_version', 1)
+            latest = data.get('latest')
+            schema = (latest or {}).get('schema_version', 1)
             if schema < 2:
-                print(f"Error: market_research.json is schema v{schema} (pre-AI integration). "
-                      f"Re-run auto_research.py before trading to get AI-scored recommendations.")
+                # OpenClaw captures stdout and forwards it to Telegram — this alert reaches the group
+                print(f"🚨 TRADING HALTED: market_research.json is schema v{schema} (pre-AI). "
+                      f"Re-run auto_research.py before next trading cycle.")
                 return None
-            return data.get('latest')
+            return latest
         except Exception as e:
             print(f"Error loading research: {e}")
             return None
