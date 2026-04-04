@@ -23,6 +23,14 @@ This file contains distilled learnings and significant events from daily logs. U
 - Feature branch `feature/ai-analyzer` created for development
 - Heartbeat monitoring continues with 30-minute intervals
 
+## 2026-04-04: Workspace Cleanup
+
+- Removed accidentally tracked `__pycache__` files and `paper_trading_state.json` from git
+- Added `memory/` and `*.bak` to `.gitignore` to prevent committing runtime data
+- Added `MEMORY.md` to repository for long-term memory tracking
+- Updated remote repository URL note: repository moved to `https://github.com/NulllllHypothesis/manifold-trading-bot.git`
+- All cron jobs healthy: Auto Trading (hourly at :15), Market Research (every 4h), Daily Summary (19:00 UTC)
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch

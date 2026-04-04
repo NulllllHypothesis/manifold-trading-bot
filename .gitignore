@@ -28,3 +28,7 @@ memory/
 /test_automation.py
 /AUTOMATION_README.md
 /cron_jobs_config.json
+
+# Generated reports and PDFs
+*.pdf
+*.tex
