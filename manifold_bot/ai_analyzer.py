@@ -8,6 +8,7 @@ Tries the local Ollama instance first (free, no rate limits),
 falls back to the DeepSeek API if Ollama is unavailable.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,11 @@ OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "deepseek-r1:14b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+# Maximum size for llm_calls.jsonl before rotation (100 MB)
+LLM_LOG_MAX_BYTES = 100 * 1024 * 1024
+# Number of rotated backup files to keep
+LLM_LOG_BACKUP_COUNT = 3
 
 SYSTEM_PROMPT = """You are an expert prediction market analyst. Your job is to assess whether a market's current probability is accurate or mispriced.
 
@@ -39,6 +45,12 @@ Be a contrarian when the evidence supports it. Consider:
 - How confident are you in your assessment?
 
 Always respond with valid JSON only. No markdown, no extra text."""
+
+# Stable identifier for the system prompt; recomputed once at import time.
+# Recording the hash instead of the full text avoids duplicating the static
+# prompt on every log record while still allowing offline verification that the
+# prompt has not changed between runs.
+SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
 
 ANALYSIS_PROMPT = """Analyze this prediction market:
 
@@ -69,14 +81,57 @@ def _extract_cot(raw: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _rotate_log_if_needed(log_path: Path) -> None:
+    """
+    Rotate log_path if it exceeds LLM_LOG_MAX_BYTES.
+
+    Keeps up to LLM_LOG_BACKUP_COUNT numbered backups:
+      llm_calls.jsonl.1  (most recent previous)
+      llm_calls.jsonl.2
+      llm_calls.jsonl.3  (oldest kept)
+
+    The oldest backup beyond the count is deleted.
+    """
+    if not log_path.exists():
+        return
+    if log_path.stat().st_size < LLM_LOG_MAX_BYTES:
+        return
+
+    # Shift existing backups up by one, dropping any beyond the backup count
+    for i in range(LLM_LOG_BACKUP_COUNT, 0, -1):
+        older = log_path.with_suffix(f".jsonl.{i}")
+        newer = log_path.with_suffix(f".jsonl.{i - 1}") if i > 1 else log_path
+        # For i==1 we want log_path -> log_path.1, handled by the rename below
+        if i == 1:
+            # log_path -> log_path.1
+            dest = log_path.parent / (log_path.name + ".1")
+            log_path.rename(dest)
+        else:
+            src = log_path.parent / (log_path.name + f".{i - 1}")
+            if src.exists():
+                if older.exists():
+                    older.unlink()
+                src.rename(older)
+
+
 def _log_llm_call(
     model: str,
-    system_prompt: str,
-    user_prompt: str,
+    system_prompt_hash: str,
+    market_id: str,
     raw_response: Optional[str],
     parsed_output: Optional[Dict] = None,
 ) -> None:
-    """Append a JSONL record for every LLM call (for future distillation)."""
+    """Append a JSONL record for every LLM call (for future distillation).
+
+    We deliberately do NOT log the full system prompt (it is static and
+    bloats every record) nor the full user prompt (it may contain market
+    data whose long-term persistence requires compliance review).  Instead
+    we store:
+      - system_prompt_sha256: allows offline verification that the prompt
+        has not changed between runs without duplicating its text.
+      - market_id: a stable, non-sensitive identifier that can be joined
+        against the market database to reconstruct the prompt if needed.
+    """
     try:
         LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
         cot = _extract_cot(raw_response) if raw_response else ""
@@ -87,8 +142,14 @@ def _log_llm_call(
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": model,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
+            # Hash only — the full prompt is static and need not be repeated
+            # on every record.
+            "system_prompt_sha256": system_prompt_hash,
+            # Market ID rather than the full prompt text.  The prompt can be
+            # reconstructed from the market record in the database; storing
+            # the raw text here would persist potentially sensitive market
+            # data to disk without a clear retention policy.
+            "market_id": market_id,
             "raw_response": raw_response,
             "chain_of_thought": cot,
             "output": clean_output,
@@ -96,13 +157,18 @@ def _log_llm_call(
         }
 
         log_path = LLM_LOG_DIR / "llm_calls.jsonl"
+
+        # Rotate before writing if the file is too large
+        _rotate_log_if_needed(log_path)
+
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
-        pass  # Never let logging break the trading pipeline
+    except Exception as e:
+        import sys
+        print(f'[llm_log] warning: {e}', file=sys.stderr)
 
 
-def _call_ollama(prompt: str) -> Optional[str]:
+def _call_ollama(prompt: str, market_id: str = "") -> Optional[str]:
     """Call local Ollama instance."""
     try:
         import requests
@@ -118,14 +184,13 @@ def _call_ollama(prompt: str) -> Optional[str]:
         )
         if response.status_code == 200:
             raw = response.json().get("response", "")
-            _log_llm_call(OLLAMA_MODEL, SYSTEM_PROMPT, prompt, raw)
             return raw
     except Exception:
         pass
     return None
 
 
-def _call_deepseek_api(prompt: str) -> Optional[str]:
+def _call_deepseek_api(prompt: str, market_id: str = "") -> Optional[str]:
     """Call DeepSeek API."""
     if not DEEPSEEK_API_KEY:
         return None
@@ -150,7 +215,6 @@ def _call_deepseek_api(prompt: str) -> Optional[str]:
         )
         if response.status_code == 200:
             raw = response.json()["choices"][0]["message"]["content"]
-            _log_llm_call(DEEPSEEK_MODEL, SYSTEM_PROMPT, prompt, raw)
             return raw
     except Exception:
         pass
@@ -213,6 +277,7 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     probability = market.get("probability", 0.5)
     volume = market.get("volume", 0)
     liquidity = market.get("totalLiquidity", market.get("liquidity", 0))
+    market_id = market.get("id", "")
 
     # Format close date
     close_time_ms = market.get("closeTime")
@@ -244,19 +309,26 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     )
 
     # Try Ollama first (free), then DeepSeek API
-    raw = _call_ollama(prompt)
+    raw = _call_ollama(prompt, market_id)
     source = "ollama"
     if raw is None:
-        raw = _call_deepseek_api(prompt)
+        raw = _call_deepseek_api(prompt, market_id)
         source = "deepseek_api"
 
     if raw is None:
         return None
 
     result = _parse_response(raw)
+
+    # Determine the model used for logging
+    model = OLLAMA_MODEL if source == "ollama" else DEEPSEEK_MODEL
+
+    # Log after parsing so parsed_output is available and non-null
+    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, raw, parsed_output=result)
+
     if result:
         result["source"] = source
-        result["market_id"] = market.get("id", "")
+        result["market_id"] = market_id
     return result
 
 
