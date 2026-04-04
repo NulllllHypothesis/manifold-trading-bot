@@ -38,6 +38,12 @@ This file contains distilled learnings and significant events from daily logs. U
 - Fixed auto_research.py truncation and daily_summary exit code
 - Current commit: 307fc42 (fix: restore truncated auto_research.py, fix daily_summary exit code)
 
+## 2026-04-04: Diagnostic Scripts & Monitoring
+
+- Added diagnostic scripts (quick_status.py, resolve_positions.py, etc.) to .gitignore to prevent accidental commits
+- All cron jobs running consistently: Daily Summary at 19:00 UTC, Market Research every 4h, Auto Trading hourly at :15
+- Heartbeat monitoring continues with 30-minute intervals, ensuring git sync and cron health
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch
