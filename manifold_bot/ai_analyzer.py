@@ -12,9 +12,12 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+LLM_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "deepseek-r1:14b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
@@ -60,6 +63,45 @@ Respond with this exact JSON structure:
 Only recommend YES or NO if you have genuine conviction the market is mispriced by at least 10 percentage points. Otherwise use SKIP."""
 
 
+def _extract_cot(raw: str) -> str:
+    """Extract chain-of-thought from <think> tags, if present."""
+    match = re.search(r'<think>(.*?)</think>', raw, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _log_llm_call(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    raw_response: Optional[str],
+    parsed_output: Optional[Dict] = None,
+) -> None:
+    """Append a JSONL record for every LLM call (for future distillation)."""
+    try:
+        LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        cot = _extract_cot(raw_response) if raw_response else ""
+        clean_output = re.sub(
+            r'<think>.*?</think>', '', raw_response, flags=re.DOTALL
+        ).strip() if raw_response else ""
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_response": raw_response,
+            "chain_of_thought": cot,
+            "output": clean_output,
+            "parsed_output": parsed_output,
+        }
+
+        log_path = LLM_LOG_DIR / "llm_calls.jsonl"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # Never let logging break the trading pipeline
+
+
 def _call_ollama(prompt: str) -> Optional[str]:
     """Call local Ollama instance."""
     try:
@@ -75,7 +117,9 @@ def _call_ollama(prompt: str) -> Optional[str]:
             timeout=60
         )
         if response.status_code == 200:
-            return response.json().get("response", "")
+            raw = response.json().get("response", "")
+            _log_llm_call(OLLAMA_MODEL, SYSTEM_PROMPT, prompt, raw)
+            return raw
     except Exception:
         pass
     return None
@@ -105,7 +149,9 @@ def _call_deepseek_api(prompt: str) -> Optional[str]:
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            raw = response.json()["choices"][0]["message"]["content"]
+            _log_llm_call(DEEPSEEK_MODEL, SYSTEM_PROMPT, prompt, raw)
+            return raw
     except Exception:
         pass
     return None
@@ -171,7 +217,6 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     # Format close date
     close_time_ms = market.get("closeTime")
     if close_time_ms:
-        from datetime import datetime, timezone
         close_date = datetime.fromtimestamp(
             close_time_ms / 1000, tz=timezone.utc
         ).strftime("%Y-%m-%d")
