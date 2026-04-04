@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
 
 class AutoTrader:
     """Automated trading with risk management"""
@@ -30,7 +30,7 @@ class AutoTrader:
         # Risk management parameters
         self.max_positions = 5
         self.max_position_size = 0.1  # 10% of balance per trade
-        self.min_confidence = 0.65  # 65% confidence minimum
+        self.min_confidence = MIN_CONFIDENCE
         self.cooldown_hours = 6  # Hours before trading same market again
 
     def load_latest_research(self) -> Optional[Dict]:
@@ -42,7 +42,28 @@ class AutoTrader:
         try:
             with open(self.research_file, 'r') as f:
                 data = json.load(f)
-                return data.get('latest')
+
+            # Determine whether the file is flat (written directly by save_research())
+            # or nested under a 'latest' key.
+            # auto_research.py writes research_data directly to the file (flat structure),
+            # so schema_version lives at the top level of data, not under data['latest'].
+            # We support both layouts for forward-compatibility:
+            #   - Flat:   { "schema_version": 2, "recommendations": [...], ... }
+            #   - Nested: { "latest": { "schema_version": 2, "recommendations": [...] }, "history": [...] }
+            if 'latest' in data:
+                # Nested layout
+                latest = data['latest']
+            else:
+                # Flat layout — the whole object is the research record
+                latest = data
+
+            schema = (latest or {}).get('schema_version', 1)
+            if schema < 2:
+                # OpenClaw captures stdout and forwards it to Telegram — this alert reaches the group
+                print(f"🚨 TRADING HALTED: market_research.json is schema v{schema} (pre-AI). "
+                      f"Re-run auto_research.py before next trading cycle.")
+                return None
+            return latest
         except Exception as e:
             print(f"Error loading research: {e}")
             return None

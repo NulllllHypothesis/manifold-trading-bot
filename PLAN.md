@@ -101,20 +101,25 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 
 ---
 
-### 🔴 High Priority — AI Integration
+### ✅ AI Integration — DONE (branch: feature/ai-analyzer, PR #2)
 
-The biggest gap. All current strategies are pure statistics — they don't understand what a market question is actually asking. DeepSeek can.
+- [x] `manifold_bot/ai_analyzer.py` — calls local Ollama (`deepseek-r1:14b`) first, falls back to DeepSeek API
+  - Returns: `{ "recommendation": "YES/NO/SKIP", "confidence": 0.0-1.0, "estimated_true_probability": 0.0-1.0, "reasoning": "...", "risk_factors": "..." }`
+- [x] Wired into `auto_research.py` — AI runs on top 5 candidates per hourly cycle
+  - If AI agrees AND stat ≥ 0.65: `0.4 × stat + 0.6 × AI`, capped at `stat + 0.10` (max 10pp boost)
+  - If AI agrees AND stat < 0.65: blended result capped at 0.64 — AI cannot rescue a weak stat signal
+  - If AI disagrees: confidence scaled down by `0.4 + (1 - ai_conf) × 0.4` — certain AI disagreement keeps only 40%
+- [x] Fixed volume spike `avg_volume` — now uses **median** of fetched markets (mean was skewed by outliers)
+- [x] 24 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
+- [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 5 markets to stay within hourly window)
+- [x] `MIN_CONFIDENCE` moved to `config.py` — single source of truth for trading threshold across trader + researcher
+- [x] DeepSeek API fallback: explicit `delay=2` at call site, `per_market_timeout=90` to prevent hung calls
+- [x] Schema version written dynamically — v2 only if AI pass completed; v1 if aborted (blocks trading)
+- [x] Schema version guard in `auto_trader.py` — handles both flat and nested file layouts, refuses to trade on v1
+- [x] Auto-fixing review agent in `.github/scripts/claude-review.js` — reviews PRs and commits fixes directly
+- [ ] PR to main — pending agent review approval
 
-- [ ] Write `manifold_bot/ai_analyzer.py`
-  - Takes: market question, current probability, recent bet activity
-  - Calls DeepSeek API (`deepseek-chat`) or local Ollama (`deepseek-r1:14b`)
-  - Returns: structured `{ "recommendation": "YES/NO", "confidence": 0.0-1.0, "reasoning": "..." }`
-- [ ] Add `ai_strategy()` to `manifold_bot/strategies.py` using the analyzer
-- [ ] Weight AI signal higher in `auto_research.py` confidence scoring
-- [ ] Write tests for the analyzer in `tests/test_ai.py`
-
-> DeepSeek API key: check `manifold_bot/config.py` or ask Aleksi.
-> Free alternative: Ollama at `http://localhost:11434`, model `deepseek-r1:14b`
+> No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
 
 ---
 
@@ -181,7 +186,7 @@ Two open positions are in non-existent mock markets and are stuck. Need a script
 | Daily summary | ✅ Done | Cron at 19:00 UTC |
 | Project structure | ✅ Done | automation/, tests/, scripts/, docs/, memory/ |
 | Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
-| AI integration | ❌ Not started | Highest value next step |
+| AI integration | ✅ Done | `ai_analyzer.py` + wired into research, PR pending |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |

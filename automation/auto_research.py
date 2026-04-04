@@ -7,6 +7,7 @@ Runs hourly to analyze markets and identify trading opportunities.
 import json
 import sys
 import time
+import statistics as _stats
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
@@ -17,6 +18,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.ai_analyzer import batch_analyze
+from manifold_bot.config import MIN_CONFIDENCE
+
+# Single source of truth for the trading threshold — imported from config.py.
+# auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
+_WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets (stat < floor): 0.64
+# Stat must be strictly above floor before AI can boost freely.
+# At exactly 0.65, AI is still capped to stat_conf + 0.10 to prevent turbo-boosting a borderline signal.
+_STAT_BOOST_FLOOR = MIN_CONFIDENCE       # 0.65
+# The AI boost cap is relative: blended confidence is capped at stat_conf + 0.10.
+# This means a market with stat_conf=0.65 is capped at 0.75, stat_conf=0.9 is capped at 1.0, etc.
+_AI_BOOST_MARGIN = 0.10
+
+# Sentinel value for markets never sent to AI (distinct from 'SKIP' which means
+# the AI considered the market and chose to skip it).
+_NOT_ANALYZED = 'NOT_ANALYZED'
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -31,6 +48,15 @@ class MarketResearcher:
 
         Returns:
             List of market recommendations with confidence scores
+
+        Schema notes (schema_version=2):
+          ai_was_candidate: bool  — True iff the market was in the top-5 sent to AI.
+          ai_returned_skip: bool  — True iff the market was a candidate AND AI returned SKIP.
+          ai_recommendation: str | None
+            - None            : market was never sent to AI (ai_was_candidate=False).
+                                Previously this was set to 'SKIP', which was misleading.
+            - 'SKIP'          : AI was sent this market and explicitly said SKIP.
+            - 'YES' / 'NO'    : AI's directional recommendation.
         """
         print(f"[{datetime.now()}] Starting market analysis...")
 
@@ -77,8 +103,12 @@ class MarketResearcher:
                         'confidence': 0.7
                     })
 
-                # Volume spike strategy (need average volume - using simple threshold)
-                avg_volume = 100  # Simple threshold for testing
+                # Volume spike — use median volume to resist outlier inflation
+                missing_vol = sum(1 for m in markets if m.get('volume') is None)
+                if missing_vol:
+                    print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
+                volumes = [m.get('volume') or 0 for m in markets]
+                avg_volume = _stats.median(volumes) if volumes else 0
                 volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
                 if volume_rec:
                     strategies.append({
@@ -119,7 +149,146 @@ class MarketResearcher:
 
                     recommendations.append(recommendation)
 
-            # Sort by confidence (highest first)
+            # Sort by confidence (highest first) before AI pass
+            recommendations.sort(key=lambda x: x['confidence'], reverse=True)
+
+            # AI analysis — only top 5 candidates (local model is CPU-only, ~60s per market)
+            top_candidates = recommendations[:5]
+            top_candidate_ids = {r['market_id'] for r in top_candidates}
+            candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
+
+            # Guard: if the count doesn't match, the market objects use a different ID field
+            # (e.g. 'slug' or 'url') and AI analysis cannot be reliably performed.
+            # Rather than silently writing schema_version=2 with all ai_was_candidate=False
+            # (which would cause auto_trader.py to trade without AI validation), we raise a
+            # clear error so the caller can catch it and write schema_version=1 instead,
+            # causing the trader's schema guard to correctly block trading.
+            if len(candidate_markets) != len(top_candidates):
+                sample_keys = list(markets[0].keys())[:8] if markets else []
+                raise ValueError(
+                    f"candidate_markets length mismatch: expected {len(top_candidates)}, "
+                    f"got {len(candidate_markets)}. Market objects may not use 'id' as their "
+                    f"primary key. Sample market keys: {sample_keys}. "
+                    f"Cannot safely write schema_version=2; aborting AI pass to prevent "
+                    f"unvalidated trading."
+                )
+
+            if candidate_markets:
+                print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
+                ai_results = {}
+
+                # Snapshot pre-AI confidence scores so we can restore them if the AI
+                # pass fails partway through. Without this, a mid-loop timeout would
+                # leave some recs with AI-blended confidences and no ai_was_candidate
+                # field, causing schema_version=1 to be written with partially-blended
+                # scores that would be traded on in a future cycle with no indication
+                # which markets were AI-validated.
+                pre_ai_confidence = {r['market_id']: r['confidence'] for r in recommendations}
+
+                try:
+                    # delay=2 makes the rate-limit intent explicit at the call site for both
+                    # Ollama and any DeepSeek API fallback. Ollama may no-op the delay
+                    # internally, but the caller's intent is clear and not reliant on
+                    # undocumented internal behaviour.
+                    # per_market_timeout=90 prevents a hung Ollama call from stalling the
+                    # hourly cron job indefinitely.
+                    ai_results = batch_analyze(
+                        candidate_markets,
+                        max_markets=5,
+                        delay=2,
+                        per_market_timeout=90,
+                    )
+                    # Warn if any result came from the paid API fallback
+                    for r in ai_results.values():
+                        if r.get('source') == 'deepseek_api':
+                            print("  Warning: AI fallback to DeepSeek API was used — Ollama may be down. Check server.")
+                            break
+                except TimeoutError as e:
+                    print(f"  Warning: AI analysis timed out ({e}), continuing without AI scores")
+                    # Restore pre-AI confidence scores to prevent partially-blended
+                    # confidences from being written to schema_version=1 output.
+                    for rec in recommendations:
+                        if rec['market_id'] in pre_ai_confidence:
+                            rec['confidence'] = pre_ai_confidence[rec['market_id']]
+                    ai_results = {}
+                except Exception as e:
+                    print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
+                    # Restore pre-AI confidence scores to prevent partially-blended
+                    # confidences from being written to schema_version=1 output.
+                    for rec in recommendations:
+                        if rec['market_id'] in pre_ai_confidence:
+                            rec['confidence'] = pre_ai_confidence[rec['market_id']]
+                    ai_results = {}
+
+                for rec in recommendations:
+                    ai = ai_results.get(rec['market_id'])
+                    is_ai_candidate = rec['market_id'] in top_candidate_ids
+
+                    # ai_was_candidate: was this market sent to AI at all?
+                    # ai_returned_skip: AI ran but said SKIP (vs not in top 5)
+                    rec['ai_was_candidate'] = is_ai_candidate
+                    rec['ai_returned_skip'] = False
+
+                    if not is_ai_candidate:
+                        # Market was never sent to AI — use None (not 'SKIP') to avoid
+                        # conflating "AI considered and skipped" with "never analyzed".
+                        rec['ai_recommendation'] = None
+                        rec['ai_confidence'] = 0.0
+                        rec['ai_reasoning'] = ''
+                        rec['ai_source'] = None
+                        continue
+
+                    # Market was a candidate — check what AI returned.
+                    if not ai or ai['recommendation'] == 'SKIP':
+                        # AI was invoked for this market and returned SKIP (or failed to
+                        # return a usable result, which we also treat as SKIP).
+                        rec['ai_recommendation'] = 'SKIP'
+                        rec['ai_confidence'] = 0.0
+                        rec['ai_reasoning'] = ''
+                        rec['ai_source'] = None
+                        rec['ai_returned_skip'] = True
+                        continue
+
+                    rec['ai_recommendation'] = ai['recommendation']
+                    rec['ai_confidence'] = ai['confidence']
+                    # Sanitize: guarantee ASCII-safe output for JSON/log/Telegram display.
+                    # Encode to ASCII replacing any non-ASCII bytes (including Unicode
+                    # printable-but-dangerous chars like U+202E RLO or zero-width joiners),
+                    # then decode back to str and cap at 300 characters.
+                    ai_reasoning = ai.get('reasoning', '')[:300].encode('ascii', errors='replace').decode('ascii')
+                    rec['ai_reasoning'] = ai_reasoning
+                    rec['ai_source'] = ai['source']
+                    rec['ai_estimated_probability'] = ai['estimated_true_probability']
+
+                    # Blend statistical + AI confidence
+                    stat_conf = rec['confidence']
+                    if ai['recommendation'] == rec['recommendation']:
+                        # Only blend upward on agreement: a low-confidence AI agreement
+                        # must not reduce a strong statistical signal. Take the maximum of
+                        # stat_conf and the blended value so the stat signal is always the
+                        # floor, then apply the upper cap.
+                        blended = max(stat_conf, round(0.4 * stat_conf + 0.6 * ai['confidence'], 3))
+                        if stat_conf < _STAT_BOOST_FLOOR:
+                            # Stat too weak — cap below trading threshold
+                            blended = min(blended, _WEAK_STAT_CAP)
+                        else:
+                            # Cap is relative to stat_conf: at most stat_conf + _AI_BOOST_MARGIN.
+                            # e.g. stat_conf=0.65 → cap=0.75; stat_conf=0.9 → cap=1.0.
+                            blended = min(blended, stat_conf + _AI_BOOST_MARGIN)
+                        rec['confidence'] = blended
+                        rec['strategies'] = rec['strategies'] + ['ai_analysis']
+                    elif ai['recommendation'] in ('YES', 'NO'):
+                        # AI disagrees — scale the confidence multiplier by AI confidence.
+                        # Formula: confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
+                        #   ai_conf=1.0 → confidence_multiplier=0.40 (AI certain → hardest reduction, keeps 40% of stat score)
+                        #   ai_conf=0.0 → confidence_multiplier=0.80 (AI uncertain → softest reduction, keeps 80% of stat score)
+                        # Clamp ai_conf to [0.0, 1.0] to guard against malformed AI responses.
+                        ai_conf = max(0.0, min(1.0, ai['confidence']))
+                        confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
+                        rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
+                    # if ai returned something unexpected, leave confidence unchanged
+
+            # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
             print(f"  Found {len(recommendations)} trading opportunities")
@@ -129,87 +298,20 @@ class MarketResearcher:
             print(f"  Error analyzing markets: {e}")
             return []
 
-    def save_research(self, recommendations: List[Dict]):
+    def save_research(self, recommendations: List[Dict], error: Optional[str] = None):
         """Save research results to file"""
+        # Determine schema version based on whether AI candidate fields are present.
+        # If any recommendation is missing 'ai_was_candidate' it means the AI pass was
+        # skipped or aborted (e.g. due to a candidate_markets mismatch), so we must write
+        # schema_version=1 to ensure auto_trader.py's schema guard blocks trading rather
+        # than proceeding without AI validation.
+        has_ai_fields = all(
+            'ai_was_candidate' in rec
+            for rec in recommendations
+        ) if recommendations else False
+        schema_version = 2 if has_ai_fields else 1
+
         research_data = {
-            'timestamp': datetime.now().isoformat(),
-            'recommendations': recommendations,
-            'total_markets_analyzed': len(recommendations)
-        }
-
-        # Load existing research history
-        history = []
-        if os.path.exists(self.research_file):
-            try:
-                with open(self.research_file, 'r') as f:
-                    existing = json.load(f)
-                    history = existing.get('history', [])[-23:]  # Keep last 24 hours
-            except:
-                history = []
-
-        # Add new research
-        history.append(research_data)
-
-        # Save
-        data = {
-            'latest': research_data,
-            'history': history
-        }
-
-        with open(self.research_file, 'w') as f:
-            json.dump(data, f, indent=2)
-
-        print(f"  Research saved to {self.research_file}")
-
-    def run_hourly_research(self):
-        """Main research loop"""
-        print(f"\n{'='*60}")
-        print(f"MARKET RESEARCH - {datetime.now()}")
-        print(f"{'='*60}")
-
-        # Analyze markets
-        recommendations = self.analyze_markets(limit=100)
-
-        # Save results
-        if recommendations:
-            self.save_research(recommendations)
-
-            # Print top 5 recommendations
-            print(f"\nTop 5 Trading Opportunities:")
-            for i, rec in enumerate(recommendations[:5], 1):
-                pos_flag = "📌" if rec['existing_position'] else "🆕"
-                print(f"{i}. {pos_flag} {rec['question']}")
-                print(f"   Probability: {rec['probability']*100:.1f}% | Rec: {rec['recommendation']} | Confidence: {rec['confidence']*100:.0f}%")
-                print(f"   Strategies: {', '.join(rec['strategies'])}")
-        else:
-            print("No trading opportunities found this hour")
-
-        print(f"\nResearch completed at {datetime.now()}")
-        return recommendations
-
-def main():
-    """Main function"""
-    researcher = MarketResearcher()
-
-    # Skip research if at max positions (5)
-    open_positions = sum(
-        1 for trades in researcher.trader.positions.values()
-        if any(t.get('status') == 'OPEN' for t in (trades if isinstance(trades, list) else [trades]))
-    )
-    max_positions = 5
-    if open_positions >= max_positions:
-        print(f"At max positions ({open_positions}/{max_positions}). Skipping research.")
-        return 0
-
-    recommendations = researcher.run_hourly_research()
-
-    # Return number of recommendations for cron job monitoring
-    return len(recommendations)
-
-if __name__ == "__main__":
-    try:
-        num_recs = main()
-        sys.exit(0)
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        sys.exit(1)
+            'schema_version': schema_version,  # v2 adds ai_was_candidate, ai_returned_skip, ai_recommendation fields
+            # ai_recommendation values in schema_version=2:
+            #   None           — market was
