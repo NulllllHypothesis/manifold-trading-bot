@@ -205,9 +205,11 @@ The current bot has genuine zero edge on statistics alone — all signals are ge
 
 ---
 
-### ✅ Close Open Positions — DONE
+### 🔄 Close Open Positions — IN PROGRESS
 
-Closed positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) — pre-AI NO bets at 50%, no signal. Now at 4/5 open positions. Bot has 1 slot free for new AI-backed trades.
+Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) — pre-AI NO bets at 50%, no signal.
+- ⚠️ Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — close manually or via auto-close feature before treating slot as free.
+- Bot currently at 6/5 open positions and remains blocked from new trades until both positions are confirmed closed.
 
 ### ✅ Fix `per_market_timeout` Bug — DONE
 
@@ -232,7 +234,7 @@ Closed positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) — pre-AI NO b
 | AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
 | Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
 | Fix `per_market_timeout` bug | ✅ Done | `batch_analyze()` param added — AI pass no longer silently fails |
-| Close open positions | ✅ Done | 4/5 open — 1 slot free for new trades |
+| Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — must be closed manually or via auto-close before slot is free |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |

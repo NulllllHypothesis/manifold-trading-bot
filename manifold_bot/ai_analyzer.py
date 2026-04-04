@@ -8,7 +8,9 @@ Tries the local Ollama instance first (free, no rate limits),
 falls back to the DeepSeek API if Ollama is unavailable.
 """
 
+import concurrent.futures
 import json
+import logging
 import os
 import re
 import time
@@ -19,6 +21,8 @@ OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "deepseek-r1:14b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an expert prediction market analyst. Your job is to assess whether a market's current probability is accurate or mispriced.
 
@@ -223,9 +227,9 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
         markets: List of market dicts
         max_markets: Cap to avoid rate limits / long runtimes
         delay: Seconds between calls (be polite to APIs)
-        per_market_timeout: Max seconds to spend on a single market (not enforced at the
-            network level — individual _call_ollama / _call_deepseek_api timeouts are the
-            hard limits, but this value documents the intent and is available for future use)
+        per_market_timeout: Max seconds to spend on a single market before skipping it.
+            Each market analysis is submitted to a ThreadPoolExecutor and cancelled
+            (skipped) if it does not complete within this deadline.
 
     Returns:
         Dict keyed by market_id -> analysis result
@@ -238,7 +242,27 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
         if not market_id:
             continue
 
-        result = analyze_market(market)
+        result = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(analyze_market, market)
+            try:
+                result = future.result(timeout=per_market_timeout)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "AI analysis timed out after %.1fs for market %s (%s) — skipping.",
+                    per_market_timeout,
+                    market_id,
+                    market.get("question", "")[:60],
+                )
+                result = None
+            except Exception as exc:
+                logger.warning(
+                    "AI analysis raised an unexpected error for market %s: %s — skipping.",
+                    market_id,
+                    exc,
+                )
+                result = None
+
         if result:
             results[market_id] = result
             rec = result["recommendation"]
