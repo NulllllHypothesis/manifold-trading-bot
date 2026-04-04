@@ -31,6 +31,13 @@ This file contains distilled learnings and significant events from daily logs. U
 - Updated remote repository URL note: repository moved to `https://github.com/NulllllHypothesis/manifold-trading-bot.git`
 - All cron jobs healthy: Auto Trading (hourly at :15), Market Research (every 4h), Daily Summary (19:00 UTC)
 
+## 2026-04-04: AI Analyzer Feature Merged
+
+- Merged feature/ai-analyzer branch into main (PR #2)
+- Added calibration & feedback loop planning
+- Fixed auto_research.py truncation and daily_summary exit code
+- Current commit: 307fc42 (fix: restore truncated auto_research.py, fix daily_summary exit code)
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch
