@@ -251,8 +251,8 @@ class DailySummary:
         # Load data
         data = self.load_data()
         if not data:
-            print("Failed to load data. Cannot generate report.")
-            return False
+            print("No state file found — nothing to summarize yet.")
+            return True  # Not an error; bot just hasn't run yet
 
         # Calculate metrics
         metrics = self.calculate_daily_metrics(data)

@@ -298,7 +298,7 @@ class MarketResearcher:
             print(f"  Error analyzing markets: {e}")
             return []
 
-    def save_research(self, recommendations: List[Dict], error: Optional[str] = None):
+    def save_research(self, recommendations: List[Dict]):
         """Save research results to file"""
         # Determine schema version based on whether AI candidate fields are present.
         # If any recommendation is missing 'ai_was_candidate' it means the AI pass was
@@ -313,5 +313,84 @@ class MarketResearcher:
 
         research_data = {
             'schema_version': schema_version,  # v2 adds ai_was_candidate, ai_returned_skip, ai_recommendation fields
-            # ai_recommendation values in schema_version=2:
-            #   None           — market was
+            'timestamp': datetime.now().isoformat(),
+            'recommendations': recommendations,
+            'total_markets_analyzed': len(recommendations)
+        }
+
+        # Load existing research history
+        history = []
+        if os.path.exists(self.research_file):
+            try:
+                with open(self.research_file, 'r') as f:
+                    existing = json.load(f)
+                    history = existing.get('history', [])[-23:]  # Keep last 24 hours
+            except:
+                history = []
+
+        # Add new research
+        history.append(research_data)
+
+        # Save
+        data = {
+            'latest': research_data,
+            'history': history
+        }
+
+        with open(self.research_file, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        print(f"  Research saved to {self.research_file} (schema_version={schema_version})")
+
+    def run_hourly_research(self):
+        """Main research loop"""
+        print(f"\n{'='*60}")
+        print(f"MARKET RESEARCH - {datetime.now()}")
+        print(f"{'='*60}")
+
+        # Analyze markets
+        recommendations = self.analyze_markets(limit=100)
+
+        # Save results
+        if recommendations:
+            self.save_research(recommendations)
+
+            # Print top 5 recommendations
+            print(f"\nTop 5 Trading Opportunities:")
+            for i, rec in enumerate(recommendations[:5], 1):
+                pos_flag = "📌" if rec['existing_position'] else "🆕"
+                print(f"{i}. {pos_flag} {rec['question']}")
+                print(f"   Probability: {rec['probability']*100:.1f}% | Rec: {rec['recommendation']} | Confidence: {rec['confidence']*100:.0f}%")
+                print(f"   Strategies: {', '.join(rec['strategies'])}")
+        else:
+            print("No trading opportunities found this hour")
+
+        print(f"\nResearch completed at {datetime.now()}")
+        return recommendations
+
+def main():
+    """Main function"""
+    researcher = MarketResearcher()
+
+    # Skip research if at max positions (5)
+    open_positions = sum(
+        1 for trades in researcher.trader.positions.values()
+        if any(t.get('status') == 'OPEN' for t in (trades if isinstance(trades, list) else [trades]))
+    )
+    max_positions = 5
+    if open_positions >= max_positions:
+        print(f"At max positions ({open_positions}/{max_positions}). Skipping research.")
+        return 0
+
+    recommendations = researcher.run_hourly_research()
+
+    # Return number of recommendations for cron job monitoring
+    return len(recommendations)
+
+if __name__ == "__main__":
+    try:
+        num_recs = main()
+        sys.exit(0)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        sys.exit(1)
