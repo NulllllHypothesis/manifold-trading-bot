@@ -117,9 +117,45 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 - [x] Schema version written dynamically — v2 only if AI pass completed; v1 if aborted (blocks trading)
 - [x] Schema version guard in `auto_trader.py` — handles both flat and nested file layouts, refuses to trade on v1
 - [x] Auto-fixing review agent in `.github/scripts/claude-review.js` — reviews PRs and commits fixes directly
-- [ ] PR to main — pending agent review approval
+- [x] PR #2 merged to main
 
 > No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
+
+---
+
+### 🟡 Medium Priority — Calibration & Feedback Loop
+
+The bot currently has no memory of what happened. Markets resolve, bets settle, and nothing changes about how future markets are scored. This closes that loop.
+
+**Step 1 — Harvest resolved markets (foundation)**
+- [ ] Script `scripts/harvest_resolved.py` — calls `GET /v0/markets?isResolved=true`, pages through results, saves to SQLite
+  - Fields to store: `market_id`, `question`, `probability_at_close`, `outcome` (YES/NO), `close_date`, `category` (inferred)
+  - Aim for 1,000+ resolved markets as a starting corpus
+- [ ] Schedule as a weekly cron job (Manifold resolves ~100 markets/day)
+
+**Step 2 — Measure where the crowd is wrong**
+- [ ] Script `scripts/analyze_calibration.py` — groups resolved markets by probability bucket (0-10%, 10-20%, ..., 90-100%) and measures actual resolution rate per bucket
+  - If markets at 70% only resolve YES 55% of the time → crowd is overconfident at high probabilities
+  - Output: calibration table by bucket + by question category
+
+**Step 3 — Feed calibration into AI prompts**
+- [ ] Add a calibration context block to `ANALYSIS_PROMPT` in `ai_analyzer.py`:
+  ```
+  Historical calibration note: on this platform, markets at ~70% probability
+  resolve YES only 58% of the time (crowd tends to overprice high-probability events).
+  ```
+  No retraining needed — just prompt grounding with real data.
+
+**Step 4 — Close the loop: outcome tracking**
+- [ ] When `paper_trader.py` resolves a market, write to a `bet_outcomes` table: `(market_id, our_recommendation, our_confidence, ai_source, outcome, pnl)`
+- [ ] Weekly summary: accuracy by AI confidence band, by strategy, by question category
+  - "When AI confidence > 80%, we were right X% of the time"
+  - Use this to tune `MIN_CONFIDENCE` and blending weights over time
+
+**Why this matters:**
+The current bot has genuine zero edge on statistics alone — all signals are generic. Calibration gives it something no one else has: a learned correction for this specific platform's crowd biases. A market at 72% that historically resolves YES only 56% of the time is a NO bet regardless of what the question says.
+
+> Prerequisite: SQLite storage (see below). Harvest script can use flat JSON as a stopgap.
 
 ---
 
@@ -186,7 +222,8 @@ Two open positions are in non-existent mock markets and are stuck. Need a script
 | Daily summary | ✅ Done | Cron at 19:00 UTC |
 | Project structure | ✅ Done | automation/, tests/, scripts/, docs/, memory/ |
 | Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
-| AI integration | ✅ Done | `ai_analyzer.py` + wired into research, PR pending |
+| AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
+| Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |
