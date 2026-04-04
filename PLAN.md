@@ -86,12 +86,15 @@ Full rules in `AGENTS.md`.
 
 ---
 
-## Current Trading State (as of 2026-03-30)
+## Current Trading State (as of 2026-04-04)
 
-- **Paper balance:** ~$525 (started $1,000)
-- **Open positions:** 6 (2 are in non-existent mock markets — need closing)
-- **Auto-trader confidence threshold:** 65% (plan originally said 70% — kept at 65% for now)
-- **Trade logging:** `auto_trades.json` (SQLite planned for later)
+- **Paper balance:** $530 (started $1,000)
+- **Open positions:** 6 (exceeds max_positions=5 — bot is fully blocked from new trades)
+- **All positions:** NO at 50% probability, placed before AI integration
+- **Last trade:** 2026-04-03
+- **Auto-trader confidence threshold:** 65%
+- **Trade logging:** `auto_trades.json` (6 trades total)
+- **🔴 Immediate action needed:** Close positions to unblock the bot (see "Close Mock Positions" below)
 
 ---
 
@@ -202,9 +205,19 @@ The current bot has genuine zero edge on statistics alone — all signals are ge
 
 ---
 
-### 🟢 Lower Priority — Close Mock Positions
+### 🔴 Immediate — Close Open Positions
 
-Two open positions are in non-existent mock markets and are stuck. Need a script or manual step to close/remove them from `paper_trading_state.json` to free up capacity for real trades.
+All 6 positions are blocking new trades (max is 5, and we're at 6). All are NO bets at 50% — placed pre-AI, no real signal behind them.
+
+- [ ] Run `scripts/fix_portfolio.py` or manually mark positions as CLOSED in `manifold_bot/paper_trading_state.json`
+- [ ] Verify Manifold has resolved any of these markets (some may have already resolved)
+- [ ] After cleanup: confirm `open_positions < 5` so new AI-backed trades can execute
+
+### 🔴 Immediate — Fix `per_market_timeout` Bug
+
+`auto_research.py` passes `per_market_timeout=90` to `batch_analyze()` but the parameter doesn't exist in `ai_analyzer.py`. Every research run raises `TypeError` silently (caught by the broad `except Exception`), writes `schema_version=1`, and blocks all trading.
+
+- [ ] Add `per_market_timeout: float = 90.0` to `batch_analyze()` signature in `manifold_bot/ai_analyzer.py`
 
 ---
 
@@ -223,8 +236,10 @@ Two open positions are in non-existent mock markets and are stuck. Need a script
 | Project structure | ✅ Done | automation/, tests/, scripts/, docs/, memory/ |
 | Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
 | AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
+| Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
+| Fix `per_market_timeout` bug | 🔴 Blocking | `batch_analyze()` missing param — AI pass silently fails every run |
+| Close open positions | 🔴 Blocking | 6/5 open — bot cannot place new trades |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |
-| Close mock positions | ❌ Not started | Blocking 2 position slots |

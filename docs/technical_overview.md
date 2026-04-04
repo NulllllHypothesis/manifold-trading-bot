@@ -2,7 +2,11 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-> **Last updated: 2026-04-03** — AI integration complete (see Part 3 and Part 4 for changes).
+> ***Known code bug:** `auto_research.py` calls `batch_analyze(per_market_timeout=90)` but `ai_analyzer.py`'s `batch_analyze()` doesn't accept that parameter yet — it will raise `TypeError` on every research run until fixed.
+
+---
+
+*Last updated: 2026-04-04** — AI integration complete, robustness fixes applied, calibration loop planned.
 
 ---
 
@@ -203,9 +207,9 @@ What it gets back:
 **What it does:** Simulates placing and tracking bets. Reads/writes `manifold_bot/paper_trading_state.json`.
 
 **Current state of the portfolio:**
-- Balance: $655
-- 4 open positions (all bet NO at 50% probability)
-- Max positions: 5 (1 slot free)
+- Balance: $530
+- 6 open positions (all bet NO at 50% probability, amounts $60-$100)
+- Max positions: 5 — **currently at max, bot is blocked from new trades until a position closes**
 
 Key methods:
 - `place_paper_bet(market_id, outcome, amount, probability)` — deducts from balance, saves to state
@@ -297,7 +301,7 @@ position_size = base_size * multiplier
 
 So with $684 balance and 65% confidence: `$68.4 * 1.0 = $68.4`, rounded to nearest $5 = `$70`.
 
-**Why trades aren't executing right now:** 4 positions are open, max is 5, so 1 slot is available. But all recommendations are coming in at exactly 60-62% confidence, which is below the 65% threshold. Nothing passes the filter.
+**Why trades aren't executing right now:** 6 positions are open against a max of 5. The bot is completely blocked — `should_trade_market()` rejects everything at the max positions check before even looking at confidence. Need to close some positions first (see Part 5).
 
 ---
 
@@ -318,13 +322,16 @@ Formats a Telegram-ready message. The message gets saved to `telegram_daily_summ
 ### Supporting Files
 
 #### `manifold_bot/paper_trading_state.json`
-The live portfolio. Every bet is here. Current state: 4 open positions, all betting NO at 50% probability on different markets, $655 balance remaining from $1000 start.
+The live portfolio. Gitignored (runtime data). Current state: 6 open positions all betting NO at 50% probability, $530 balance remaining from $1000 start. All 6 positions were placed before the AI integration — the bot is currently at max capacity and cannot place new trades.
 
 #### `market_research.json`
-~426 KB file. Contains the last 24 hours of hourly research runs. Each run has ~50-100 market recommendations. This is the bridge between research and trading.
+Contains the last 24 hours of hourly research runs (schema_version 2). Each run has ~50-100 market recommendations with AI scores on the top 5. Bridge between research and trading.
 
 #### `auto_trades.json`
-Log of every trade the bot has actually executed. 8 trades total so far.
+Log of every trade the bot has actually executed. 6 trades total, last on 2026-04-03.
+
+#### `generate_report.py` / `generate_pdf.py`
+One-off scripts (hardcoded to server paths) that generate a human-readable PDF trading report using `reportlab`. Not part of the automated pipeline — run manually on the server for ad-hoc reporting.
 
 ---
 
@@ -348,27 +355,35 @@ These two strategies fundamentally disagree at the same probability levels. If a
 
 When both fire they cancel out (tie = skip). The AI layer above them partially compensates for this — if the stats cancel out but AI has conviction, AI can still push the score.
 
-### Still present — All Current Bets Are NO at 50%
+### Still present — All Current Bets Are NO at 50%, Bot at Max Capacity
 
-Every open position is a NO bet at exactly 50% probability — payout of 2x, barely better than a coin flip. These were placed before the AI integration. Future trades will require AI agreement, which should avoid this.
+All 6 open positions are NO bets at exactly 50% probability — payout of 2x, barely better than a coin flip. These were placed before the AI integration. The bot is now blocked at `max_positions=5` (actually 6, exceeding the limit), so no new trades execute until positions close or are manually cleared. Future trades will require AI agreement, which should produce better-differentiated entries.
 
 ---
 
 ## Part 5 — What's Next
 
 **Done:**
-- ✅ AI integration (DeepSeek local model)
-- ✅ Volume spike avg fixed
+- ✅ AI integration (local Ollama `deepseek-r1:14b`, DeepSeek API fallback)
+- ✅ Volume spike avg fixed (median of fetched markets)
+- ✅ Confidence blending with floor/cap system
+- ✅ Schema versioning + guard (auto_trader refuses pre-AI research)
+- ✅ Auto-fixing review agent (commits fixes directly to PR branch)
 
-**Still todo, in priority order:**
+**Immediate blocker:**
+- 🔴 Close open positions — bot is at max capacity (6/5), no new trades until this is resolved. Run `scripts/fix_portfolio.py` or manually edit `manifold_bot/paper_trading_state.json`.
 
-**1. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No signal there.
+**Next steps, in priority order:**
 
-**2. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
+**1. Calibration & feedback loop** — Harvest resolved markets from Manifold API, measure where crowd is systematically wrong by probability bucket, inject that context into AI prompts. Full plan in PLAN.md.
 
-**3. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+**2. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No edge there.
 
-**4. SQLite storage** — Replace the flat JSON state files with a proper database.
+**3. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
+
+**4. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+
+**5. SQLite storage** — Replace the flat JSON state files with a proper database.
 
 ---
 
