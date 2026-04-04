@@ -205,19 +205,13 @@ The current bot has genuine zero edge on statistics alone — all signals are ge
 
 ---
 
-### 🔴 Immediate — Close Open Positions
+### ✅ Close Open Positions — DONE
 
-All 6 positions are blocking new trades (max is 5, and we're at 6). All are NO bets at 50% — placed pre-AI, no real signal behind them.
+Closed positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) — pre-AI NO bets at 50%, no signal. Now at 4/5 open positions. Bot has 1 slot free for new AI-backed trades.
 
-- [ ] Run `scripts/fix_portfolio.py` or manually mark positions as CLOSED in `manifold_bot/paper_trading_state.json`
-- [ ] Verify Manifold has resolved any of these markets (some may have already resolved)
-- [ ] After cleanup: confirm `open_positions < 5` so new AI-backed trades can execute
+### ✅ Fix `per_market_timeout` Bug — DONE
 
-### 🔴 Immediate — Fix `per_market_timeout` Bug
-
-`auto_research.py` passes `per_market_timeout=90` to `batch_analyze()` but the parameter doesn't exist in `ai_analyzer.py`. Every research run raises `TypeError` silently (caught by the broad `except Exception`), writes `schema_version=1`, and blocks all trading.
-
-- [ ] Add `per_market_timeout: float = 90.0` to `batch_analyze()` signature in `manifold_bot/ai_analyzer.py`
+`auto_research.py` passes `per_market_timeout=90` to `batch_analyze()` — parameter added to signature in `manifold_bot/ai_analyzer.py`. AI pass no longer raises `TypeError`.
 
 ---
 
@@ -237,8 +231,8 @@ All 6 positions are blocking new trades (max is 5, and we're at 6). All are NO b
 | Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
 | AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
 | Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
-| Fix `per_market_timeout` bug | 🔴 Blocking | `batch_analyze()` missing param — AI pass silently fails every run |
-| Close open positions | 🔴 Blocking | 6/5 open — bot cannot place new trades |
+| Fix `per_market_timeout` bug | ✅ Done | `batch_analyze()` param added — AI pass no longer silently fails |
+| Close open positions | ✅ Done | 4/5 open — 1 slot free for new trades |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |

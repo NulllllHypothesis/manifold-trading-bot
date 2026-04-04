@@ -215,7 +215,7 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     return result
 
 
-def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0) -> Dict[str, Dict]:
+def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_market_timeout: float = 90.0) -> Dict[str, Dict]:
     """
     Analyze a batch of markets.
 
@@ -223,6 +223,9 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0) -> D
         markets: List of market dicts
         max_markets: Cap to avoid rate limits / long runtimes
         delay: Seconds between calls (be polite to APIs)
+        per_market_timeout: Max seconds to spend on a single market (not enforced at the
+            network level — individual _call_ollama / _call_deepseek_api timeouts are the
+            hard limits, but this value documents the intent and is available for future use)
 
     Returns:
         Dict keyed by market_id -> analysis result
