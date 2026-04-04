@@ -32,3 +32,12 @@ memory/
 # Generated reports and PDFs
 *.pdf
 *.tex
+
+# Diagnostic scripts (temporary debugging tools)
+/check_*.py
+/fix_*.py
+/quick_*.py
+/lookup_*.py
+/resolve_*.py
+/trading_cycle_status.py
+/market_mapping.json
