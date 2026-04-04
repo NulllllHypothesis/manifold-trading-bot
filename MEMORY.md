@@ -1,0 +1,32 @@
+# MEMORY.md - Long-Term Memory
+
+This file contains distilled learnings and significant events from daily logs. Updated periodically during heartbeat checks.
+
+## 2026-03-30: Project Reorganization
+
+- Restructured workspace into clear directories: `automation/`, `tests/`, `scripts/`, `docs/`
+- Cron jobs updated to run from `automation/` directory
+- Key cron jobs: Market Research (every 4h), Auto Trading (every hour at :15), Daily Summary (19:00 UTC)
+- OpenClaw cron commands now use isolated target with deepseek/deepseek-reasoner model
+
+## 2026-04-02: Cron Job Setup & Monitoring
+
+- Added missing Auto Trading cron job (ID: 00695c33-9a68-4271-93c3-b61496f92725)
+- All three cron jobs now running healthy
+- Heartbeat checks every 30 minutes to monitor git sync and cron status
+- Git repository: `https://github.com/amirghari/manifold-trading-bot`
+- Current commit: `6137b9e` (fix: skip research when at max positions, reduce to every 4h)
+
+## 2026-04-03: Git Updates
+
+- Main branch updated to `fcfd339` ("tech overview") and `df60609` ("review agent set up")
+- Feature branch `feature/ai-analyzer` created for development
+- Heartbeat monitoring continues with 30-minute intervals
+
+## Rules & Conventions
+
+- Never push directly to `main` branch
+- All development happens on feature branches
+- Run full test suite before opening PR
+- Cron jobs always run from `main` branch
+- Heartbeat checks include git fetch and cron status verification
