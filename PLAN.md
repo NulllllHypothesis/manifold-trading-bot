@@ -162,6 +162,43 @@ The current bot has genuine zero edge on statistics alone — all signals are ge
 
 ---
 
+### 🟡 Medium Priority — Smart Position Swap (Human-in-the-Loop)
+
+When all 5 positions are full, the bot is currently frozen. This feature turns `max_positions` from a hard block into a dynamic portfolio manager — but keeps humans in control of every swap.
+
+**How it works:**
+1. New cron job runs when positions are full (or piggybacks on the existing trading cron)
+2. For each open position, fetch the **current market probability** from the Manifold API and compute:
+   - **Unrealised P&L direction** — has the market moved for or against us since entry?
+   - **Time to close** — markets resolving soon that are going against us are the worst holders
+3. For each new high-confidence opportunity from `market_research.json`, compute **Expected Value**:
+   ```
+   EV = estimated_true_probability × payout_if_win - stake
+   ```
+4. If `new_opportunity.EV > weakest_position.EV` AND the weakest position is losing (market moved against us):
+   - Send a Telegram message to the group:
+     > "Position X (NO on 'Will Y happen?' — entered 50%, now 65%, losing $12) could be replaced by Market Z (82% AI confidence, EV +$34). Reply /approve to swap."
+   - Write a `pending_swap.json` flag file with the proposed trade
+5. Human replies `/approve` in Telegram → OpenClaw executes the close + new trade
+
+**Why EV over confidence:**
+- Confidence is frozen at entry time and doesn't reflect market movement
+- A position entered at 65% that's now at 30% is winning — don't touch it
+- A position entered at 65% that's now at 75% is losing — strong candidate to swap
+- EV captures both the AI's conviction AND the current market price in one number
+
+**Prerequisites:**
+- [ ] Store `entry_confidence` and `entry_probability` in `paper_trading_state.json` at trade time (1-line change in `paper_trader.py`)
+- [ ] Add `get_current_probability(market_id)` call in swap checker — uses existing `manifold_api.py`
+- [ ] `scripts/position_swap_checker.py` — standalone script that runs the swap logic
+- [ ] Wire into cron (new job or extend existing trading cron)
+- [ ] `pending_swap.json` flag file checked by OpenClaw before executing
+
+> Depends on Real Telegram Bot below for the `/approve` command to work interactively.
+> Can be partially built without it — bot posts the message, human manually runs a close script.
+
+---
+
 ### 🟡 Medium Priority — Real Telegram Bot
 
 `automation/send_telegram.py` is currently a placeholder — it just prints to console.
@@ -236,6 +273,7 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 | Fix `per_market_timeout` bug | ✅ Done | `batch_analyze()` param added — AI pass no longer silently fails |
 | Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — must be closed manually or via auto-close before slot is free |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
+| Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |
