@@ -178,15 +178,25 @@ class AutoTrader:
         if success:
             print(f"  ✅ Trade executed successfully")
 
+            # Build reasoning
+            reasoning_parts = []
+            if recommendation.get('strategies'):
+                reasoning_parts.append(f"Strategies: {', '.join(recommendation['strategies'])}")
+            if recommendation.get('ai_reasoning'):
+                reasoning_parts.append(f"AI: {recommendation['ai_reasoning']}")
+            reasoning = ' | '.join(reasoning_parts) if reasoning_parts else 'No reasoning provided'
+
             # Log trade
             self.log_trade({
                 'market_id': market_id,
+                'question': recommendation['question'],
                 'outcome': outcome,
                 'amount': amount,
                 'probability': current_prob,
                 'confidence': confidence,
                 'timestamp': datetime.now().isoformat(),
                 'strategies': recommendation.get('strategies', []),
+                'reasoning': reasoning,
                 'balance_after': self.trader.balance
             })
 
