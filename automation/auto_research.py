@@ -372,12 +372,12 @@ def main():
     """Main function"""
     researcher = MarketResearcher()
 
-    # Skip research if at max positions (5)
+    # Skip research if at max positions (now 10, increased from 5)
     open_positions = sum(
         1 for trades in researcher.trader.positions.values()
         if any(t.get('status') == 'OPEN' for t in (trades if isinstance(trades, list) else [trades]))
     )
-    max_positions = 5
+    max_positions = 10  # Increased from 5 to match auto_trader.py
     if open_positions >= max_positions:
         print(f"At max positions ({open_positions}/{max_positions}). Skipping research.")
         return 0

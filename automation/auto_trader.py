@@ -28,10 +28,10 @@ class AutoTrader:
         self.trader = PaperTrader()  # Will auto-load state from __init__
 
         # Risk management parameters
-        self.max_positions = 5
+        self.max_positions = 10  # Increased from 5 to allow more diversification (currently 8 open)
         self.max_position_size = 0.1  # 10% of balance per trade
-        self.min_confidence = MIN_CONFIDENCE
-        self.cooldown_hours = 6  # Hours before trading same market again
+        self.min_confidence = MIN_CONFIDENCE  # Now 0.60 (reduced from 0.65)
+        self.cooldown_hours = 4  # Reduced from 6 hours to allow faster re-entry
 
     def load_latest_research(self) -> Optional[Dict]:
         """Load the latest market research"""
