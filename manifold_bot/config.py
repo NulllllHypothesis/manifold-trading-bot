@@ -27,7 +27,7 @@ MAX_BET_AMOUNT = 100
 # Trading confidence threshold — single source of truth.
 # Dependents (all coupled — update together if this changes):
 #   auto_trader.py:   AutoTrader.min_confidence = MIN_CONFIDENCE
-#   auto_research.py: _WEAK_STAT_CAP   = MIN_CONFIDENCE - 0.01  (0.64 — cap for weak-stat markets)
-#   auto_research.py: _STAT_BOOST_FLOOR = MIN_CONFIDENCE        (0.65 — floor before AI can boost)
-#   auto_research.py: _MAX_AI_BOOST    = MIN_CONFIDENCE + 0.10  (0.75 — cap for exactly-floor markets)
-MIN_CONFIDENCE = 0.65
+#   auto_research.py: _WEAK_STAT_CAP   = MIN_CONFIDENCE - 0.01  (0.59 — cap for weak-stat markets)
+#   auto_research.py: _STAT_BOOST_FLOOR = MIN_CONFIDENCE        (0.60 — floor before AI can boost)
+#   auto_research.py: _MAX_AI_BOOST    = MIN_CONFIDENCE + 0.10  (0.70 — cap for exactly-floor markets)
+MIN_CONFIDENCE = 0.60
