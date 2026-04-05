@@ -51,6 +51,15 @@ This file contains distilled learnings and significant events from daily logs. U
 - Provides audit trail for trading decisions: combines strategies used and AI reasoning
 - All tests pass; cron jobs will pick up change in next trading cycle
 
+## 2026-04-05: Risk Parameter Adjustment
+
+- Merged feature/adjust-risk-parameters branch (commit: 55d588e)
+- Increased max_positions from 5 to 10 (bot had 8 open positions, was stuck)
+- Reduced confidence threshold from 0.65 to 0.60 to capture more opportunities
+- Reduced cooldown period from 6 to 4 hours for faster re-entry
+- Bot immediately executed 2 new trades after adjustment (now at 10/10 max positions)
+- Current balance: $379.59 with $500 in open positions (57% exposure)
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch
