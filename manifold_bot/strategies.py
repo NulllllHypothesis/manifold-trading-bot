@@ -120,7 +120,7 @@ class TradingStrategies:
         return None
 
     @staticmethod
-    def volume_spike_strategy(market: Dict, avg_volume: float) -> Optional[str]:
+    def volume_spike_strategy(market: Dict, avg_volume: float, spike_multiplier: float = 2.0) -> Optional[str]:
         """
         Detect unusual recent trading activity using volume24Hours.
 
@@ -128,12 +128,15 @@ class TradingStrategies:
         historical volume doesn't trigger on a quiet day.  avg_volume should be
         the median volume24Hours across all markets in the current fetch batch.
 
+        spike_multiplier: how many times the median a market must trade to count
+        as a spike.  Default 2.0 — calibrated for 24h volume (not all-time).
+
         Confidence: 0.65.
         """
         volume24 = market.get('volume24Hours') or 0
         probability = market.get('probability', 0.5)
 
-        if avg_volume > 0 and volume24 > avg_volume * 2:
+        if avg_volume > 0 and volume24 > avg_volume * spike_multiplier:
             return "YES" if probability > 0.5 else "NO"
 
         return None
@@ -408,4 +411,7 @@ def analyze_market_for_trading(market: Dict) -> Dict:
             analysis['recommended_action'] = 'YES'
             analysis['confidence'] = yes_votes / len(signals)
         elif no_votes > yes_votes:
-            analysis['recommended_
+            analysis['recommended_action'] = 'NO'
+            analysis['confidence'] = no_votes / len(signals)
+
+    return analysis
