@@ -291,6 +291,19 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 
 `auto_research.py` passes `per_market_timeout=90` to `batch_analyze()` — parameter added to signature in `manifold_bot/ai_analyzer.py`. AI pass no longer raises `TypeError`.
 
+### ✅ Fix Cron Timeout — DONE
+
+`max_markets` reduced from 5 → 3. Worst-case AI pass: 3×90s = 270s, within the 300s cron limit. Previously 5×90s = 450s caused the research job to be killed mid-run every cycle, producing no output. `per_market_timeout` kept at 90s — reducing it would cause all markets to time out if Ollama inference takes ~70-80s.
+Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add buffer.
+
+### ✅ API Key Auto-loading — DONE
+
+`manifold_bot/config.py` now parses `.env` from the project root at import time via `os.environ.setdefault`. Previously the key was only read from the OS environment, so scripts run outside a login shell (cron jobs, tests without export) always got a 401. No extra dependencies — plain file read.
+
+### ✅ EV Stored at Trade Time — DONE
+
+`auto_trader.py` now computes `estimated_ev = P(win) × payout_if_win − stake` using `ai_estimated_probability` and `current_prob` at the moment a trade executes. Stored as `estimated_ev` in every `auto_trades.json` record. `null` when no AI estimate is available. Unlocks calibration step 4 and smart position swap EV comparison.
+
 ---
 
 ## Phase Status
@@ -313,8 +326,11 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 | Distillation logging | ✅ Done | `logs/llm_calls.jsonl` with CoT extraction + log rotation, PR #5 merged 2026-04-06 |
 | Strategy improvements | ✅ Done | 5 strategies with richer API fields, Kelly wiring, recency boost, PR #6 merged 2026-04-06 |
 | Revert MIN_CONFIDENCE to 0.65 | ✅ Done | Reverted in commit dfdec11 |
-| Position resolution loop | ✅ Done | `scripts/resolve_positions.py` + cron at :30, unblocks frozen bot |
-| Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — auto-resolver will handle when they settle |
+| Position resolution loop | ✅ Done | `scripts/resolve_positions.py` + cron at :10, unblocks frozen bot |
+| EV stored at trade time | ✅ Done | `estimated_ev` field in `auto_trades.json`, unlocks calibration step 4 |
+| API key auto-loading | ✅ Done | `config.py` parses `.env` at import — no more 401s in cron/tests |
+| Cron timeout fix | ✅ Done | `max_markets` 5→3, worst case 270s < 300s limit |
+| Close open positions | 🔄 In Progress | Bot at 10/10 positions — auto-resolver will free slots as markets settle |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
