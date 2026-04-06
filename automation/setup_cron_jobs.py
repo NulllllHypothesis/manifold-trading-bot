@@ -3,8 +3,14 @@
 Setup cron jobs for automated trading system.
 This creates OpenClaw cron jobs for:
 1. Hourly market research
-2. Hourly trading (after research)
-3. Daily summary report
+2. Hourly position resolution (after research, before trading)
+3. Hourly trading (after research and resolution)
+4. Daily summary report
+
+Schedule per hour:
+  :00 - Market Research
+  :10 - Position Resolution (frees slots before trading)
+  :20 - Auto Trading (uses freed slots from resolution)
 """
 
 import sys
@@ -12,12 +18,20 @@ import os
 from datetime import datetime, timedelta
 import json
 
+# Telegram channel ID loaded from environment variable.
+# Set TELEGRAM_CHANNEL_ID in your environment or .env file.
+# See .env.example for documentation.
+TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID', '-5240775171')
+
 def create_cron_jobs():
     """Create OpenClaw cron jobs for automated trading"""
 
     jobs = []
 
     # Job 1: Hourly Market Research (at :00 of every hour)
+    # An LLM agent is intentionally used here because auto_research.py produces
+    # free-form analysis that benefits from natural language reasoning and
+    # summarisation before results are stored for the trader.
     research_job = {
         "name": "Manifold Market Research",
         "schedule": {
@@ -35,19 +49,72 @@ def create_cron_jobs():
         "delivery": {
             "mode": "announce",
             "channel": "telegram",
-            "to": "-5240775171",
+            "to": TELEGRAM_CHANNEL_ID,
             "bestEffort": True
         },
         "enabled": True
     }
     jobs.append(("market-research-hourly", research_job))
 
-    # Job 2: Hourly Trading (at :15 of every hour, after research)
+    # Job 2: Position Resolution (at :10 of every hour, after research, before trading)
+    # Runs at :10 to free up slots so they are available for trading at :20.
+    #
+    # NOTE: resolve_positions.py is a fully self-contained, deterministic script
+    # that requires no LLM reasoning.  We therefore use a direct "exec" job so
+    # that the command is run directly by the platform without invoking an LLM.
+    # This avoids unnecessary latency, API cost, and the risk of a model
+    # refusing or misinterpreting the instruction.
+    #
+    # If the platform does not support "exec" jobs and "agentTurn" is the only
+    # available kind, replace the payload below with:
+    #
+    #   {
+    #     "kind": "agentTurn",
+    #     "systemPrompt": "You are a non-interactive shell executor. When given a
+    #                      shell command you MUST run it exactly as written using
+    #                      your bash tool and report its exit code. Do not
+    #                      interpret, modify, or refuse the command.",
+    #     "message": "Execute exactly: cd /home/hackathon/.openclaw/workspace && python3 scripts/resolve_positions.py",
+    #     "model": "openai/gpt-4o-mini",   # cheaper/faster is fine for a pass-through
+    #     "timeoutSeconds": 120
+    #   }
+    resolve_job = {
+        "name": "Manifold Position Resolution",
+        "schedule": {
+            "kind": "cron",
+            "expr": "10 * * * *",  # Every hour at minute 10
+            "tz": "UTC"
+        },
+        "payload": {
+            # "exec" runs the command directly without an LLM intermediary.
+            # All resolution logic lives in resolve_positions.py; no model
+            # reasoning is needed.
+            "kind": "exec",
+            "command": "python3",
+            "args": [
+                "/home/hackathon/.openclaw/workspace/scripts/resolve_positions.py"
+            ],
+            "timeoutSeconds": 120
+        },
+        "sessionTarget": "isolated",
+        "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": TELEGRAM_CHANNEL_ID,
+            "bestEffort": True
+        },
+        "enabled": True
+    }
+    jobs.append(("position-resolution", resolve_job))
+
+    # Job 3: Hourly Trading (at :20 of every hour, after research and resolution)
+    # An LLM agent is intentionally used here because auto_trader.py relies on
+    # the model's judgement to select and size trades from the research output.
     trading_job = {
         "name": "Manifold Auto Trading",
         "schedule": {
             "kind": "cron",
-            "expr": "15 * * * *",  # Every hour at minute 15
+            "expr": "20 * * * *",  # Every hour at minute 20
             "tz": "UTC"
         },
         "payload": {
@@ -60,14 +127,17 @@ def create_cron_jobs():
         "delivery": {
             "mode": "announce",
             "channel": "telegram",
-            "to": "-5240775171",
+            "to": TELEGRAM_CHANNEL_ID,
             "bestEffort": True
         },
         "enabled": True
     }
     jobs.append(("auto-trading-hourly", trading_job))
 
-    # Job 3: Daily Summary Report (at 19:00 UTC every day)
+    # Job 4: Daily Summary Report (at 19:00 UTC every day)
+    # An LLM agent is intentionally used here because daily_summary.py produces
+    # a human-readable narrative summary that benefits from natural language
+    # generation before being posted to Telegram.
     summary_job = {
         "name": "Daily Trading Summary",
         "schedule": {
@@ -85,7 +155,7 @@ def create_cron_jobs():
         "delivery": {
             "mode": "announce",
             "channel": "telegram",
-            "to": "-5240775171",
+            "to": TELEGRAM_CHANNEL_ID,
             "bestEffort": True
         },
         "enabled": True
@@ -116,7 +186,12 @@ def print_setup_instructions(jobs):
     print("CRON JOB SETUP INSTRUCTIONS")
     print("="*60)
 
-    print("\n📋 JOB SCHEDULE:")
+    print("\n📋 JOB SCHEDULE (all times UTC, repeating every hour):")
+    print("   :00 - Market Research")
+    print("   :10 - Position Resolution (frees slots before trading)")
+    print("   :20 - Auto Trading (uses freed slots from resolution)")
+    print("   19:00 daily - Daily Summary Report")
+    print()
     for job_id, job_def in jobs:
         name = job_def.get("name", job_id)
         schedule = job_def.get("schedule", {})
@@ -127,6 +202,7 @@ def print_setup_instructions(jobs):
     print("\n🔧 SETUP STEPS:")
     print("  1. Test each script manually first:")
     print("     python3 automation/auto_research.py")
+    print("     python3 scripts/resolve_positions.py")
     print("     python3 automation/auto_trader.py")
     print("     python3 automation/daily_summary.py")
 
@@ -151,8 +227,14 @@ def print_setup_instructions(jobs):
     print("\n⚠️  IMPORTANT NOTES:")
     print("   • Make sure Python dependencies are installed")
     print("   • Verify Manifold API key is configured")
+    print("   • Set TELEGRAM_CHANNEL_ID in your environment or .env file")
+    print("     (see .env.example for reference)")
     print("   • Test with small amounts first")
     print("   • Monitor initial runs closely")
+    print("   • The position-resolution job uses 'exec' (no LLM) because")
+    print("     resolve_positions.py is fully deterministic and needs no")
+    print("     model reasoning.  See the source comments for fallback")
+    print("     instructions if your platform requires 'agentTurn'.")
 
     print("\n📞 SUPPORT:")
     print("   If jobs fail, check:")
@@ -165,6 +247,10 @@ def main():
     """Main function"""
     print("🚀 SETTING UP AUTOMATED TRADING CRON JOBS")
     print("="*60)
+
+    if TELEGRAM_CHANNEL_ID == '-5240775171':
+        print("⚠️  WARNING: Using default TELEGRAM_CHANNEL_ID fallback value.")
+        print("   Set the TELEGRAM_CHANNEL_ID environment variable to suppress this warning.")
 
     # Create job definitions
     jobs = create_cron_jobs()
