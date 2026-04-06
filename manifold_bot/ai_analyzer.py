@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-LLM_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LLM_LOG_DIR = Path(os.environ.get('LLM_LOG_DIR', Path(__file__).resolve().parent.parent / 'logs'))
 OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "deepseek-r1:14b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
@@ -80,12 +80,6 @@ Respond with this exact JSON structure:
 Only recommend YES or NO if you have genuine conviction the market is mispriced by at least 10 percentage points. Otherwise use SKIP."""
 
 
-def _extract_cot(raw: str) -> str:
-    """Extract chain-of-thought from <think> tags, if present."""
-    match = re.search(r'<think>(.*?)</think>', raw, re.DOTALL)
-    return match.group(1).strip() if match else ""
-
-
 def _rotate_log_if_needed(log_path: Path) -> None:
     """
     Rotate log_path if it exceeds LLM_LOG_MAX_BYTES.
@@ -102,24 +96,26 @@ def _rotate_log_if_needed(log_path: Path) -> None:
     if log_path.stat().st_size < LLM_LOG_MAX_BYTES:
         return
 
-    for i in range(LLM_LOG_BACKUP_COUNT, 0, -1):
-        if i == 1:
-            dest = log_path.parent / (log_path.name + ".1")
-            log_path.rename(dest)
-        else:
-            src = log_path.parent / (log_path.name + f".{i - 1}")
-            older = log_path.parent / (log_path.name + f".{i}")
-            if src.exists():
-                if older.exists():
-                    older.unlink()
-                src.rename(older)
+    # Shift existing backups: .2 -> .3, .1 -> .2 (high to low to avoid clobbering)
+    for i in range(LLM_LOG_BACKUP_COUNT, 1, -1):
+        src = log_path.parent / (log_path.name + f".{i - 1}")
+        older = log_path.parent / (log_path.name + f".{i}")
+        if src.exists():
+            if older.exists():
+                older.unlink()
+            src.rename(older)
+
+    # Rename the active log to .1
+    dest = log_path.parent / (log_path.name + ".1")
+    if dest.exists():
+        dest.unlink()
+    log_path.rename(dest)
 
 
 def _log_llm_call(
     model: str,
     system_prompt_hash: str,
     market_id: str,
-    raw_response: Optional[str],
     parsed_output: Optional[Dict] = None,
 ) -> None:
     """Append a JSONL record for every LLM call (for future distillation).
@@ -136,28 +132,26 @@ def _log_llm_call(
         has not changed between runs without duplicating its text.
       - market_id: a stable, non-sensitive identifier that can be joined
         against the market database to reconstruct the prompt if needed.
-      - chain_of_thought: extracted <think> block only (no market data echo).
       - parsed_output: the structured fields extracted from the response
         (recommendation, confidence, etc.) which do not reproduce raw
         market data.
 
-    NOTE: Logging of raw_response is intentionally omitted pending a
-    compliance review.  See the issue comment for context.
+    NOTE: Logging of the raw LLM response (including any chain-of-thought)
+    is intentionally omitted pending a compliance review.  The model may
+    echo or summarise market data from the user prompt, so storing the raw
+    response verbatim raises the same concerns as storing the prompt itself.
+    See the issue comment for context.
     """
     try:
         LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        cot = _extract_cot(raw_response) if raw_response else ""
 
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": model,
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
-            # raw_response is intentionally excluded pending compliance review.
-            # The LLM may echo or summarise market data from the user prompt,
-            # so storing it verbatim raises the same concerns as storing the
-            # prompt itself.
-            "chain_of_thought": cot,
+            # raw_response and chain_of_thought are intentionally excluded
+            # pending compliance review.  See docstring above.
             "parsed_output": parsed_output,
         }
 
@@ -278,7 +272,11 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     probability = market.get("probability", 0.5)
     volume = market.get("volume", 0)
     liquidity = market.get("totalLiquidity", market.get("liquidity", 0))
-    market_id = market.get("id", "")
+    market_id = market.get("id") or ""
+
+    if not market_id:
+        logger.warning("analyze_market called with market missing id field")
+        market_id = "UNKNOWN"
 
     # Format close date
     close_time_ms = market.get("closeTime")
@@ -325,7 +323,7 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     # raw_response is intentionally not forwarded to _log_llm_call — see
     # that function's docstring for the compliance rationale.
     model = OLLAMA_MODEL if source == "ollama" else DEEPSEEK_MODEL
-    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, raw_response=None, parsed_output=result)
+    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, parsed_output=result)
 
     if result:
         result["source"] = source
