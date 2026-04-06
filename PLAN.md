@@ -121,8 +121,12 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 - [x] Schema version guard in `auto_trader.py` — handles both flat and nested file layouts, refuses to trade on v1
 - [x] Auto-fixing review agent in `.github/scripts/claude-review.js` — reviews PRs and commits fixes directly
 - [x] PR #2 merged to main
+- [x] **Distillation logging** — every LLM call logged to `logs/llm_calls.jsonl` (gitignored): timestamp, model, market_id, system_prompt_sha256, chain_of_thought (extracted from `<think>` blocks), parsed_output. Log rotates at 100MB, 3 backups. Raw responses intentionally excluded (compliance). PR #5 merged 2026-04-06.
+- [x] PR #3 (addDistillation) closed — all changes included in PR #5
 
 > No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
+
+> **⚠️ Known regression:** `MIN_CONFIDENCE` was changed from 0.65 → 0.60 by the risk-parameters PR. This causes 4 test failures in `tests/test_ai.py` (tests assert `_WEAK_STAT_CAP == 0.64`, now it's `0.59`). Recommended: revert to 0.65 — the tests are correct, the change was premature.
 
 ---
 
@@ -270,7 +274,9 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 | Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
 | AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
 | Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
-| Fix `per_market_timeout` bug | ✅ Done | `batch_analyze()` param added — AI pass no longer silently fails |
+| Fix `per_market_timeout` bug | ✅ Done | `concurrent.futures` timeout enforcement in `batch_analyze()` |
+| Distillation logging | ✅ Done | `logs/llm_calls.jsonl` with CoT extraction + log rotation, PR #5 merged 2026-04-06 |
+| Revert MIN_CONFIDENCE to 0.65 | ❌ Pending | Was changed 0.65→0.60 in risk-params PR — 4 tests failing |
 | Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — must be closed manually or via auto-close before slot is free |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Smart position swap | ❌ Not started | EV-based swap with Telegram approval |

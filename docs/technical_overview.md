@@ -2,11 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-> ***Known code bug:** `auto_research.py` calls `batch_analyze(per_market_timeout=90)` but `ai_analyzer.py`'s `batch_analyze()` doesn't accept that parameter yet — it will raise `TypeError` on every research run until fixed.
-
----
-
-*Last updated: 2026-04-04** — AI integration complete, robustness fixes applied, calibration loop planned.
+*Last updated: 2026-04-06* — AI integration complete, distillation logging merged (PR #5), calibration loop planned.
 
 ---
 
@@ -159,8 +155,8 @@ If a market suddenly has a lot of activity (2x the median volume of all fetched 
 
 ---
 
-#### `manifold_bot/ai_analyzer.py` ← new
-**What it does:** Sends a market question to a local AI model and asks whether it's mispriced.
+#### `manifold_bot/ai_analyzer.py`
+**What it does:** Sends a market question to a local AI model and asks whether it's mispriced. Also logs every LLM call to `logs/llm_calls.jsonl` for future distillation/training.
 
 Two backends, tried in order:
 1. **Ollama** at `localhost:11434` — runs `deepseek-r1:14b` locally on the server. Free, no API cost, ~60 seconds per market on CPU.
@@ -188,18 +184,27 @@ What it gets back:
 }
 ```
 
-**How confidence blending works in auto_research.py:**
+**How confidence blending works in `auto_research.py`:**
 - AI agrees AND `stat_conf < 0.65` → blended result is capped at 0.64 (below trading threshold — AI cannot rescue a weak stat signal)
 - AI agrees AND `stat_conf ≥ 0.65` → `confidence = 0.4 × stat + 0.6 × AI`, capped at `stat_conf + 0.10` (AI can boost by at most 10 percentage points above the baseline)
 - AI disagrees → `confidence = stat × (0.4 + (1 - ai_conf) × 0.4)` — penalty scales with AI confidence; a very certain AI disagreement keeps only 40% of the stat score
 - AI says SKIP → statistical confidence unchanged, no AI boost
 
-`MIN_CONFIDENCE = 0.65` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change.
+`MIN_CONFIDENCE` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change. **Current value is 0.60** (changed from 0.65 by the risk-parameters PR — this is a known regression; 4 tests in `tests/test_ai.py` are failing because of it. Recommended: revert to 0.65).
 
-**Robustness guards added by agent review:**
-- `batch_analyze` is called with `delay=2` and `per_market_timeout=90` — prevents a hung Ollama call from stalling the hourly cron job
-- If the Manifold API returns markets that don't match by `id` field, the AI pass aborts with a hard error and `schema_version=1` is written, causing `auto_trader.py` to block trading rather than proceed without AI validation
-- `schema_version` is now written dynamically (2 if AI fields present, 1 if AI pass was skipped)
+**Distillation logging** (merged in PR #5):
+Every LLM call is appended to `logs/llm_calls.jsonl` (gitignored). Each record stores:
+- `timestamp`, `model`, `market_id`
+- `system_prompt_sha256` — hash of the static prompt so you can verify it hasn't changed between runs without bloating every record
+- `chain_of_thought` — the `<think>...</think>` block extracted from the raw model response (reasoning trace only, no market data echo)
+- `parsed_output` — the structured fields (recommendation, confidence, etc.)
+
+Raw responses and full prompts are intentionally NOT logged — the model may echo market data back, raising compliance concerns. The log rotates at 100MB, keeping 3 backups.
+
+**Robustness guards:**
+- `batch_analyze` is called with `delay=2` and `per_market_timeout=90` — prevents a hung Ollama call from stalling the hourly cron job. Each market runs in a `ThreadPoolExecutor(max_workers=1)` with a timeout.
+- If the Manifold API returns markets that don't match by `id` field, the AI pass aborts with a hard error and `schema_version=1` is written, causing `auto_trader.py` to block trading rather than proceed without AI validation.
+- `schema_version` is written dynamically (2 if AI fields present, 1 if AI pass was skipped or aborted).
 
 ---
 
@@ -367,23 +372,28 @@ All 6 open positions are NO bets at exactly 50% probability — payout of 2x, ba
 - ✅ AI integration (local Ollama `deepseek-r1:14b`, DeepSeek API fallback)
 - ✅ Volume spike avg fixed (median of fetched markets)
 - ✅ Confidence blending with floor/cap system
-- ✅ Schema versioning + guard (auto_trader refuses pre-AI research)
+- ✅ Schema versioning + guard (`auto_trader.py` refuses pre-AI research)
 - ✅ Auto-fixing review agent (commits fixes directly to PR branch)
+- ✅ `per_market_timeout` enforcement via `concurrent.futures` (prevents hung Ollama stalling cron)
+- ✅ Distillation logging — every LLM call appended to `logs/llm_calls.jsonl` with CoT extraction and log rotation (PR #5, merged 2026-04-06)
 
-**Immediate blocker:**
-- 🔴 Close open positions — bot is at max capacity (6/5), no new trades until this is resolved. Run `scripts/fix_portfolio.py` or manually edit `manifold_bot/paper_trading_state.json`.
+**Immediate blockers:**
+- 🔴 Close 2 stale positions on server (`6pAcuEd22A`, `yEcN9AzZ05`) — pre-AI NO bets at 50%, no signal. Bot is at 6/5 positions; blocked from new trades until these close. Edit `manifold_bot/paper_trading_state.json` on the server.
+- 🟡 Revert `MIN_CONFIDENCE` to 0.65 in `manifold_bot/config.py` — was changed to 0.60 by the risk-parameters PR. 4 tests in `tests/test_ai.py` are currently failing because of this. The tests are correct; the change was a bad call.
 
 **Next steps, in priority order:**
 
 **1. Calibration & feedback loop** — Harvest resolved markets from Manifold API, measure where crowd is systematically wrong by probability bucket, inject that context into AI prompts. Full plan in PLAN.md.
 
-**2. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No edge there.
+**2. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No edge there — the crowd is saying "I don't know," and so is our strategy.
 
-**3. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
+**3. Smart position swap** — When positions are full, evaluate whether any existing position should be replaced by a higher-EV new opportunity. EV-based comparison with Telegram approval. Full spec in PLAN.md.
 
-**4. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+**4. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
 
-**5. SQLite storage** — Replace the flat JSON state files with a proper database.
+**5. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+
+**6. SQLite storage** — Replace the flat JSON state files with a proper database.
 
 ---
 
@@ -406,8 +416,8 @@ Docker Container (Linux)
 
 The scripts run inside the container's shell. OpenClaw executes them as shell commands (via its `coding` tools profile), reads stdout, and forwards summaries to Telegram.
 
-**Environment variables** are loaded from `/etc/profile.d/hackathon.sh` before each cron command runs (we fixed this today). The API key is `MANIFOLD_API_KEY`.
+**Environment variables** are set in `/etc/profile.d/hackathon.sh`. Note: the OpenClaw gateway process is started at container boot by `runuser` and does NOT source this file. Cron sessions inherit the gateway's environment, so `MANIFOLD_API_KEY` is technically unavailable — but this only causes a warning; paper trading doesn't need it (PaperTrader works offline). To fix properly: add the key to `openclaw.json` or prefix cron commands with `source /etc/profile.d/hackathon.sh &&`.
 
 ---
 
-*Last updated: 2026-04-03*
+*Last updated: 2026-04-06*
