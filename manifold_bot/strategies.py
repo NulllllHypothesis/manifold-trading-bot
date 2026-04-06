@@ -9,7 +9,7 @@ Strategy inventory:
   mean_reversion          — bet against extremes, guarded by uniqueBettorCount
   volume_spike            — detect recent activity burst via volume24Hours
   creator_disagreement    — bet toward creator's resolution estimate when crowd diverges
-  thin_market             — bet toward the thin side of the liquidity pool (arb)
+  thin_market             — bet toward the underrepresented (thin) side of the liquidity pool
   is_stale_market         — pre-filter: returns True if market has no recent activity
 
 Confidence scores (used by auto_research.py voting):
@@ -20,8 +20,11 @@ Confidence scores (used by auto_research.py voting):
   thin_market             0.65
 """
 
+import logging
 import time
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class TradingStrategies:
@@ -147,11 +150,28 @@ class TradingStrategies:
         Threshold: 15pp gap required to act.
 
         Confidence: 0.75 (strongest signal — creator has asymmetric information).
+
+        NOTE: The Manifold API field `resolutionProbability` is only present on
+        some market types and is frequently absent or null on open markets.  If
+        this strategy never fires in practice, verify that the field is actually
+        being returned by logging `creator_hits` in auto_research.py:
+
+            creator_hits = sum(1 for m in markets if m.get('resolutionProbability') is not None)
+            print(f"[creator_disagreement] resolutionProbability present in {creator_hits}/{len(markets)} markets")
+
+        If creator_hits is consistently 0, the field name may differ in the API
+        response (e.g. nested under a sub-object) and this strategy will never
+        fire, making its 0.75 confidence weight misleading.
         """
         probability = market.get('probability', 0.5)
         resolution_prob = market.get('resolutionProbability')
 
         if resolution_prob is None:
+            logger.debug(
+                "creator_disagreement_strategy: resolutionProbability absent for market %s — strategy skipped. "
+                "If this is always the case, verify the API field name is correct.",
+                market.get('id', '<unknown>'),
+            )
             return None
 
         gap = resolution_prob - probability
@@ -162,16 +182,89 @@ class TradingStrategies:
         return "YES" if gap > 0 else "NO"
 
     @staticmethod
+    def log_creator_disagreement_field_presence(markets: List[Dict]) -> None:
+        """
+        Diagnostic helper: count how many markets in a batch have the
+        `resolutionProbability` field populated.
+
+        Call this from auto_research.py after fetching the market batch so you
+        can verify the field is actually present before relying on the 0.75
+        confidence weight assigned to creator_disagreement_strategy.
+
+        Example usage in auto_research.py::
+
+            TradingStrategies.log_creator_disagreement_field_presence(markets)
+
+        This prints and logs a line such as::
+
+            [creator_disagreement] resolutionProbability present in 3/200 markets
+        """
+        total = len(markets)
+        creator_hits = sum(
+            1 for m in markets if m.get('resolutionProbability') is not None
+        )
+        message = (
+            f"[creator_disagreement] resolutionProbability present in "
+            f"{creator_hits}/{total} markets"
+        )
+        print(message)
+        logger.info(message)
+        if creator_hits == 0:
+            warning = (
+                "[creator_disagreement] WARNING: resolutionProbability was not found "
+                "in any market in this batch. The field may be absent, null, or named "
+                "differently in the API response. The 0.75 confidence weight for "
+                "creator_disagreement_strategy is effectively wasted until this is resolved."
+            )
+            print(warning)
+            logger.warning(warning)
+
+    @staticmethod
     def thin_market_strategy(market: Dict) -> Optional[str]:
         """
-        Bet toward the thin side of the AMM liquidity pool.
+        Bet toward the underrepresented (thin) side of the AMM liquidity pool.
 
-        In Manifold's CFMM, when one side of the pool is very thin relative to
-        the other, a small bet moves the price a lot.  Betting toward the thin
-        side pushes the price back toward fair value — this is essentially
-        on-chain arbitrage.
+        How Manifold's CFMM works
+        -------------------------
+        Manifold uses a constant-product AMM with a YES pool (Y) and a NO pool (N).
+        The invariant is:
 
-        Imbalance threshold: 0.70 (thin side holds < 15% of total pool).
+            Y × N = k   (constant)
+
+        The implied probability of YES is:
+
+            P(YES) = N / (Y + N)
+
+        So a *large* NO pool relative to the YES pool means a *high* implied
+        probability of YES — and conversely, a *large* YES pool means a *low*
+        implied probability of YES.
+
+        Worked example
+        --------------
+        Suppose Y = 10, N = 90  →  total = 100
+          P(YES) = 90 / 100 = 0.90   (market says YES is very likely)
+          YES pool share = 10 / 100  = 0.10  → thin YES side
+
+        A thin YES pool does NOT mean the market is underestimating YES.
+        It means YES is *already priced very high* (90%).  Betting YES here
+        follows momentum and pushes the price even higher.
+
+        Correct mapping
+        ---------------
+        The intention is to detect *underpriced* outcomes and bet toward them:
+
+          • Thin YES pool (YES share < threshold)
+              → YES pool is small → NO pool is large → P(YES) is HIGH
+              → YES is already expensive; the *underpriced* side is NO
+              → Bet NO
+
+          • Thin NO pool (NO share < threshold)
+              → NO pool is small → YES pool is large → P(YES) is LOW
+              → NO is already expensive; the *underpriced* side is YES
+              → Bet YES
+
+        Imbalance threshold: 0.70 (thin side holds < 15% of total pool,
+        since (1 − 0.70) / 2 = 0.15).
 
         Confidence: 0.65.
         """
@@ -189,8 +282,9 @@ class TradingStrategies:
         if imbalance < 0.70:
             return None
 
-        # Bet toward the thin side
-        return "YES" if yes_pool < no_pool else "NO"
+        # Thin YES pool → P(YES) is high → YES is overpriced → bet NO.
+        # Thin NO  pool → P(YES) is low  → NO  is overpriced → bet YES.
+        return "NO" if yes_pool < no_pool else "YES"
 
     # ------------------------------------------------------------------ #
     # Utilities
@@ -314,7 +408,4 @@ def analyze_market_for_trading(market: Dict) -> Dict:
             analysis['recommended_action'] = 'YES'
             analysis['confidence'] = yes_votes / len(signals)
         elif no_votes > yes_votes:
-            analysis['recommended_action'] = 'NO'
-            analysis['confidence'] = no_votes / len(signals)
-
-    return analysis
+            analysis['recommended_
