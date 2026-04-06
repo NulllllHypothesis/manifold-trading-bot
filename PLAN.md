@@ -126,7 +126,23 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 
 > No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
 
-> **⚠️ Known regression:** `MIN_CONFIDENCE` was changed from 0.65 → 0.60 by the risk-parameters PR. This causes 4 test failures in `tests/test_ai.py` (tests assert `_WEAK_STAT_CAP == 0.64`, now it's `0.59`). Recommended: revert to 0.65 — the tests are correct, the change was premature.
+> **⚠️ Known regression:** `MIN_CONFIDENCE` was changed from 0.65 → 0.60 by the risk-parameters PR. `_WEAK_STAT_CAP` is derived as `MIN_CONFIDENCE - 0.01`, so it's now 0.59 instead of 0.64, causing 4 test failures in `tests/test_ai.py`. `_STAT_BOOST_FLOOR` was hardcoded to 0.65 as a workaround (PR #6 auto-fix) so the AI boost logic is decoupled from the regression, but `_WEAK_STAT_CAP` still tracks `MIN_CONFIDENCE`. Recommended: revert `MIN_CONFIDENCE` to 0.65 in `config.py`.
+
+---
+
+### ✅ Strategy Improvements — DONE (PR #6, merged 2026-04-06)
+
+- [x] New pre-filter `is_stale_market`: skips markets with last bet > 72h AND volume24h < 10
+- [x] `probability_direction_strategy`: now skips 45–55% coinflip zone; requires `lastBetTime` < 48h
+- [x] `mean_reversion_strategy`: skips when `uniqueBettorCount > 100` (don't fight genuine consensus)
+- [x] `volume_spike_strategy`: uses `volume24Hours` vs batch **median** (not all-time volume); parameterised `spike_multiplier=2.0`
+- [x] NEW `creator_disagreement_strategy` (confidence 0.75): fires when `abs(resolutionProbability − probability) ≥ 0.15`; bets toward creator's estimate
+- [x] NEW `thin_market_strategy` (confidence 0.65): fires when AMM pool imbalance > 0.70; bets toward thin side
+- [x] **Kelly Criterion wired into `auto_trader.py`**: `calculate_position_size` now accepts `(recommendation, outcome)` and uses `ai_estimated_probability` for proper Kelly sizing; falls back to confidence-scaled if no AI estimate; returns 0.0 on negative edge (trade skipped)
+- [x] **Kelly bug fixed**: old guard `payout_ratio <= 1` silently returned 0 for YES bets on markets above 50%. Fixed to `payout_ratio <= 0`.
+- [x] AI candidate selection uses recency boost (sorted by `lastBetTime`) instead of pure confidence rank
+- [x] `_STAT_BOOST_FLOOR` hardcoded to 0.65 (decoupled from MIN_CONFIDENCE regression)
+- [x] Agent auto-fix (commit 3c98ce3) truncated 3 files — restored in follow-up commit bb0c6b5
 
 ---
 
@@ -276,7 +292,8 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 | Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
 | Fix `per_market_timeout` bug | ✅ Done | `concurrent.futures` timeout enforcement in `batch_analyze()` |
 | Distillation logging | ✅ Done | `logs/llm_calls.jsonl` with CoT extraction + log rotation, PR #5 merged 2026-04-06 |
-| Revert MIN_CONFIDENCE to 0.65 | ❌ Pending | Was changed 0.65→0.60 in risk-params PR — 4 tests failing |
+| Strategy improvements | ✅ Done | 5 strategies with richer API fields, Kelly wiring, recency boost, PR #6 merged 2026-04-06 |
+| Revert MIN_CONFIDENCE to 0.65 | ❌ Pending | Was changed 0.65→0.60 in risk-params PR — 4 tests in test_ai.py failing |
 | Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — must be closed manually or via auto-close before slot is free |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
