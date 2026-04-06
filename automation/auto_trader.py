@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.strategies import TradingStrategies
 from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
 
 class AutoTrader:
@@ -115,28 +116,60 @@ class AutoTrader:
 
         return True
 
-    def calculate_position_size(self, confidence: float) -> float:
+    def calculate_position_size(self, recommendation: Dict, outcome: str) -> float:
         """
-        Calculate position size based on confidence and risk rules
+        Calculate position size using Kelly Criterion when AI probability estimate is available,
+        falling back to confidence-scaled sizing otherwise.
 
-        Returns:
-            float: Bet amount
+        Kelly logic:
+          - net_odds for YES at market prob m = (1-m)/m
+          - net_odds for NO  at market prob m = m/(1-m)
+          - Kelly fraction = (win_prob × net_odds - lose_prob) / net_odds
+          - We use half-Kelly (×0.5) to reduce variance — standard conservative practice.
+
+        Fallback (no AI estimate):
+          - base 10% of balance scaled linearly by confidence.
+
+        Either path is capped at MAX_BET_AMOUNT and 50% of balance.
         """
-        # Base position size as percentage of balance
-        base_size = self.trader.balance * self.max_position_size
+        confidence = recommendation['confidence']
+        market_prob = recommendation.get('probability', 0.5)
+        # Guard against degenerate probabilities (resolved / edge cases)
+        market_prob = max(0.01, min(0.99, market_prob))
 
-        # Adjust based on confidence
-        confidence_multiplier = min(confidence / self.min_confidence, 2.0)
-        position_size = base_size * confidence_multiplier
+        ai_estimated_prob = recommendation.get('ai_estimated_probability')
 
-        # Apply min/max bounds
+        if ai_estimated_prob is not None:
+            # Kelly sizing — use the AI's estimated true probability as our edge estimate.
+            if outcome == 'YES':
+                our_win_prob = float(ai_estimated_prob)
+                net_odds = (1.0 - market_prob) / market_prob
+            else:  # NO
+                our_win_prob = 1.0 - float(ai_estimated_prob)
+                net_odds = market_prob / (1.0 - market_prob)
+
+            kelly_fraction = TradingStrategies.calculate_kelly_criterion(our_win_prob, net_odds)
+            # Half-Kelly reduces bet size when model has uncertainty — lowers ruin risk
+            kelly_fraction *= 0.5
+            position_size = self.trader.balance * kelly_fraction
+            sizing_method = f"kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}, k={kelly_fraction:.3f})"
+        else:
+            # No AI estimate available — fall back to confidence-scaled sizing
+            base_size = self.trader.balance * self.max_position_size
+            confidence_multiplier = min(confidence / self.min_confidence, 2.0)
+            position_size = base_size * confidence_multiplier
+            sizing_method = f"confidence_scaled(conf={confidence:.2f})"
+
+        # Apply bounds
         position_size = max(position_size, MIN_BET_AMOUNT)
         position_size = min(position_size, MAX_BET_AMOUNT)
-        position_size = min(position_size, self.trader.balance * 0.5)  # Never more than 50% of balance
+        position_size = min(position_size, self.trader.balance * 0.5)
 
-        # Round to nearest $5 for cleaner numbers
+        # Round to nearest $5
         position_size = round(position_size / 5) * 5
+        position_size = max(position_size, MIN_BET_AMOUNT)
 
+        print(f"  Sizing: {sizing_method} → ${position_size:.2f}")
         return position_size
 
     def execute_trade(self, recommendation: Dict) -> bool:
@@ -163,8 +196,8 @@ class AutoTrader:
             current_prob = recommendation['probability']
             print(f"  Warning: Could not fetch current probability, using research value")
 
-        # Calculate position size
-        amount = self.calculate_position_size(confidence)
+        # Calculate position size (Kelly when AI estimate available, else confidence-scaled)
+        amount = self.calculate_position_size(recommendation, outcome)
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
         # Place paper trade

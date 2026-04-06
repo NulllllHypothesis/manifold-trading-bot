@@ -240,16 +240,23 @@ class TradingStrategies:
         Calculate Kelly Criterion bet size fraction.
 
         Args:
-            probability: Your estimated probability of winning (0-1).
-            payout_ratio: Net payout if win (e.g. 2.0 means win $2 per $1 staked).
+            probability:  Your estimated probability of winning (0.0–1.0).
+            payout_ratio: Net odds — profit per unit staked if you win.
+                          e.g. betting YES at market prob 0.30 → net_odds = 0.70/0.30 = 2.33
+                          e.g. betting YES at market prob 0.70 → net_odds = 0.30/0.70 = 0.43
 
         Returns:
-            Fraction of bankroll to bet, capped at 0.25.
+            Fraction of bankroll to bet (0.0–0.25).  Returns 0.0 when there is no positive edge.
+
+        Formula: f* = (p × b − q) / b   where b = net odds, p = win prob, q = lose prob.
+
+        Note: net odds can be less than 1 (when the favourite side is below 50%).  This is valid —
+        the `max(0, ...)` clamp handles the no-edge case, so no early return is needed.
         """
-        if payout_ratio <= 1:
+        if payout_ratio <= 0:
             return 0.0
 
-        q = 1 - probability
+        q = 1.0 - probability
         kelly = (probability * payout_ratio - q) / payout_ratio
         return max(0.0, min(kelly, 0.25))
 
