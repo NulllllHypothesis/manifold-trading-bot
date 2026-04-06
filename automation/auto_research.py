@@ -265,7 +265,7 @@ class MarketResearcher:
                     # hourly cron job indefinitely.
                     ai_results = batch_analyze(
                         candidate_markets,
-                        max_markets=5,
+                        max_markets=3,
                         delay=2,
                         per_market_timeout=90,
                     )
