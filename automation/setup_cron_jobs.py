@@ -92,6 +92,31 @@ def create_cron_jobs():
     }
     jobs.append(("daily-summary", summary_job))
 
+    # Job 4: Position Resolution (every 30 minutes at :30)
+    resolve_job = {
+        "name": "Manifold Position Resolution",
+        "schedule": {
+            "kind": "cron",
+            "expr": "30 * * * *",  # Every hour at minute 30
+            "tz": "UTC"
+        },
+        "payload": {
+            "kind": "agentTurn",
+            "message": "Check and resolve any settled Manifold positions. Execute: cd /home/hackathon/.openclaw/workspace && python3 scripts/resolve_positions.py",
+            "model": "deepseek/deepseek-chat",
+            "timeoutSeconds": 120
+        },
+        "sessionTarget": "isolated",
+        "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": "-5240775171",
+            "bestEffort": True
+        },
+        "enabled": True
+    }
+    jobs.append(("position-resolution", resolve_job))
+
     return jobs
 
 def save_jobs_to_file(jobs):

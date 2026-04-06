@@ -65,7 +65,8 @@ def main():
         ("automation/auto_research.py", "Market Research Script"),
         ("automation/auto_trader.py", "Auto Trading Script"),
         ("automation/daily_summary.py", "Daily Summary Script"),
-        ("automation/setup_cron_jobs.py", "Cron Job Setup Script")
+        ("automation/setup_cron_jobs.py", "Cron Job Setup Script"),
+        ("scripts/resolve_positions.py", "Position Resolution Script"),
     ]
 
     results = []

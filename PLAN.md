@@ -146,6 +146,17 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 
 ---
 
+### ✅ Position Resolution Loop — DONE (feature/position-resolution)
+
+The bot was permanently frozen at max positions with no mechanism to detect when markets resolved on Manifold.
+
+- [x] `scripts/resolve_positions.py` — polls Manifold API for each open position, calls `PaperTrader.resolve_market()` on any that have settled, prints before/after slot count
+- [x] `PaperTrader.auto_resolve_markets()` was already implemented in `paper_trader.py` — script is a thin wrapper
+- [x] New cron job `position-resolution` at `:30` every hour (between research `:00` and trading `:15+1h`)
+- [x] Added to `test_automation.py` test suite
+
+---
+
 ### 🟡 Medium Priority — Calibration & Feedback Loop
 
 The bot currently has no memory of what happened. Markets resolve, bets settle, and nothing changes about how future markets are scored. This closes that loop.
@@ -293,8 +304,9 @@ Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) �
 | Fix `per_market_timeout` bug | ✅ Done | `concurrent.futures` timeout enforcement in `batch_analyze()` |
 | Distillation logging | ✅ Done | `logs/llm_calls.jsonl` with CoT extraction + log rotation, PR #5 merged 2026-04-06 |
 | Strategy improvements | ✅ Done | 5 strategies with richer API fields, Kelly wiring, recency boost, PR #6 merged 2026-04-06 |
-| Revert MIN_CONFIDENCE to 0.65 | ❌ Pending | Was changed 0.65→0.60 in risk-params PR — 4 tests in test_ai.py failing |
-| Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — must be closed manually or via auto-close before slot is free |
+| Revert MIN_CONFIDENCE to 0.65 | ✅ Done | Reverted in commit dfdec11 |
+| Position resolution loop | ✅ Done | `scripts/resolve_positions.py` + cron at :30, unblocks frozen bot |
+| Close open positions | 🔄 In Progress | Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — auto-resolver will handle when they settle |
 | Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
 | Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
