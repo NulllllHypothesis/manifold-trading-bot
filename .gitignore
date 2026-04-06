@@ -5,6 +5,9 @@ __pycache__/
 # Local environment variables — never commit this
 .env
 
+# LLM call logs (distillation data — large, never committed)
+logs/
+
 # Runtime data files (generated at runtime, not committed)
 market_research.json
 auto_trades.json
