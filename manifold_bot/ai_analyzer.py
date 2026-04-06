@@ -108,7 +108,7 @@ def _rotate_log_if_needed(log_path: Path) -> None:
             log_path.rename(dest)
         else:
             src = log_path.parent / (log_path.name + f".{i - 1}")
-            older = log_path.with_suffix(f".jsonl.{i}")
+            older = log_path.parent / (log_path.name + f".{i}")
             if src.exists():
                 if older.exists():
                     older.unlink()
@@ -126,28 +126,38 @@ def _log_llm_call(
 
     We deliberately do NOT log the full system prompt (it is static and
     bloats every record) nor the full user prompt (it may contain market
-    data whose long-term persistence requires compliance review). Instead
-    we store:
+    data whose long-term persistence requires compliance review).
+
+    For the same compliance reasons we also do NOT log the raw LLM response
+    verbatim: the model may echo or summarise market data supplied in the
+    prompt, so the raw response carries the same sensitivity as the prompt
+    itself.  Instead we store only:
       - system_prompt_sha256: allows offline verification that the prompt
         has not changed between runs without duplicating its text.
       - market_id: a stable, non-sensitive identifier that can be joined
         against the market database to reconstruct the prompt if needed.
+      - chain_of_thought: extracted <think> block only (no market data echo).
+      - parsed_output: the structured fields extracted from the response
+        (recommendation, confidence, etc.) which do not reproduce raw
+        market data.
+
+    NOTE: Logging of raw_response is intentionally omitted pending a
+    compliance review.  See the issue comment for context.
     """
     try:
         LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
         cot = _extract_cot(raw_response) if raw_response else ""
-        clean_output = re.sub(
-            r'<think>.*?</think>', '', raw_response, flags=re.DOTALL
-        ).strip() if raw_response else ""
 
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": model,
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
-            "raw_response": raw_response,
+            # raw_response is intentionally excluded pending compliance review.
+            # The LLM may echo or summarise market data from the user prompt,
+            # so storing it verbatim raises the same concerns as storing the
+            # prompt itself.
             "chain_of_thought": cot,
-            "output": clean_output,
             "parsed_output": parsed_output,
         }
 
@@ -158,9 +168,10 @@ def _log_llm_call(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f'[llm_log] warning: {e}', file=sys.stderr)
+        logger.warning('[llm_log] warning: %s', e)
 
 
-def _call_ollama(prompt: str, market_id: str = "") -> Optional[str]:
+def _call_ollama(prompt: str) -> Optional[str]:
     """Call local Ollama instance."""
     try:
         import requests
@@ -181,7 +192,7 @@ def _call_ollama(prompt: str, market_id: str = "") -> Optional[str]:
     return None
 
 
-def _call_deepseek_api(prompt: str, market_id: str = "") -> Optional[str]:
+def _call_deepseek_api(prompt: str) -> Optional[str]:
     """Call DeepSeek API."""
     if not DEEPSEEK_API_KEY:
         return None
@@ -299,10 +310,10 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     )
 
     # Try Ollama first (free), then DeepSeek API
-    raw = _call_ollama(prompt, market_id)
+    raw = _call_ollama(prompt)
     source = "ollama"
     if raw is None:
-        raw = _call_deepseek_api(prompt, market_id)
+        raw = _call_deepseek_api(prompt)
         source = "deepseek_api"
 
     if raw is None:
@@ -310,9 +321,11 @@ def analyze_market(market: Dict) -> Optional[Dict]:
 
     result = _parse_response(raw)
 
-    # Log after parsing so parsed_output is available
+    # Log after parsing so parsed_output is available.
+    # raw_response is intentionally not forwarded to _log_llm_call — see
+    # that function's docstring for the compliance rationale.
     model = OLLAMA_MODEL if source == "ollama" else DEEPSEEK_MODEL
-    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, raw, parsed_output=result)
+    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, raw_response=None, parsed_output=result)
 
     if result:
         result["source"] = source
