@@ -7,6 +7,7 @@ import sys
 import os
 import subprocess
 from datetime import datetime
+from unittest.mock import patch, MagicMock
 
 # Project root is one level up from tests/
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,6 +56,69 @@ def run_test(script_name, description):
         print(f"   💥 ERROR: {e}")
         return False
 
+
+def test_auto_resolve_markets_called():
+    """
+    Unit test: verify that resolve_positions.py invokes
+    PaperTrader.auto_resolve_markets() exactly once.
+    """
+    print("\n🧪 Testing: auto_resolve_markets() is called exactly once")
+    print("   " + "-"*40)
+
+    script_path = os.path.join(ROOT_DIR, "scripts", "resolve_positions.py")
+    if not os.path.exists(script_path):
+        print("   ❌ SKIP — scripts/resolve_positions.py not found")
+        return False
+
+    # Insert project root into path so we can import the script's module context
+    if ROOT_DIR not in sys.path:
+        sys.path.insert(0, ROOT_DIR)
+
+    mock_trader_instance = MagicMock()
+
+    try:
+        with patch.dict("sys.modules", {}):
+            # Patch PaperTrader wherever it is imported inside the script
+            mock_paper_trader_cls = MagicMock(return_value=mock_trader_instance)
+
+            # We need to discover the import name used in the script
+            with open(script_path, "r") as fh:
+                source = fh.read()
+
+            # Determine the module path used for PaperTrader
+            import re
+            match = re.search(r"from\s+([\w.]+)\s+import\s+.*PaperTrader", source)
+            if not match:
+                match = re.search(r"import\s+([\w.]+\.PaperTrader)", source)
+
+            if not match:
+                print("   ⚠️  Could not locate PaperTrader import in script; skipping patch")
+                return False
+
+            module_path = match.group(1)
+
+            with patch(f"{module_path}.PaperTrader", mock_paper_trader_cls):
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("resolve_positions", script_path)
+                mod = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(mod)
+                except SystemExit:
+                    pass  # scripts that call sys.exit() are fine
+
+        call_count = mock_trader_instance.auto_resolve_markets.call_count
+        if call_count == 1:
+            print("   ✅ SUCCESS — auto_resolve_markets() called exactly once")
+            return True
+        else:
+            print(f"   ❌ FAILED — auto_resolve_markets() called {call_count} time(s), expected 1")
+            return False
+
+    except Exception as e:
+        print(f"   💥 ERROR during unit test: {e}")
+        return False
+
+
 def main():
     """Run all tests"""
     print("="*60)
@@ -79,6 +143,10 @@ def main():
         else:
             print(f"\n❌ Script not found: {script}")
             results.append((script, False))
+
+    # Unit test: auto_resolve_markets() invocation
+    unit_success = test_auto_resolve_markets_called()
+    results.append(("unit:auto_resolve_markets_called", unit_success))
 
     # Summary
     print("\n" + "="*60)
