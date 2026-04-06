@@ -75,6 +75,14 @@ def test_auto_resolve_markets_called():
         sys.path.insert(0, ROOT_DIR)
 
     mock_trader_instance = MagicMock()
+    # Give the mock a real positions dict with one open position so main()
+    # doesn't short-circuit with "No open positions to check." before calling
+    # auto_resolve_markets(). Also disable the count_open_positions helper so
+    # the script falls back to its local counter (simpler, no cross-check assert).
+    mock_trader_instance.positions = {"test_market": [{"status": "OPEN"}]}
+    del mock_trader_instance.count_open_positions  # force fallback to local counter
+    mock_trader_instance.balance = 1000.0
+    mock_trader_instance.auto_resolve_markets.return_value = 0
 
     try:
         with patch.dict("sys.modules", {}):
@@ -101,10 +109,13 @@ def test_auto_resolve_markets_called():
                 import importlib.util
                 spec = importlib.util.spec_from_file_location("resolve_positions", script_path)
                 mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                # exec_module only defines functions; main() must be called explicitly
+                # because the if __name__ == "__main__" guard does not fire here.
                 try:
-                    spec.loader.exec_module(mod)
+                    mod.main()
                 except SystemExit:
-                    pass  # scripts that call sys.exit() are fine
+                    pass
 
         call_count = mock_trader_instance.auto_resolve_markets.call_count
         if call_count == 1:
