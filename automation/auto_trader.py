@@ -76,6 +76,16 @@ class AutoTrader:
         Returns:
             bool: True if trade should be executed
         """
+        # AI veto — if the market was analyzed by AI and explicitly rejected, never trade it.
+        # This must be checked BEFORE the confidence threshold: when AI returns SKIP,
+        # auto_research.py leaves stat confidence unchanged (no penalty is applied), so the
+        # market can pass the confidence gate with its original stat score even though the AI
+        # read the question text and said "no edge here". Ignoring the veto causes the bot to
+        # trade every market the AI explicitly flags as noise.
+        if recommendation.get('ai_returned_skip') or recommendation.get('ai_recommendation') == 'SKIP':
+            print(f"  AI vetoed this market (SKIP) — skipping regardless of confidence")
+            return False
+
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
             print(f"  Confidence too low: {recommendation['confidence']*100:.0f}% < {self.min_confidence*100:.0f}%")
