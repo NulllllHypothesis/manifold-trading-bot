@@ -15,6 +15,8 @@ import os
 # Add project root to path so manifold_bot package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import time as _time
+
 from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
@@ -65,6 +67,14 @@ class MarketResearcher:
             markets = api_client.get_markets(limit=limit)
             print(f"  Retrieved {len(markets)} markets")
 
+            # Compute median 24h volume once (outside the loop) to avoid O(n²) recomputation.
+            # volume24Hours is the correct signal: total volume inflates for old markets.
+            missing_vol24 = sum(1 for m in markets if m.get('volume24Hours') is None)
+            if missing_vol24:
+                print(f"  Note: {missing_vol24}/{len(markets)} markets missing volume24Hours, counted as 0")
+            volumes24 = [m.get('volume24Hours') or 0 for m in markets]
+            median_volume24h = _stats.median(volumes24) if volumes24 else 0
+
             recommendations = []
 
             for market in markets:
@@ -82,34 +92,37 @@ class MarketResearcher:
                 if liquidity < 100:
                     continue
 
+                # Skip stale markets — last bet > 72h ago AND near-zero 24h volume
+                if TradingStrategies.is_stale_market(market):
+                    continue
+
+                # Skip coinflip zone — no edge when crowd is saying "I don't know"
+                if 0.45 <= probability <= 0.55:
+                    continue
+
                 # Apply trading strategies
                 strategies = []
 
-                # Probability direction strategy
+                # Probability direction — requires recent activity (lastBetTime guard built in)
                 prob_dir_rec = TradingStrategies.probability_direction_strategy(market)
                 if prob_dir_rec:
                     strategies.append({
                         'strategy': 'probability_direction',
                         'recommendation': prob_dir_rec,
-                        'confidence': 0.6
+                        'confidence': 0.60
                     })
 
-                # Mean reversion strategy
+                # Mean reversion — guarded by uniqueBettorCount (don't fight genuine consensus)
                 mean_rev_rec = TradingStrategies.mean_reversion_strategy(market)
                 if mean_rev_rec:
                     strategies.append({
                         'strategy': 'mean_reversion',
                         'recommendation': mean_rev_rec,
-                        'confidence': 0.7
+                        'confidence': 0.70
                     })
 
-                # Volume spike — use median volume to resist outlier inflation
-                missing_vol = sum(1 for m in markets if m.get('volume') is None)
-                if missing_vol:
-                    print(f"  Note: {missing_vol}/{len(markets)} markets missing volume field, counted as 0")
-                volumes = [m.get('volume') or 0 for m in markets]
-                avg_volume = _stats.median(volumes) if volumes else 0
-                volume_rec = TradingStrategies.volume_spike_strategy(market, avg_volume)
+                # Volume spike — uses volume24Hours vs batch median (not all-time volume)
+                volume_rec = TradingStrategies.volume_spike_strategy(market, median_volume24h)
                 if volume_rec:
                     strategies.append({
                         'strategy': 'volume_spike',
@@ -117,8 +130,26 @@ class MarketResearcher:
                         'confidence': 0.65
                     })
 
+                # Creator disagreement — fires when creator's resolution estimate diverges ≥15pp
+                creator_rec = TradingStrategies.creator_disagreement_strategy(market)
+                if creator_rec:
+                    strategies.append({
+                        'strategy': 'creator_disagreement',
+                        'recommendation': creator_rec,
+                        'confidence': 0.75
+                    })
+
+                # Thin market arb — fires when one side of the AMM pool holds < 15% of total
+                thin_rec = TradingStrategies.thin_market_strategy(market)
+                if thin_rec:
+                    strategies.append({
+                        'strategy': 'thin_market',
+                        'recommendation': thin_rec,
+                        'confidence': 0.65
+                    })
+
                 if strategies:
-                    # Calculate overall recommendation
+                    # Calculate overall recommendation by weighted average of agreeing votes
                     yes_votes = sum(1 for s in strategies if s['recommendation'] == 'YES')
                     no_votes = sum(1 for s in strategies if s['recommendation'] == 'NO')
 
@@ -139,7 +170,10 @@ class MarketResearcher:
                         'question': question,
                         'probability': probability,
                         'volume': volume,
+                        'volume24h': market.get('volume24Hours') or 0,
                         'liquidity': liquidity,
+                        'unique_bettors': market.get('uniqueBettorCount') or 0,
+                        'last_bet_time_ms': market.get('lastBetTime'),
                         'recommendation': overall_rec,
                         'confidence': round(confidence, 2),
                         'strategies': [s['strategy'] for s in strategies],
@@ -152,9 +186,24 @@ class MarketResearcher:
             # Sort by confidence (highest first) before AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
-            # AI analysis — only top 5 candidates (local model is CPU-only, ~60s per market)
-            top_candidates = recommendations[:5]
-            top_candidate_ids = {r['market_id'] for r in top_candidates}
+            # AI candidate selection — recency boost.
+            # Among recommendations above the stat floor (worth AI review), prefer markets with
+            # recent bet activity: a freshly-traded market's AI analysis is more valuable than
+            # one where the probability hasn't moved in a week.
+            # Fallback: if fewer than 5 are above the floor, fill from remaining by confidence.
+            above_floor = [
+                r for r in recommendations if r['confidence'] >= _STAT_BOOST_FLOOR
+            ]
+            below_floor = [
+                r for r in recommendations if r['confidence'] < _STAT_BOOST_FLOOR
+            ]
+            # Sort above-floor by recency (most recently bet first); treat missing as oldest.
+            above_floor.sort(
+                key=lambda r: r.get('last_bet_time_ms') or 0,
+                reverse=True,
+            )
+            recent_top = (above_floor + below_floor)[:5]
+            top_candidate_ids = {r['market_id'] for r in recent_top}
             candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
 
             # Guard: if the count doesn't match, the market objects use a different ID field
@@ -163,10 +212,10 @@ class MarketResearcher:
             # (which would cause auto_trader.py to trade without AI validation), we raise a
             # clear error so the caller can catch it and write schema_version=1 instead,
             # causing the trader's schema guard to correctly block trading.
-            if len(candidate_markets) != len(top_candidates):
+            if len(candidate_markets) != len(recent_top):
                 sample_keys = list(markets[0].keys())[:8] if markets else []
                 raise ValueError(
-                    f"candidate_markets length mismatch: expected {len(top_candidates)}, "
+                    f"candidate_markets length mismatch: expected {len(recent_top)}, "
                     f"got {len(candidate_markets)}. Market objects may not use 'id' as their "
                     f"primary key. Sample market keys: {sample_keys}. "
                     f"Cannot safely write schema_version=2; aborting AI pass to prevent "
