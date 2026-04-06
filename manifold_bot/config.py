@@ -3,6 +3,17 @@ Manifold Markets API Configuration
 """
 import os
 
+# Load .env from the project root if the key isn't already in the environment.
+# This lets scripts and tests work without manually exporting env vars.
+_env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+if os.path.exists(_env_file):
+    with open(_env_file) as _fh:
+        for _line in _fh:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 MANIFOLD_API_KEY = os.environ.get("MANIFOLD_API_KEY", "")
 if not MANIFOLD_API_KEY:
     print("WARNING: MANIFOLD_API_KEY not set. Export it: export MANIFOLD_API_KEY=your-key-here")

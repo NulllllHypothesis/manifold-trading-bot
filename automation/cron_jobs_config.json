@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-04-03T08:59:40.934955",
+  "created_at": "2026-04-06T10:47:25.618083",
   "jobs": {
     "market-research-hourly": {
       "name": "Manifold Market Research",
@@ -23,11 +23,35 @@
       },
       "enabled": true
     },
+    "position-resolution": {
+      "name": "Manifold Position Resolution",
+      "schedule": {
+        "kind": "cron",
+        "expr": "10 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "python3",
+        "args": [
+          "/home/hackathon/.openclaw/workspace/scripts/resolve_positions.py"
+        ],
+        "timeoutSeconds": 120
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
     "auto-trading-hourly": {
       "name": "Manifold Auto Trading",
       "schedule": {
         "kind": "cron",
-        "expr": "15 * * * *",
+        "expr": "20 * * * *",
         "tz": "UTC"
       },
       "payload": {
