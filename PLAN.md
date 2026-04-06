@@ -180,11 +180,19 @@ The bot currently has no memory of what happened. Markets resolve, bets settle, 
   ```
   No retraining needed — just prompt grounding with real data.
 
-**Step 4 — Close the loop: outcome tracking**
-- [ ] When `paper_trader.py` resolves a market, write to a `bet_outcomes` table: `(market_id, our_recommendation, our_confidence, ai_source, outcome, pnl)`
-- [ ] Weekly summary: accuracy by AI confidence band, by strategy, by question category
-  - "When AI confidence > 80%, we were right X% of the time"
-  - Use this to tune `MIN_CONFIDENCE` and blending weights over time
+**Step 4 — Close the loop: EV-based outcome tracking**
+- [ ] Store `estimated_ev` at trade time in `auto_trades.json`: `EV = ai_estimated_probability × payout_if_win - stake`
+  - All inputs already exist: `ai_estimated_probability` in recommendation, `payout_if_win` in `paper_trader.py`
+  - One extra field written by `auto_trader.py` at trade execution time
+- [ ] When `paper_trader.py` resolves a market, write to a `bet_outcomes` table:
+  `(market_id, our_recommendation, estimated_ev, ai_confidence, strategy, outcome, actual_pnl)`
+- [ ] Weekly summary: compare `estimated_ev` vs `actual_pnl` per trade — the gap is model error
+  - If EV=+$10 trades average +$3 in reality → AI overestimates edge by 3.3×, scale down
+  - If EV=+$10 trades average +$9 → model is well-calibrated, trust it more
+  - Break down by strategy and AI confidence band to find which combinations actually have edge
+
+**Why EV and not just confidence:**
+Confidence measures how sure the AI is. EV measures how much money we expect to make. Two trades at identical confidence can have completely different EV depending on the market's current price (which determines the payout). Tracking win-rate by confidence band misses this — tracking EV vs actual P&L directly measures whether the model's probability estimates are accurate in dollar terms.
 
 **Why this matters:**
 The current bot has genuine zero edge on statistics alone — all signals are generic. Calibration gives it something no one else has: a learned correction for this specific platform's crowd biases. A market at 72% that historically resolves YES only 56% of the time is a NO bet regardless of what the question says.
