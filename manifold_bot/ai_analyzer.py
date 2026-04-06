@@ -9,18 +9,28 @@ falls back to the DeepSeek API if Ollama is unavailable.
 """
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
 import re
+import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+LLM_LOG_DIR = Path(os.environ.get('LLM_LOG_DIR', Path(__file__).resolve().parent.parent / 'logs'))
 OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "deepseek-r1:14b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+# Maximum size for llm_calls.jsonl before rotation (100 MB)
+LLM_LOG_MAX_BYTES = 100 * 1024 * 1024
+# Number of rotated backup files to keep
+LLM_LOG_BACKUP_COUNT = 3
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +50,12 @@ Be a contrarian when the evidence supports it. Consider:
 - How confident are you in your assessment?
 
 Always respond with valid JSON only. No markdown, no extra text."""
+
+# Stable identifier for the system prompt; recomputed once at import time.
+# Recording the hash instead of the full text avoids duplicating the static
+# prompt on every log record while still allowing offline verification that
+# the prompt has not changed between runs.
+SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
 
 ANALYSIS_PROMPT = """Analyze this prediction market:
 
@@ -62,6 +78,91 @@ Respond with this exact JSON structure:
 }}
 
 Only recommend YES or NO if you have genuine conviction the market is mispriced by at least 10 percentage points. Otherwise use SKIP."""
+
+
+def _rotate_log_if_needed(log_path: Path) -> None:
+    """
+    Rotate log_path if it exceeds LLM_LOG_MAX_BYTES.
+
+    Keeps up to LLM_LOG_BACKUP_COUNT numbered backups:
+      llm_calls.jsonl.1  (most recent previous)
+      llm_calls.jsonl.2
+      llm_calls.jsonl.3  (oldest kept)
+
+    The oldest backup beyond the count is deleted.
+    """
+    if not log_path.exists():
+        return
+    if log_path.stat().st_size < LLM_LOG_MAX_BYTES:
+        return
+
+    # Shift existing backups: .2 -> .3, .1 -> .2 (high to low to avoid clobbering)
+    for i in range(LLM_LOG_BACKUP_COUNT, 1, -1):
+        src = log_path.parent / (log_path.name + f".{i - 1}")
+        older = log_path.parent / (log_path.name + f".{i}")
+        if src.exists():
+            if older.exists():
+                older.unlink()
+            src.rename(older)
+
+    # Rename the active log to .1
+    dest = log_path.parent / (log_path.name + ".1")
+    if dest.exists():
+        dest.unlink()
+    log_path.rename(dest)
+
+
+def _log_llm_call(
+    model: str,
+    system_prompt_hash: str,
+    market_id: str,
+    parsed_output: Optional[Dict] = None,
+) -> None:
+    """Append a JSONL record for every LLM call (for future distillation).
+
+    We deliberately do NOT log the full system prompt (it is static and
+    bloats every record) nor the full user prompt (it may contain market
+    data whose long-term persistence requires compliance review).
+
+    For the same compliance reasons we also do NOT log the raw LLM response
+    verbatim: the model may echo or summarise market data supplied in the
+    prompt, so the raw response carries the same sensitivity as the prompt
+    itself.  Instead we store only:
+      - system_prompt_sha256: allows offline verification that the prompt
+        has not changed between runs without duplicating its text.
+      - market_id: a stable, non-sensitive identifier that can be joined
+        against the market database to reconstruct the prompt if needed.
+      - parsed_output: the structured fields extracted from the response
+        (recommendation, confidence, etc.) which do not reproduce raw
+        market data.
+
+    NOTE: Logging of the raw LLM response (including any chain-of-thought)
+    is intentionally omitted pending a compliance review.  The model may
+    echo or summarise market data from the user prompt, so storing the raw
+    response verbatim raises the same concerns as storing the prompt itself.
+    See the issue comment for context.
+    """
+    try:
+        LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "system_prompt_sha256": system_prompt_hash,
+            "market_id": market_id,
+            # raw_response and chain_of_thought are intentionally excluded
+            # pending compliance review.  See docstring above.
+            "parsed_output": parsed_output,
+        }
+
+        log_path = LLM_LOG_DIR / "llm_calls.jsonl"
+        _rotate_log_if_needed(log_path)
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f'[llm_log] warning: {e}', file=sys.stderr)
+        logger.warning('[llm_log] warning: %s', e)
 
 
 def _call_ollama(prompt: str) -> Optional[str]:
@@ -171,11 +272,15 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     probability = market.get("probability", 0.5)
     volume = market.get("volume", 0)
     liquidity = market.get("totalLiquidity", market.get("liquidity", 0))
+    market_id = market.get("id") or ""
+
+    if not market_id:
+        logger.warning("analyze_market called with market missing id field")
+        market_id = "UNKNOWN"
 
     # Format close date
     close_time_ms = market.get("closeTime")
     if close_time_ms:
-        from datetime import datetime, timezone
         close_date = datetime.fromtimestamp(
             close_time_ms / 1000, tz=timezone.utc
         ).strftime("%Y-%m-%d")
@@ -213,9 +318,16 @@ def analyze_market(market: Dict) -> Optional[Dict]:
         return None
 
     result = _parse_response(raw)
+
+    # Log after parsing so parsed_output is available.
+    # raw_response is intentionally not forwarded to _log_llm_call — see
+    # that function's docstring for the compliance rationale.
+    model = OLLAMA_MODEL if source == "ollama" else DEEPSEEK_MODEL
+    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, parsed_output=result)
+
     if result:
         result["source"] = source
-        result["market_id"] = market.get("id", "")
+        result["market_id"] = market_id
     return result
 
 
