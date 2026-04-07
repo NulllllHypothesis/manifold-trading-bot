@@ -42,7 +42,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Run hourly market research for Manifold trading bot. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_research.py",
+            "message": "Run hourly market research for Manifold trading bot. Execute: cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 automation/auto_research.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -91,9 +91,10 @@ def create_cron_jobs():
             # All resolution logic lives in resolve_positions.py; no model
             # reasoning is needed.
             "kind": "exec",
-            "command": "python3",
+            "command": "bash",
             "args": [
-                "/home/hackathon/.openclaw/workspace/scripts/resolve_positions.py"
+                "-c",
+                "cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 scripts/resolve_positions.py"
             ],
             "timeoutSeconds": 120
         },
@@ -120,7 +121,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Execute automated trading based on latest research. Run: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_trader.py",
+            "message": "Execute automated trading based on latest research. Run: cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 automation/auto_trader.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -148,7 +149,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py",
+            "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 automation/daily_summary.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -175,9 +176,10 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "exec",
-            "command": "python3",
+            "command": "bash",
             "args": [
-                "/home/hackathon/.openclaw/workspace/scripts/position_swap_checker.py"
+                "-c",
+                "cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 scripts/position_swap_checker.py"
             ],
             "timeoutSeconds": 120
         },
@@ -207,7 +209,7 @@ def create_cron_jobs():
             "command": "bash",
             "args": [
                 "-c",
-                "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
+                "cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
             ],
             "timeoutSeconds": 300
         },
@@ -237,7 +239,7 @@ def create_cron_jobs():
             "command": "bash",
             "args": [
                 "-c",
-                "cd /home/hackathon/.openclaw/workspace && python3 scripts/weekly_ev_report.py --telegram"
+                "cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 scripts/weekly_ev_report.py --telegram"
             ],
             "timeoutSeconds": 60
         },
