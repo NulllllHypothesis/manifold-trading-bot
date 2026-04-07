@@ -25,6 +25,16 @@ async function callClaude(messages, maxTokens = 2048) {
   return data.content[0].text;
 }
 
+// Validate Python syntax. Returns null on success, error string on failure.
+function validatePython(filePath) {
+  try {
+    execSync('python3 -m py_compile "' + filePath + '"', { stdio: 'pipe' });
+    return null;
+  } catch (e) {
+    return (e.stderr ? e.stderr.toString() : e.message).slice(0, 200);
+  }
+}
+
 module.exports = async ({ github, context, core }) => {
   const diff = process.env.PR_DIFF || '';
   const prTitle = process.env.PR_TITLE || '';
@@ -70,7 +80,6 @@ module.exports = async ({ github, context, core }) => {
     const match = reviewRaw.match(/\{[\s\S]*\}/);
     review = JSON.parse(match ? match[0] : reviewRaw);
   } catch (e) {
-    // Fallback: post raw review as comment
     await github.rest.issues.createComment({
       owner: context.repo.owner,
       repo: context.repo.repo,
@@ -80,39 +89,86 @@ module.exports = async ({ github, context, core }) => {
     return;
   }
 
-  // ── Step 2: Auto-fix file-specific issues ─────────────────────────────────
-  // Never auto-fix workflow files — GitHub requires a separate `workflows` permission
-  // to push changes to .github/workflows/, and granting it would be overpowered.
+  // ── Step 2: Auto-fix using targeted find/replace patches ──────────────────
+  //
+  // IMPORTANT: We ask Claude for a {"find": "...", "replace": "..."} patch
+  // rather than the whole file. Returning complete file contents blows the
+  // output token budget on any file > ~200 lines and causes truncation, which
+  // produces syntax errors that break the bot.
+  //
+  // Safety checks before any patch is committed:
+  //   1. "find" must appear exactly once (uniqueness)
+  //   2. python3 -m py_compile must pass on the patched file
+  //   3. If either check fails, the original file is restored and the issue
+  //      is reported as "skipped" in the PR comment — nothing is committed.
+  //
   const fixableIssues = (review.issues || []).filter(
     i => i.file && i.fix && !i.file.startsWith('.github/workflows/')
   );
   const fixedFiles = [];
+  const skippedFiles = [];
 
   for (const issue of fixableIssues) {
     const filePath = path.join(repoPath, issue.file);
     if (!fs.existsSync(filePath)) continue;
 
+    const isPython = issue.file.endsWith('.py');
     const original = fs.readFileSync(filePath, 'utf8');
 
     const fixPrompt = [
-      'You are fixing a bug in this file. Return ONLY the complete fixed file contents — no explanation, no markdown, no code fences.',
+      'You are fixing a specific bug in a file. Return ONLY a JSON object — no explanation, no markdown, no code fences.',
       '',
       'File: ' + issue.file,
       'Issue: ' + issue.description,
-      'Fix to apply: ' + issue.fix,
+      'Fix needed: ' + issue.fix,
       '',
-      'Current file contents:',
+      'Return exactly this JSON format:',
+      '{"find": "exact_string_to_find", "replace": "exact_replacement_string"}',
+      '',
+      'Rules:',
+      '- "find" must match a unique section of the file (include 2-3 surrounding lines for context)',
+      '- "replace" is the corrected version of that exact section only',
+      '- Do NOT return the entire file — only the changed section',
+      '- Preserve indentation exactly as it appears in the file',
+      '- Keep the patch as small as possible',
+      '',
+      'File contents:',
       original,
     ].join('\n');
 
     try {
-      const fixed = await callClaude([{ role: 'user', content: fixPrompt }], 4096);
-      // Strip accidental code fences if model added them
-      const cleaned = fixed.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
-      fs.writeFileSync(filePath, cleaned + '\n');
+      const patchRaw = await callClaude([{ role: 'user', content: fixPrompt }], 2048);
+      const patchMatch = patchRaw.match(/\{[\s\S]*\}/);
+      if (!patchMatch) throw new Error('response contained no JSON object');
+
+      const patch = JSON.parse(patchMatch[0]);
+      if (!patch.find || patch.replace === undefined) throw new Error('JSON missing find or replace key');
+
+      // Uniqueness check — a non-unique find string would silently patch the wrong place
+      const occurrences = original.split(patch.find).length - 1;
+      if (occurrences === 0) throw new Error('"find" string not found in file');
+      if (occurrences > 1) throw new Error('"find" string matches ' + occurrences + ' locations — too ambiguous to apply safely');
+
+      const patched = original.replace(patch.find, patch.replace);
+      fs.writeFileSync(filePath, patched);
+
+      // Syntax check — revert if the patch broke Python syntax
+      if (isPython) {
+        const syntaxError = validatePython(filePath);
+        if (syntaxError) {
+          fs.writeFileSync(filePath, original);  // revert
+          skippedFiles.push({ file: issue.file, reason: 'patch produced syntax error — reverted. ' + syntaxError });
+          console.log('Reverted ' + issue.file + ': patch caused syntax error');
+          continue;
+        }
+      }
+
       fixedFiles.push(issue.file);
       console.log('Fixed: ' + issue.file + ' — ' + issue.description);
     } catch (e) {
+      // Ensure original is restored if anything went wrong mid-write
+      try { fs.writeFileSync(filePath, original); } catch (_) {}
+      skippedFiles.push({ file: issue.file, reason: e.message });
       console.log('Could not auto-fix ' + issue.file + ': ' + e.message);
     }
   }
@@ -147,14 +203,22 @@ module.exports = async ({ github, context, core }) => {
     body += '\n';
   }
 
+  if (skippedFiles.length > 0) {
+    body += '#### Skipped (unsafe to auto-fix — needs human)\n';
+    for (const s of skippedFiles) {
+      body += '- ⚠️ `' + s.file + '` — ' + s.reason + '\n';
+    }
+    body += '\n';
+  }
+
   if (unresolved.length > 0) {
     body += '#### Needs human attention\n';
     for (const issue of unresolved) {
-      body += '- ' + (issue.file ? '`' + issue.file + '`' : '') + ' ' + issue.description + '\n';
+      body += '- ' + (issue.file ? '`' + issue.file + '`' : '') + ' — ' + issue.description + '\n';
     }
   }
 
-  if (fixedFiles.length > 0 && unresolved.length === 0) {
+  if (fixedFiles.length > 0 && unresolved.length === 0 && skippedFiles.length === 0) {
     body += '\n**All issues auto-fixed.** Re-review will run on the new commit.\n';
   }
 
