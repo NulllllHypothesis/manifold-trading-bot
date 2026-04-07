@@ -64,8 +64,8 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
         estimated_ev = trade.get("estimated_ev")
         ev_error = (estimated_ev - actual_pnl) if estimated_ev is not None else None
 
-        strategies = trade.get("strategies")
-        strategies_json = json.dumps(strategies) if strategies is not None else None
+        strategies = trade.get("strategies") or []
+        strategies_json = json.dumps(strategies)
 
         conn = sqlite3.connect(_DB_PATH)
         conn.execute("""
@@ -379,72 +379,3 @@ class PaperTrader:
         print("\n" + "="*60)
         print("📊 PORTFOLIO SUMMARY")
         print("="*60)
-        
-        # Balance section
-        print("💰 BALANCE:")
-        print(f"  Initial: ${self.initial_balance:.2f}")
-        print(f"  Current: ${self.balance:.2f}")
-        print(f"  Net Return: {metrics.get('net_return_pct', 0):.2f}%")
-        
-        # Realized P&L section
-        print("\n✅ REALIZED P&L (Closed Trades):")
-        print(f"  Total: ${metrics.get('realized_pnl', 0):.2f}")
-        print(f"  Wins: {metrics.get('win_trades', 0)}")
-        print(f"  Losses: {metrics.get('lose_trades', 0)}")
-        print(f"  Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
-        
-        # Open positions section
-        print("\n⏳ OPEN POSITIONS:")
-        print(f"  Count: {metrics.get('open_trades', 0)}")
-        print(f"  Invested: ${metrics.get('money_in_open_trades', 0):.2f}")
-        print(f"  Potential P&L: ${metrics.get('potential_pnl_open', 0):.2f}")
-        
-        # Risk metrics
-        print("\n📈 PERFORMANCE:")
-        print(f"  Total Trades: {metrics.get('total_trades', 0)}")
-        print(f"  Avg Win: ${metrics.get('avg_win', 0):.2f}")
-        print(f"  Avg Loss: ${metrics.get('avg_loss', 0):.2f}")
-        print(f"  Profit Factor: {metrics.get('profit_factor', 0):.2f}")
-        
-        print("="*60)
-        
-        # Show open positions
-        open_positions = [p for p in self.trade_history if p.get('status') == 'OPEN']
-        if open_positions:
-            print(f"\nOpen Positions: {len(open_positions)}")
-            for pos in open_positions[-5:]:  # Show last 5
-                market_id = pos['market_id']
-                try:
-                    # Try to get market info
-                    market = api_client.get_market(market_id)
-                    question = market.get('question', 'Unknown Market')
-                    if len(question) > 50:
-                        question = question[:47] + "..."
-                    print(f"  📊 {question}")
-                    print(f"    ID: {market_id[:8]}... | {pos['outcome']} ${pos['amount']} @ {pos['probability']:.1%}")
-                except:
-                    # Fallback to ID if API fails
-                    print(f"  Market {market_id[:8]}...: {pos['outcome']} ${pos['amount']} @ {pos['probability']:.1%}")
-    
-    def get_market_analysis(self, market_id: str) -> Dict:
-        """Get analysis for a specific market"""
-        try:
-            market = api_client.get_market(market_id)
-            
-            analysis = {
-                'id': market.get('id'),
-                'question': market.get('question'),
-                'probability': market.get('probability'),
-                'volume': market.get('volume'),
-                'liquidity': market.get('liquidity'),
-                'created_time': market.get('createdTime'),
-                'close_time': market.get('closeTime'),
-                'is_resolved': market.get('isResolved', False),
-                'resolution': market.get('resolution'),
-                'tags': market.get('tags', [])
-            }
-            
-            return analysis
-        except Exception as e:
-            print(f"Error analyzing market {market_id}: {e}")
-            return {}

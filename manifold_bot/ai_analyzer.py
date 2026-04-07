@@ -77,7 +77,10 @@ def _build_calibration_note() -> str:
 
 
 # Built once at import time. Each cron process picks up the latest table.
-_CALIBRATION_NOTE = _build_calibration_note()
+try:
+    _CALIBRATION_NOTE = _build_calibration_note()
+except (json.JSONDecodeError, KeyError):
+    _CALIBRATION_NOTE = ''
 
 # Maximum size for llm_calls.jsonl before rotation (100 MB)
 LLM_LOG_MAX_BYTES = 100 * 1024 * 1024
@@ -392,60 +395,4 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
 
     Args:
         markets: List of market dicts
-        max_markets: Cap to avoid rate limits / long runtimes
-        delay: Seconds between calls (be polite to APIs)
-        per_market_timeout: Max seconds to spend on a single market before skipping it.
-            Each market analysis is submitted to a ThreadPoolExecutor and cancelled
-            (skipped) if it does not complete within this deadline.
-
-    Returns:
-        Dict keyed by market_id -> analysis result
-    """
-    results = {}
-    count = 0
-
-    for market in markets[:max_markets]:
-        market_id = market.get("id", "")
-        if not market_id:
-            continue
-
-        result = None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(analyze_market, market)
-            try:
-                result = future.result(timeout=per_market_timeout)
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    "AI analysis timed out after %.1fs for market %s (%s) — skipping.",
-                    per_market_timeout,
-                    market_id,
-                    market.get("question", "")[:60],
-                )
-                result = None
-            except Exception as exc:
-                logger.warning(
-                    "AI analysis raised an unexpected error for market %s: %s — skipping.",
-                    market_id,
-                    exc,
-                )
-                result = None
-
-        if result:
-            results[market_id] = result
-            rec = result["recommendation"]
-            conf = result["confidence"]
-            source = result["source"]
-            print(f"  AI [{source}] {market.get('question', '')[:60]}...")
-            print(f"       → {rec} ({conf:.0%} confidence): {result['reasoning'][:80]}")
-            # DeepSeek API fallback always enforces 2s regardless of caller-supplied delay.
-            # This is intentional: delay=0 is safe for Ollama (CPU-bound) but not for a paid API.
-            effective_delay = 2.0 if source == "deepseek_api" else delay
-        else:
-            print(f"  AI analysis unavailable for {market_id}")
-            effective_delay = delay
-
-        count += 1
-        if count < len(markets[:max_markets]):
-            time.sleep(effective_delay)
-
-    return results
+        max_markets: Cap to avoid

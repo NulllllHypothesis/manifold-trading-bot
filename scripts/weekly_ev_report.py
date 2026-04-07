@@ -104,12 +104,16 @@ def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
         lines.append("No AI-estimated EV trades yet (all used confidence-scaled sizing).")
         return "\n".join(lines), stats
 
-    avg_ev  = sum(o['estimated_ev'] for o in with_ev) / ev_count
-    avg_pnl = sum(o['actual_pnl']   for o in with_ev) / ev_count
-    ratio   = avg_pnl / avg_ev if avg_ev != 0 else None
+    avg_estimated_ev = sum(o['estimated_ev'] for o in with_ev) / ev_count
+    avg_pnl          = sum(o['actual_pnl']   for o in with_ev) / ev_count
+
+    if abs(avg_estimated_ev) < 0.01:
+        ratio = None  # insufficient signal
+    else:
+        ratio = avg_pnl / avg_estimated_ev
 
     lines.append(f"\nAI-estimated EV trades: {ev_count} of {total}")
-    lines.append(f"  Avg estimated EV:  ${avg_ev:+.2f}")
+    lines.append(f"  Avg estimated EV:  ${avg_estimated_ev:+.2f}")
     lines.append(f"  Avg actual P&L:    ${avg_pnl:+.2f}")
     if ratio is not None:
         lines.append(f"  EV accuracy ratio: {ratio:.2f}×")
@@ -117,9 +121,11 @@ def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
         elif ratio >= 0.50:  lines.append("  → Model overestimates edge moderately — monitor")
         elif ratio >= 0.20:  lines.append("  → Model significantly overestimates — scale down bets")
         else:                lines.append("  → Model severely miscalibrated — review AI prompts")
+    else:
+        lines.append(f"  EV accuracy ratio: N/A (avg estimated EV too close to zero — insufficient signal)")
 
     stats.update({
-        "avg_estimated_ev": round(avg_ev, 4),
+        "avg_estimated_ev": round(avg_estimated_ev, 4),
         "avg_actual_pnl": round(avg_pnl, 4),
         "ev_accuracy_ratio": round(ratio, 3) if ratio is not None else None,
     })

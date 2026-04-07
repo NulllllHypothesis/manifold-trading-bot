@@ -103,7 +103,7 @@
         "command": "bash",
         "args": [
           "-c",
-          "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 -c \"import os, json, sys; sys.path.insert(0, 'scripts'); import analyze_calibration; data = analyze_calibration.compute(); tmp = 'calibration_table.json.tmp'; open(tmp, 'w').write(json.dumps(data, indent=2)); os.replace(tmp, 'calibration_table.json')\""
         ],
         "timeoutSeconds": 300
       },
