@@ -91,25 +91,15 @@ class AutoTrader:
             print(f"  Confidence too low: {recommendation['confidence']*100:.0f}% < {self.min_confidence*100:.0f}%")
             return False
 
-        # Check if we already have a position
-        if recommendation.get('existing_position', False):
-            print(f"  Already have position in this market")
-
-            # Check cooldown period
-            market_positions = self.trader.positions.get(market_id, [])
-            if market_positions:
-                latest_trade = max(market_positions, key=lambda x: x.get('timestamp', ''))
-                trade_time = datetime.fromisoformat(latest_trade.get('timestamp', '2000-01-01'))
-                hours_since = (datetime.now() - trade_time).total_seconds() / 3600
-
-                if hours_since < self.cooldown_hours:
-                    print(f"  In cooldown period ({hours_since:.1f}h < {self.cooldown_hours}h)")
-                    return False
-
-            # Allow adding to existing position if confidence is high
-            if recommendation['confidence'] < 0.8:
-                print(f"  Confidence not high enough to add to position")
-                return False
+        # Block any new bet on a market that already has an OPEN position.
+        # Previously the bot allowed "adding to position" at confidence >= 0.80,
+        # which led to three consecutive losing bets on the same market (2czul2Rync).
+        # Use the swap mechanism instead of stacking bets on a single market.
+        market_positions = self.trader.positions.get(market_id, [])
+        has_open = any(p.get('status') == 'OPEN' for p in market_positions)
+        if has_open:
+            print(f"  Already have an OPEN position in this market — use swap to replace it")
+            return False
 
         # Check max positions limit
         open_positions = sum(1 for pos_list in self.trader.positions.values()
