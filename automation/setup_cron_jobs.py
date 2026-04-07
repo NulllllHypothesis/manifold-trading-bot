@@ -11,6 +11,7 @@ Schedule per hour:
   :00 - Market Research
   :10 - Position Resolution (frees slots before trading)
   :20 - Auto Trading (uses freed slots from resolution)
+  :40 - Position Swap Check (proposes Telegram swap if positions full + losing)
 """
 
 import sys
@@ -162,7 +163,36 @@ def create_cron_jobs():
     }
     jobs.append(("daily-summary", summary_job))
 
-    # Job 5: Weekly Calibration Harvest (Sundays at 02:00 UTC)
+    # Job 5: Position Swap Check (at :40 of every hour)
+    # Runs after auto-trading (:20) to check if any losing position should be
+    # swapped for a better opportunity.  Fully deterministic — uses exec (no LLM).
+    swap_check_job = {
+        "name": "Manifold Position Swap Check",
+        "schedule": {
+            "kind": "cron",
+            "expr": "40 * * * *",  # Every hour at minute 40
+            "tz": "UTC"
+        },
+        "payload": {
+            "kind": "exec",
+            "command": "python3",
+            "args": [
+                "/home/hackathon/.openclaw/workspace/scripts/position_swap_checker.py"
+            ],
+            "timeoutSeconds": 120
+        },
+        "sessionTarget": "isolated",
+        "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": TELEGRAM_CHANNEL_ID,
+            "bestEffort": True
+        },
+        "enabled": True
+    }
+    jobs.append(("position-swap-check", swap_check_job))
+
+    # Job 6: Weekly Calibration Harvest (Sundays at 02:00 UTC)
     # Fetches 2000+ resolved markets from Manifold and updates the calibration
     # table — giving the AI fresh crowd-bias corrections every week.
     harvest_job = {
@@ -250,6 +280,7 @@ def print_setup_instructions(jobs):
     print("   :00 - Market Research")
     print("   :10 - Position Resolution (frees slots before trading)")
     print("   :20 - Auto Trading (uses freed slots from resolution)")
+    print("   :40 - Position Swap Check (proposes swap via Telegram if positions full)")
     print("   19:00 daily - Daily Summary Report")
     print()
     for job_id, job_def in jobs:

@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-07* — Calibration & feedback loop complete (feature/calibration): crowd bias table, AI prompt injection, bet_outcomes tracking, weekly EV report, 2 new weekly crons registered on server.
+*Last updated: 2026-04-07 (smart-swap)* — Smart Position Swap complete (feature/smart-swap): multi-proposal Telegram flow, numbered approve/dismiss, `close_position_early()`, `pending_swaps.json`, new `:40` cron.
 
 ---
 
@@ -71,7 +71,7 @@ Every 4h at :00 UTC
 │  - Frees slots for new trades   │
 └─────────────────────────────────┘
         │
-        │  (:15 every hour)
+        │  (:20 every hour)
         ▼
 ┌─────────────────────────────────┐
 │  auto_trader.py runs            │
@@ -86,7 +86,50 @@ Every 4h at :00 UTC
 │  - Kelly sizing (half-Kelly)    │
 │  - Picks top 1-2 trades         │
 │  - Stores estimated_ev at trade │
+│  - Stores entry_probability +   │
+│    entry_confidence per trade   │
 │  - Updates paper_trading_state  │
+└─────────────────────────────────┘
+        │
+        │  (:40 every hour)
+        ▼
+┌─────────────────────────────────┐
+│  position_swap_checker.py runs  │
+│  - Skips if slots available     │
+│  - Skips if pending proposals   │
+│    already exist (not expired)  │
+│  - Fetches current prob for     │
+│    every open position          │
+│  - Computes unrealised P&L:     │
+│    YES: amount*cur/entry - amt  │
+│    NO:  amount*(1-cur)/(1-entry)│
+│  - Finds ALL losing positions   │
+│    (unrealised_pnl < 0)         │
+│  - For each loser, finds best   │
+│    unique replacement:          │
+│    • confidence ≥ 65%           │
+│    • AI not SKIP                │
+│    • estimated_ev > 0           │
+│    • new_ev > abs(loss)         │
+│  - Writes pending_swaps.json    │
+│    (numbered list)              │
+│  - Sends Telegram per proposal: │
+│    "approve swap N" / "dismiss" │
+└─────────────────────────────────┘
+        │
+        │  Human replies in Telegram
+        ▼
+┌─────────────────────────────────┐
+│  execute_swap.py --id N runs    │
+│  - Validates proposal not       │
+│    expired, status=pending      │
+│  - close_position_early():      │
+│    simulates selling at current │
+│    probability, realises P&L    │
+│  - place_paper_bet() for new    │
+│    opportunity                  │
+│  - Marks proposal approved      │
+│  - Sends confirmation to TG     │
 └─────────────────────────────────┘
         │
         │  (daily at 19:00 UTC)
@@ -250,14 +293,10 @@ Raw responses and full prompts are intentionally NOT logged — the model may ec
 #### `manifold_bot/paper_trader.py`
 **What it does:** Simulates placing and tracking bets. Reads/writes `manifold_bot/paper_trading_state.json`.
 
-**Current state of the portfolio:**
-- Balance: $530
-- 6 open positions (all bet NO at 50% probability, amounts $60-$100)
-- Max positions: 5 — **currently at max, bot is blocked from new trades until a position closes**
-
 Key methods:
-- `place_paper_bet(market_id, outcome, amount, probability, estimated_ev, ai_confidence, strategies)` — deducts from balance, saves to state. The last 3 params are optional calibration fields stored in the position record for later lookup.
+- `place_paper_bet(market_id, outcome, amount, probability, estimated_ev, ai_confidence, strategies)` — deducts from balance, saves to state. Stores `entry_probability` and `entry_confidence` alongside each trade record for later drift tracking.
 - `resolve_market(market_id, outcome)` — settles a bet, updates balance, and **writes a row to the `bet_outcomes` SQLite table** (`data/calibration.db`) with `estimated_ev`, `ai_confidence`, `actual_pnl`, and `ev_error = estimated_ev − actual_pnl`
+- `close_position_early(market_id, current_prob)` — simulates selling a position before resolution at the current market probability. Used by `execute_swap.py`. P&L formula: `YES: amount * current_prob / entry_prob − amount`, `NO: amount * (1−current_prob) / (1−entry_prob) − amount`. Writes a `CLOSED_EARLY` row to `bet_outcomes`.
 - `auto_resolve_markets()` — checks Manifold API for any markets that have resolved, settles them automatically
 - `get_performance_metrics()` — calculates win rate, P&L, profit factor, etc.
 
@@ -363,6 +402,59 @@ Formats a Telegram-ready message. The message gets saved to `telegram_daily_summ
 
 ---
 
+---
+
+#### `scripts/position_swap_checker.py`
+**What it does:** Runs at `:40` every hour. Proposes swapping a losing position for a better opportunity when all slots are full.
+
+Logic:
+1. If `open_positions < MAX_POSITIONS` → exits immediately (slots free, normal trading will handle it)
+2. If `pending_swaps.json` has any unexpired pending entries → exits (don't spam while awaiting human reply)
+3. Fetches current probability for every open position from the Manifold API
+4. Computes `unrealised_pnl` for each — measures how far the market has moved against us
+5. Collects all losing positions (pnl < 0), sorts worst-first
+6. For each loser, finds the best unique replacement from `market_research.json`:
+   - confidence ≥ 65%, AI not SKIP, positive EV, not already held or already proposed
+7. Only pairs them if `new_opportunity_ev > abs(unrealised_loss)` (worth crystallising the loss)
+8. Writes all qualifying pairs to `pending_swaps.json` as a numbered list
+9. Sends one Telegram message per proposal
+
+**Telegram message format:**
+```
+♻️ Swap Proposal #1
+Close: NO on "Will Biden give a speech in 2026?"
+  Entered 35%, now 58%, unrealised $-14.30
+
+Open: YES on "Will OpenAI release GPT-5 before June 2026?"
+  AI confidence 78%, EV +$22.50
+
+Reply "approve swap 1" to execute.
+Reply "dismiss swap 1" to skip.
+(Expires in 4h)
+```
+
+---
+
+#### `scripts/execute_swap.py`
+**What it does:** Executes or dismisses a specific pending swap by ID. Called by OpenClaw when the human replies in Telegram.
+
+```bash
+python3 scripts/execute_swap.py --id 1           # approve
+python3 scripts/execute_swap.py --id 2 --dismiss # dismiss
+```
+
+On approve:
+1. Validates proposal is `pending` and not expired (> 4h old)
+2. Fetches fresh current probability for both markets
+3. Calls `close_position_early()` on the losing position
+4. Calls `place_paper_bet()` for the new opportunity (confidence-scaled sizing)
+5. Marks proposal `approved` in `pending_swaps.json`
+6. Sends confirmation to Telegram
+
+On dismiss: marks `dismissed`, sends a brief Telegram acknowledgement.
+
+---
+
 ### Supporting Files
 
 #### `manifold_bot/paper_trading_state.json`
@@ -433,18 +525,18 @@ All 6 open positions are NO bets at exactly 50% probability — payout of 2x, ba
   - `paper_trader.py` — `bet_outcomes` table written on every market resolution
   - `scripts/weekly_ev_report.py` — EV accuracy ratio by strategy + confidence band
   - 2 new weekly crons on server (harvest Sundays, EV report Mondays)
-
-**Immediate blockers:**
-- 🟡 Merge `feature/calibration` PR to main (all 30 tests passing)
-- 🟡 Bot at 10/10 positions — waiting for markets to auto-resolve via the `:10` cron
+- ✅ **Smart Position Swap** (feature/smart-swap, 2026-04-07):
+  - `paper_trader.py` — `entry_probability`, `entry_confidence` on every trade; `close_position_early()` added
+  - `scripts/position_swap_checker.py` — finds all losing positions, pairs each with unique replacement, multi-proposal Telegram flow
+  - `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; Telegram confirmation
+  - New `:40` cron `position-swap-check` in `setup_cron_jobs.py`
+  - 61 tests in `tests/test_swap.py` (137 total across all suites)
 
 **Next steps, in priority order:**
 
-**1. Smart position swap** — When positions are full, compare EV of open positions vs new opportunities. Propose swap via Telegram with `/approve` flow. Full spec in PLAN.md.
+**1. Real Telegram Bot** — `send_telegram.py` is a placeholder that prints to console. Replace with real `python-telegram-bot` integration so swap proposals and confirmations actually reach Telegram.
 
-**2. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
-
-**3. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+**2. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
 
 **4. SQLite storage** — Replace flat JSON state files with a proper database.
 
@@ -460,7 +552,8 @@ Docker Container (Linux)
             ├── Cron scheduler (built-in, not OS cron)
             │       ├── every 4h :00 UTC  → runs auto_research.py
             │       ├── hourly   :10 UTC  → runs resolve_positions.py
-            │       ├── hourly   :15 UTC  → runs auto_trader.py
+            │       ├── hourly   :20 UTC  → runs auto_trader.py
+            │       ├── hourly   :40 UTC  → runs position_swap_checker.py
             │       ├── daily 19:00 UTC   → runs daily_summary.py
             │       ├── Sundays  02:00    → runs harvest_resolved.py + analyze_calibration.py
             │       └── Mondays  07:00    → runs weekly_ev_report.py
@@ -479,4 +572,4 @@ The scripts run inside the container's shell. OpenClaw executes them as shell co
 
 ---
 
-*Last updated: 2026-04-07*
+*Last updated: 2026-04-07 (smart-swap)*
