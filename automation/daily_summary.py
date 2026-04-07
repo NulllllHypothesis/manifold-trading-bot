@@ -7,7 +7,7 @@ Generates a comprehensive report and sends it to Telegram.
 import json
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import statistics
 
@@ -15,6 +15,7 @@ import statistics
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.config import INITIAL_BALANCE
 
 try:
     from scripts.weekly_ev_report import generate_report as _ev_report
@@ -84,8 +85,8 @@ class DailySummary:
             'date': today_str,
             'total_trades_today': len(today_trades),
             'balance': state.get('balance', 0),
-            'initial_balance': 1000,
-            'total_profit': state.get('balance', 0) - 1000
+            'initial_balance': INITIAL_BALANCE,
+            'total_profit': state.get('balance', 0) - INITIAL_BALANCE
         }
 
         # Today's profit

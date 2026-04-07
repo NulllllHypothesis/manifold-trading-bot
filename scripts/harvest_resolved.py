@@ -28,7 +28,7 @@ import os
 import sqlite3
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -154,7 +154,7 @@ def parse_market(m: dict) -> dict | None:
     close_date = None
     if close_ts:
         # Manifold timestamps are milliseconds since epoch
-        close_date = datetime.utcfromtimestamp(close_ts / 1000).isoformat()
+        close_date = datetime.fromtimestamp(close_ts / 1000, tz=timezone.utc).isoformat()
 
     question = m.get("question", "")
     return {

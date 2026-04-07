@@ -62,7 +62,7 @@ class MarketResearcher:
             List of market recommendations with confidence scores
 
         Schema notes (schema_version=2):
-          ai_was_candidate: bool  — True iff the market was in the top-5 sent to AI.
+          ai_was_candidate: bool  — True iff the market was in the top-3 sent to AI.
           ai_returned_skip: bool  — True iff the market was a candidate AND AI returned SKIP.
           ai_recommendation: str | None
             - None            : market was never sent to AI (ai_was_candidate=False).
@@ -231,23 +231,32 @@ class MarketResearcher:
             # Sort by confidence (highest first) before AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
-            # AI candidate selection — recency boost.
-            # Among recommendations above the stat floor (worth AI review), prefer markets with
-            # recent bet activity: a freshly-traded market's AI analysis is more valuable than
-            # one where the probability hasn't moved in a week.
-            # Fallback: if fewer than 5 are above the floor, fill from remaining by confidence.
+            # AI candidate selection — 3 markets, ranked by composite score.
+            #
+            # Composite score = confidence + priority_boost * 0.15
+            #   - confidence is the primary signal (stat quality)
+            #   - priority_boost (0–1 from volume_spike_priority) adds up to 0.15
+            #     to push spiking markets ahead of equally-confident quiet ones
+            #   - weight (0.15) ensures volume is a tiebreaker, not a hijacker
+            #
+            # Only markets above _STAT_BOOST_FLOOR are candidates (AI is most
+            # useful when the stat signal is already meaningful). If fewer than
+            # _AI_CANDIDATE_COUNT pass the floor, we fill from below-floor by
+            # composite score so the AI always has something to evaluate.
+            _AI_CANDIDATE_COUNT = 3
             above_floor = [
                 r for r in recommendations if r['confidence'] >= _STAT_BOOST_FLOOR
             ]
             below_floor = [
                 r for r in recommendations if r['confidence'] < _STAT_BOOST_FLOOR
             ]
-            # Sort above-floor by recency (most recently bet first); treat missing as oldest.
-            above_floor.sort(
-                key=lambda r: r.get('last_bet_time_ms') or 0,
-                reverse=True,
-            )
-            recent_top = (above_floor + below_floor)[:5]
+
+            def _composite(r):
+                return r['confidence'] + r.get('priority_boost', 0.0) * 0.15
+
+            above_floor.sort(key=_composite, reverse=True)
+            below_floor.sort(key=_composite, reverse=True)
+            recent_top = (above_floor + below_floor)[:_AI_CANDIDATE_COUNT]
             top_candidate_ids = {r['market_id'] for r in recent_top}
             candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
 
@@ -257,6 +266,8 @@ class MarketResearcher:
             # (which would cause auto_trader.py to trade without AI validation), we raise a
             # clear error so the caller can catch it and write schema_version=1 instead,
             # causing the trader's schema guard to correctly block trading.
+            # Note: candidate_markets may be smaller than _AI_CANDIDATE_COUNT if fewer
+            # qualifying recommendations exist — that is fine; the guard only catches ID mismatches.
             if len(candidate_markets) != len(recent_top):
                 sample_keys = list(markets[0].keys())[:8] if markets else []
                 raise ValueError(
@@ -324,8 +335,8 @@ class MarketResearcher:
                     rec['ai_returned_skip'] = False
 
                     if not is_ai_candidate:
-                        # Market was never sent to AI — use None (not 'SKIP') to avoid
-                        # conflating "AI considered and skipped" with "never analyzed".
+                        # Market was never sent to AI (not in top-3) — use None (not 'SKIP')
+                        # to avoid conflating "AI considered and skipped" with "never analyzed".
                         rec['ai_recommendation'] = None
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
