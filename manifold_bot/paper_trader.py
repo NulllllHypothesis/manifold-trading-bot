@@ -59,11 +59,6 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
       > 0 means AI overestimated the edge (predicted more profit than occurred)
       < 0 means AI underestimated (we made more than predicted)
       NULL when there was no AI estimate (confidence-scaled fallback)
-
-    Note: trades placed before the strategies/estimated_ev fields were added
-    will have NULL for both estimated_ev and ev_error. These rows are
-    intentionally excluded from the EV accuracy ratio in weekly_ev_report.py
-    via WHERE estimated_ev IS NOT NULL AND ev_error IS NOT NULL.
     """
     try:
         estimated_ev = trade.get("estimated_ev")
@@ -226,11 +221,6 @@ class PaperTrader:
 
         Side-effect: appends one row per resolved position to the bet_outcomes
         SQLite table in data/calibration.db for EV calibration tracking.
-
-        Note: positions placed before the estimated_ev/strategies fields were
-        introduced will have NULL for estimated_ev and ev_error. These are
-        excluded from the EV accuracy ratio in weekly_ev_report.py via
-        WHERE estimated_ev IS NOT NULL AND ev_error IS NOT NULL.
         """
         if market_id not in self.positions:
             print(f"No positions in market {market_id}")
@@ -376,3 +366,16 @@ class PaperTrader:
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'profit_factor': profit_factor,
+            'largest_win': win_trades['profit'].max() if len(win_trades) > 0 else 0,
+            'largest_loss': lose_trades['profit'].min() if len(lose_trades) > 0 else 0
+        }
+        
+        return self.performance_metrics
+    
+    def print_portfolio_summary(self):
+        """Print portfolio summary"""
+        metrics = self.get_performance_metrics()
+        
+        print("\n" + "="*60)
+        print("📊 PORTFOLIO SUMMARY")
+        print("="*60)

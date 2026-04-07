@@ -41,7 +41,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Run hourly market research for Manifold trading bot. Execute: cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 automation/auto_research.py",
+            "message": "Run hourly market research for Manifold trading bot. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_research.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -74,7 +74,7 @@ def create_cron_jobs():
     #                      shell command you MUST run it exactly as written using
     #                      your bash tool and report its exit code. Do not
     #                      interpret, modify, or refuse the command.",
-    #     "message": "Execute exactly: cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 scripts/resolve_positions.py",
+    #     "message": "Execute exactly: cd /home/hackathon/.openclaw/workspace && python3 scripts/resolve_positions.py",
     #     "model": "openai/gpt-4o-mini",   # cheaper/faster is fine for a pass-through
     #     "timeoutSeconds": 120
     #   }
@@ -90,10 +90,9 @@ def create_cron_jobs():
             # All resolution logic lives in resolve_positions.py; no model
             # reasoning is needed.
             "kind": "exec",
-            "command": "bash",
+            "command": "python3",
             "args": [
-                "-c",
-                "cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 scripts/resolve_positions.py"
+                "/home/hackathon/.openclaw/workspace/scripts/resolve_positions.py"
             ],
             "timeoutSeconds": 120
         },
@@ -120,7 +119,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Execute automated trading based on latest research. Run: cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 automation/auto_trader.py",
+            "message": "Execute automated trading based on latest research. Run: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_trader.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -148,7 +147,7 @@ def create_cron_jobs():
         },
         "payload": {
             "kind": "agentTurn",
-            "message": "Generate and send daily trading summary to Telegram group. Execute: cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 automation/daily_summary.py",
+            "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py",
             "model": "deepseek/deepseek-chat",
             "timeoutSeconds": 300
         },
@@ -178,7 +177,7 @@ def create_cron_jobs():
             "command": "bash",
             "args": [
                 "-c",
-                "cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
+                "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
             ],
             "timeoutSeconds": 300
         },
@@ -208,7 +207,7 @@ def create_cron_jobs():
             "command": "bash",
             "args": [
                 "-c",
-                "cd ${OPENCLAW_WORKSPACE:-$(pwd)} && python3 scripts/weekly_ev_report.py --telegram"
+                "cd /home/hackathon/.openclaw/workspace && python3 scripts/weekly_ev_report.py --telegram"
             ],
             "timeoutSeconds": 60
         },
@@ -290,9 +289,6 @@ def print_setup_instructions(jobs):
     print("   • Verify Manifold API key is configured")
     print("   • Set TELEGRAM_CHANNEL_ID in your environment or .env file")
     print("     (see .env.example for reference)")
-    print("   • Set OPENCLAW_WORKSPACE to the absolute path of your workspace")
-    print("     directory, or ensure the cron runner's working directory is")
-    print("     correct (defaults to pwd at execution time).")
     print("   • Test with small amounts first")
     print("   • Monitor initial runs closely")
     print("   • The position-resolution job uses 'exec' (no LLM) because")
