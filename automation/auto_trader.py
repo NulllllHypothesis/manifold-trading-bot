@@ -256,33 +256,36 @@ class AutoTrader:
 
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
-        # Place paper trade
+        # Compute estimated EV before placing the bet so it can be stored in
+        # the position record (paper_trader.py) AND in auto_trades.json.
+        # EV = P(win) × payout_if_win - stake
+        # payout_if_win mirrors the formula used in place_paper_bet().
+        ai_prob = recommendation.get('ai_estimated_probability')
+        if ai_prob is not None:
+            if outcome == 'YES':
+                payout_if_win = amount / current_prob if current_prob > 0 else 0
+                win_prob = float(ai_prob)
+            else:  # NO
+                payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
+                win_prob = 1.0 - float(ai_prob)
+            estimated_ev = win_prob * payout_if_win - amount
+        else:
+            estimated_ev = None  # No AI estimate; calibration will skip this trade
+
+        # Place paper trade — pass calibration fields so resolve_market() can
+        # write them to bet_outcomes without a separate auto_trades.json lookup.
         success = self.trader.place_paper_bet(
             market_id=market_id,
             outcome=outcome,
             amount=amount,
-            probability=current_prob
+            probability=current_prob,
+            estimated_ev=estimated_ev,
+            ai_confidence=confidence,
+            strategies=recommendation.get('strategies', []),
         )
 
         if success:
             print(f"  ✅ Trade executed successfully")
-
-            # Compute estimated EV using the AI's probability estimate.
-            # EV = P(win) × payout_if_win - stake
-            # where payout_if_win mirrors paper_trader.py's place_paper_bet() formula.
-            # This value is stored at trade time so calibration step 4 can later
-            # compare estimated_ev vs actual_pnl to measure model accuracy.
-            ai_prob = recommendation.get('ai_estimated_probability')
-            if ai_prob is not None:
-                if outcome == 'YES':
-                    payout_if_win = amount / current_prob if current_prob > 0 else 0
-                    win_prob = float(ai_prob)
-                else:  # NO
-                    payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
-                    win_prob = 1.0 - float(ai_prob)
-                estimated_ev = win_prob * payout_if_win - amount
-            else:
-                estimated_ev = None  # No AI estimate available; calibration will skip this trade
 
             # Build reasoning
             reasoning_parts = []

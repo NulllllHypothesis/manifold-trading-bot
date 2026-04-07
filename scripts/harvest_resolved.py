@@ -41,8 +41,40 @@ DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(DB_DIR, "calibration.db")
 
 
+def _infer_category(question: str) -> str:
+    """
+    Infer a broad topic category from the question text using keyword matching.
+
+    Categories:
+      crypto    — Bitcoin, Ethereum, DeFi, NFT, blockchain
+      politics  — elections, presidents, legislation, parties
+      ai_tech   — AI models, LLMs, OpenAI, Anthropic, tech companies
+      sports    — games, tournaments, championships, team names
+      economics — markets, inflation, interest rates, GDP
+      science   — climate, space, medicine, research outcomes
+      other     — anything that doesn't match a more specific bucket
+
+    This is intentionally rough — it only needs to be good enough to reveal
+    whether calibration bias differs across broad topic areas.
+    """
+    q = question.lower()
+    if any(w in q for w in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'defi', 'nft', 'blockchain', 'solana', 'doge']):
+        return 'crypto'
+    if any(w in q for w in ['election', 'president', 'senate', 'congress', 'vote', 'democrat', 'republican', 'trump', 'biden', 'harris', 'political', 'legislation', 'parliament']):
+        return 'politics'
+    if any(w in q for w in ['gpt', 'llm', 'openai', 'anthropic', 'gemini', 'claude', 'deepseek', 'artificial intelligence', ' ai ', 'machine learning', 'neural', 'chatbot']):
+        return 'ai_tech'
+    if any(w in q for w in ['nba', 'nfl', 'nhl', 'mlb', 'soccer', 'football', 'basketball', 'baseball', 'tennis', 'golf', 'championship', 'tournament', 'match', 'game', 'win', 'score', 'league', 'team', 'player', 'season']):
+        return 'sports'
+    if any(w in q for w in ['stock', 'market', 'economy', 'inflation', 'gdp', 'fed', 'interest rate', 'recession', 'dow', 's&p', 'nasdaq', 'dollar', 'euro']):
+        return 'economics'
+    if any(w in q for w in ['climate', 'temperature', 'earthquake', 'hurricane', 'nasa', 'space', 'vaccine', 'drug', 'study', 'research', 'science']):
+        return 'science'
+    return 'other'
+
+
 def init_db(conn: sqlite3.Connection):
-    """Create tables if they don't exist yet."""
+    """Create tables if they don't exist yet, migrating schema when needed."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS resolved_markets (
             market_id         TEXT PRIMARY KEY,
@@ -50,9 +82,14 @@ def init_db(conn: sqlite3.Connection):
             probability_close REAL,          -- crowd prob at market close
             outcome           TEXT,          -- 'YES' or 'NO'
             close_date        TEXT,          -- ISO datetime string
-            unique_bettors    INTEGER
+            unique_bettors    INTEGER,
+            category          TEXT           -- inferred topic bucket
         )
     """)
+    # Schema migration: add category column to existing databases that predate it
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(resolved_markets)")}
+    if 'category' not in existing_cols:
+        conn.execute("ALTER TABLE resolved_markets ADD COLUMN category TEXT")
     # Index for fast bucket queries in step 2
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_prob_close
@@ -119,13 +156,15 @@ def parse_market(m: dict) -> dict | None:
         # Manifold timestamps are milliseconds since epoch
         close_date = datetime.utcfromtimestamp(close_ts / 1000).isoformat()
 
+    question = m.get("question", "")
     return {
         "market_id": m["id"],
-        "question": m.get("question", ""),
+        "question": question,
         "probability_close": float(prob),
         "outcome": resolution,
         "close_date": close_date,
         "unique_bettors": m.get("uniqueBettorCount", 0),
+        "category": _infer_category(question),
     }
 
 
@@ -188,8 +227,8 @@ def harvest(target: int = 1000, refresh: bool = False):
             try:
                 conn.execute("""
                     INSERT OR IGNORE INTO resolved_markets
-                    (market_id, question, probability_close, outcome, close_date, unique_bettors)
-                    VALUES (:market_id, :question, :probability_close, :outcome, :close_date, :unique_bettors)
+                    (market_id, question, probability_close, outcome, close_date, unique_bettors, category)
+                    VALUES (:market_id, :question, :probability_close, :outcome, :close_date, :unique_bettors, :category)
                 """, parsed)
                 if conn.execute("SELECT changes()").fetchone()[0] > 0:
                     inserted += 1

@@ -120,7 +120,71 @@ def analyze(min_sample: int = 5) -> list[dict]:
     return buckets
 
 
-def save_table(buckets: list[dict]):
+def analyze_by_category(min_sample: int = 5) -> list[dict]:
+    """
+    Compute actual YES rate broken down by topic category.
+
+    This reveals whether calibration bias is category-specific — e.g. the crowd
+    might be well-calibrated on politics but heavily overconfident on crypto.
+    That means the AI should apply stronger corrections to crypto markets.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT
+            COALESCE(category, 'other') AS cat,
+            COUNT(*) AS total,
+            SUM(CASE WHEN outcome = 'YES' THEN 1 ELSE 0 END) AS yes_count,
+            AVG(probability_close) AS avg_prob
+        FROM resolved_markets
+        WHERE probability_close IS NOT NULL
+        GROUP BY cat
+        ORDER BY total DESC
+    """).fetchall()
+    conn.close()
+
+    print("\n" + "─" * 65)
+    print("CALIBRATION BY CATEGORY")
+    print("─" * 65)
+    print(f"{'Category':12} {'N':>6} {'Avg crowd':>10} {'Actual YES':>11} {'Bias':>8}  Status")
+    print("─" * 65)
+
+    categories = []
+    for cat, total, yes_count, avg_prob in rows:
+        actual_rate = yes_count / total if total > 0 else None
+        bias = (avg_prob - actual_rate) if (actual_rate is not None and avg_prob is not None) else None
+
+        status = ""
+        if total < min_sample:
+            status = f"⚠️  only {total} samples"
+        elif bias is not None and abs(bias) > 0.10:
+            direction = "over" if bias > 0 else "under"
+            status = f"🔴 crowd {direction}estimates YES by {abs(bias)*100:.0f}pp"
+        elif bias is not None and abs(bias) > 0.05:
+            direction = "over" if bias > 0 else "under"
+            status = f"🟡 {direction}estimate {abs(bias)*100:.0f}pp"
+        else:
+            status = "✅ calibrated"
+
+        print(
+            f"{cat:12} {total:>6}   "
+            f"{(avg_prob or 0)*100:>7.0f}%   "
+            f"{(actual_rate or 0)*100:>8.0f}%   "
+            f"{(bias or 0)*100:>+6.0f}pp  {status}"
+        )
+
+        categories.append({
+            "category":      cat,
+            "sample_size":   total,
+            "avg_crowd_prob": round(avg_prob, 4) if avg_prob is not None else None,
+            "actual_yes_rate": round(actual_rate, 4) if actual_rate is not None else None,
+            "bias":           round(bias, 4) if bias is not None else None,
+            "reliable":       total >= min_sample,
+        })
+
+    return categories
+
+
+def save_table(buckets: list[dict], categories: list[dict]):
     """Save the calibration table to JSON for use by ai_analyzer.py."""
     os.makedirs(DB_DIR, exist_ok=True)
     output = {
@@ -133,6 +197,7 @@ def save_table(buckets: list[dict]):
             "Inject this into AI prompts to correct for systematic over/under-confidence."
         ),
         "buckets": buckets,
+        "by_category": categories,
     }
     with open(OUT_PATH, "w") as f:
         json.dump(output, f, indent=2)
@@ -151,7 +216,8 @@ def main():
     print("=" * 65 + "\n")
 
     buckets = analyze(min_sample=args.min_sample)
-    save_table(buckets)
+    categories = analyze_by_category(min_sample=args.min_sample)
+    save_table(buckets, categories)
 
     # Summary stats
     reliable = [b for b in buckets if b["reliable"] and b["bias"] is not None]

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-07T07:41:41.193865Z",
+  "generated_at": "2026-04-07T07:55:46.384711Z",
   "source_db": "/Users/amirghari/Desktop/Hackathon/workspace/data/calibration.db",
   "description": "Crowd calibration table. For each 10pp probability bucket, 'actual_yes_rate' is the historical rate at which Manifold markets in that bucket resolved YES. 'bias' > 0 means crowd overestimates. Inject this into AI prompts to correct for systematic over/under-confidence.",
   "buckets": [
@@ -91,6 +91,64 @@
       "actual_yes_rate": 0.9916,
       "sample_size": 237,
       "bias": -0.0416,
+      "reliable": true
+    }
+  ],
+  "by_category": [
+    {
+      "category": "other",
+      "sample_size": 594,
+      "avg_crowd_prob": 0.4748,
+      "actual_yes_rate": 0.431,
+      "bias": 0.0439,
+      "reliable": true
+    },
+    {
+      "category": "sports",
+      "sample_size": 227,
+      "avg_crowd_prob": 0.4621,
+      "actual_yes_rate": 0.4273,
+      "bias": 0.0348,
+      "reliable": true
+    },
+    {
+      "category": "economics",
+      "sample_size": 104,
+      "avg_crowd_prob": 0.5151,
+      "actual_yes_rate": 0.5,
+      "bias": 0.0151,
+      "reliable": true
+    },
+    {
+      "category": "politics",
+      "sample_size": 62,
+      "avg_crowd_prob": 0.4172,
+      "actual_yes_rate": 0.3548,
+      "bias": 0.0623,
+      "reliable": true
+    },
+    {
+      "category": "ai_tech",
+      "sample_size": 61,
+      "avg_crowd_prob": 0.4445,
+      "actual_yes_rate": 0.4426,
+      "bias": 0.0019,
+      "reliable": true
+    },
+    {
+      "category": "crypto",
+      "sample_size": 58,
+      "avg_crowd_prob": 0.3465,
+      "actual_yes_rate": 0.2931,
+      "bias": 0.0534,
+      "reliable": true
+    },
+    {
+      "category": "science",
+      "sample_size": 15,
+      "avg_crowd_prob": 0.4543,
+      "actual_yes_rate": 0.4,
+      "bias": 0.0543,
       "reliable": true
     }
   ]

@@ -1,15 +1,97 @@
-import os
 """
 Paper Trading Bot for Manifold Markets
 Simulates trading without using real play money.
 """
 
 import json
+import os
+import sqlite3
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .manifold_api import api_client
 from .config import INITIAL_BALANCE, MIN_BET_AMOUNT, MAX_BET_AMOUNT
+
+# SQLite database — shared with calibration scripts
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DB_PATH = _PROJECT_ROOT / "data" / "calibration.db"
+
+
+def _init_bet_outcomes_db() -> None:
+    """Create bet_outcomes table if it doesn't exist yet."""
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bet_outcomes (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id          TEXT NOT NULL,
+            our_recommendation TEXT,    -- YES or NO (what we bet)
+            amount             REAL,    -- stake
+            probability        REAL,    -- market prob when we placed the bet
+            estimated_ev       REAL,    -- EV predicted at trade time (NULL = no AI estimate)
+            ai_confidence      REAL,    -- AI confidence score (NULL = no AI)
+            strategies         TEXT,    -- JSON list of strategy names that triggered
+            market_resolution  TEXT,    -- YES or NO (actual outcome)
+            actual_pnl         REAL,    -- realized profit/loss
+            ev_error           REAL,    -- estimated_ev - actual_pnl; NULL when estimated_ev is NULL
+            resolved_at        TEXT     -- ISO timestamp
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bet_outcomes_market
+        ON bet_outcomes(market_id)
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -> None:
+    """
+    Append one resolved-trade record to bet_outcomes.
+
+    Called by resolve_market() for every position that closes.
+    The trade dict is the record originally written by place_paper_bet(),
+    so it already carries estimated_ev, ai_confidence, and strategies if
+    auto_trader passed them in.
+
+    ev_error = estimated_ev - actual_pnl
+      > 0 means AI overestimated the edge (predicted more profit than occurred)
+      < 0 means AI underestimated (we made more than predicted)
+      NULL when there was no AI estimate (confidence-scaled fallback)
+    """
+    try:
+        estimated_ev = trade.get("estimated_ev")
+        ev_error = (estimated_ev - actual_pnl) if estimated_ev is not None else None
+
+        strategies = trade.get("strategies")
+        strategies_json = json.dumps(strategies) if strategies is not None else None
+
+        conn = sqlite3.connect(_DB_PATH)
+        conn.execute("""
+            INSERT INTO bet_outcomes
+            (market_id, our_recommendation, amount, probability,
+             estimated_ev, ai_confidence, strategies,
+             market_resolution, actual_pnl, ev_error, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade.get("market_id"),
+            trade.get("outcome"),
+            trade.get("amount"),
+            trade.get("probability"),
+            estimated_ev,
+            trade.get("ai_confidence"),
+            strategies_json,
+            market_resolution,
+            actual_pnl,
+            ev_error,
+            datetime.now().isoformat(),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Never let DB errors crash the paper trader
+        print(f"[bet_outcomes] warning: could not write outcome for {trade.get('market_id')}: {e}")
 
 
 class PaperTrader:
@@ -49,17 +131,23 @@ class PaperTrader:
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
     
-    def place_paper_bet(self, market_id: str, outcome: str, 
-                       amount: float, probability: float) -> bool:
+    def place_paper_bet(self, market_id: str, outcome: str,
+                       amount: float, probability: float,
+                       estimated_ev: Optional[float] = None,
+                       ai_confidence: Optional[float] = None,
+                       strategies: Optional[List[str]] = None) -> bool:
         """
-        Place a paper trade (simulated bet)
-        
+        Place a paper trade (simulated bet).
+
         Args:
-            market_id: Manifold market ID
-            outcome: "YES" or "NO"
-            amount: Bet amount
-            probability: Current market probability (0-1)
-        
+            market_id:     Manifold market ID
+            outcome:       "YES" or "NO"
+            amount:        Bet amount in dollars
+            probability:   Current market probability (0–1)
+            estimated_ev:  AI-estimated expected value at trade time (stored for calibration)
+            ai_confidence: AI confidence score (stored for calibration)
+            strategies:    List of strategy names that triggered this trade
+
         Returns:
             bool: True if trade successful
         """
@@ -101,7 +189,11 @@ class PaperTrader:
             'payout_if_win': payout,
             'profit_if_win': profit_if_win,
             'profit_if_lose': profit_if_lose,
-            'status': 'OPEN'
+            'status': 'OPEN',
+            # Calibration fields — stored at trade time, read back at resolution time
+            'estimated_ev': estimated_ev,
+            'ai_confidence': ai_confidence,
+            'strategies': strategies,
         }
         
         # Update balance and positions
@@ -121,24 +213,29 @@ class PaperTrader:
     
     def resolve_market(self, market_id: str, outcome: str):
         """
-        Resolve a market and calculate P&L
-        
+        Resolve a market and calculate P&L.
+
         Args:
             market_id: Market to resolve
             outcome: Actual outcome ("YES" or "NO")
+
+        Side-effect: appends one row per resolved position to the bet_outcomes
+        SQLite table in data/calibration.db for EV calibration tracking.
         """
         if market_id not in self.positions:
             print(f"No positions in market {market_id}")
             return
-        
+
+        _init_bet_outcomes_db()   # no-op if table already exists
+
         positions = self.positions[market_id]
         total_pnl = 0
         updated_trade_ids = []
-        
+
         for trade in positions:
             if trade['status'] != 'OPEN':
                 continue
-            
+
             if trade['outcome'] == outcome:
                 # Winning trade
                 profit = trade['profit_if_win']
@@ -155,7 +252,10 @@ class PaperTrader:
                 trade['profit'] = profit
                 total_pnl += profit
                 print(f"Trade {trade['trade_id']}: LOSE ${profit:.2f}")
-            
+
+            # Write outcome to SQLite for EV calibration tracking
+            _write_bet_outcome(trade, market_resolution=outcome, actual_pnl=trade['profit'])
+
             updated_trade_ids.append(trade['trade_id'])
         
         # Also update trade_history to stay consistent
