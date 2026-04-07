@@ -8,11 +8,8 @@ and the OPEN-position guard in auto_trader.should_trade_market.
 
 import sys
 import os
-import json
-import tempfile
 import unittest
-from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
