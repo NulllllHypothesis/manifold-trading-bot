@@ -52,7 +52,7 @@ Full rules in `AGENTS.md`.
 |------|-------------|
 | `manifold_bot/manifold_api.py` | Manifold Markets API client — get markets, search, place bets, get user info |
 | `manifold_bot/paper_trader.py` | Paper trading engine — P&L tracking, position management, state persistence to JSON |
-| `manifold_bot/strategies.py` | Momentum, mean reversion, volume spike, Kelly criterion sizing |
+| `manifold_bot/strategies.py` | 5 directional strategies + 1 priority filter, organised into signal families (momentum / contrarian / fundamental / filter); Kelly criterion sizing; category-conditional probability bias |
 | `manifold_bot/dashboard.py` | Performance charts and text dashboard |
 | `manifold_bot/config.py` | API key (from env var `MANIFOLD_API_KEY`), trading constants |
 | `manifold_bot/main.py` | Interactive CLI |
@@ -88,8 +88,10 @@ Full rules in `AGENTS.md`.
 
 | ID | Name | Schedule |
 |---|---|---|
-| `359e61eb-...` | Manifold Market Research | `0 */4 * * *` UTC (every 4h) |
-| `00695c33-...` | Manifold Auto Trading | `15 * * * *` UTC |
+| `359e61eb-...` | Manifold Market Research | `0 * * * *` UTC (hourly :00) |
+| *(position-resolution)* | Position Resolution | `10 * * * *` UTC (hourly :10) |
+| `00695c33-...` | Manifold Auto Trading | `20 * * * *` UTC (hourly :20) |
+| *(position-swap-check)* | Position Swap Check | `40 * * * *` UTC (hourly :40) |
 | `0a77ecb9-...` | Daily Trading Summary | `0 19 * * *` UTC |
 | `e9a54afc-...` | Weekly Calibration Harvest | `0 2 * * 0` UTC (Sundays) |
 | `d5a01246-...` | Weekly EV Accuracy Report | `0 7 * * 1` UTC (Mondays) |
@@ -117,13 +119,13 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 
 - [x] `manifold_bot/ai_analyzer.py` — calls local Ollama (`deepseek-r1:14b`) first, falls back to DeepSeek API
   - Returns: `{ "recommendation": "YES/NO/SKIP", "confidence": 0.0-1.0, "estimated_true_probability": 0.0-1.0, "reasoning": "...", "risk_factors": "..." }`
-- [x] Wired into `auto_research.py` — AI runs on top 5 candidates per hourly cycle
+- [x] Wired into `auto_research.py` — AI runs on top 3 candidates per hourly cycle (`_AI_CANDIDATE_COUNT = 3`)
   - If AI agrees AND stat ≥ 0.65: `0.4 × stat + 0.6 × AI`, capped at `stat + 0.10` (max 10pp boost)
   - If AI agrees AND stat < 0.65: blended result capped at 0.64 — AI cannot rescue a weak stat signal
   - If AI disagrees: confidence scaled down by `0.4 + (1 - ai_conf) × 0.4` — certain AI disagreement keeps only 40%
 - [x] Fixed volume spike `avg_volume` — now uses **median** of fetched markets (mean was skewed by outliers)
 - [x] 24 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
-- [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 5 markets to stay within hourly window)
+- [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 3 markets — worst case 270s < 300s cron limit)
 - [x] `MIN_CONFIDENCE` moved to `config.py` — single source of truth for trading threshold across trader + researcher
 - [x] DeepSeek API fallback: explicit `delay=2` at call site, `per_market_timeout=90` to prevent hung calls
 - [x] Schema version written dynamically — v2 only if AI pass completed; v1 if aborted (blocks trading)
@@ -152,6 +154,34 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 - [x] AI candidate selection uses recency boost (sorted by `lastBetTime`) instead of pure confidence rank
 - [x] `_STAT_BOOST_FLOOR` hardcoded to 0.65 (decoupled from MIN_CONFIDENCE regression)
 - [x] Agent auto-fix (commit 3c98ce3) truncated 3 files — restored in follow-up commit bb0c6b5
+
+---
+
+### ✅ Signal Family Architecture + Code Quality — DONE (2026-04-07)
+
+Prevents correlated strategies from stacking as independent evidence, and fixes ranking/guard bugs found in code review.
+
+**Signal families:**
+- [x] `SIGNAL_FAMILIES` dict in `strategies.py` — each strategy labelled `momentum`, `contrarian`, `fundamental`, or `filter`
+- [x] Family-aware aggregation in `auto_research.py` — at most 1 signal per directional family (highest confidence wins within a family); `thin_market` (filter) is confirmation-only, only kept when a `contrarian` or `fundamental` signal agrees
+- [x] `volume_spike_priority` renamed from `volume_spike_strategy` — returns `float 0.0–1.0` (priority boost for candidate ranking), **not** a directional YES/NO signal. Stored as `priority_boost` on each recommendation dict
+- [x] Composite candidate ranking: `confidence + priority_boost × 0.15` — priority_boost actually used in sort key (was computed but discarded before this fix)
+- [x] `probability_direction_strategy` — added `volume24h >= 5` guard (was firing on zero-volume markets)
+- [x] `mean_reversion_strategy` — threshold tightened 0.80 → 0.85; added close-time guard (skips markets resolving in < 7 days — not enough time to revert)
+- [x] `probability_bias_strategy` — category-conditional: skips `ai_tech` (0.19pp bias, < 4pp threshold) and `economics` (1.51pp, < 4pp threshold); fires on `politics` (+6pp), `crypto` (+5pp), and others above threshold
+
+**Code quality:**
+- [x] `_AI_CANDIDATE_COUNT = 3` constant enforced — selects exactly 3 markets for AI, marks exactly 3 as `ai_was_candidate=True` in research output
+- [x] `test_manifold.py` rewritten as 7 fully mocked unit tests (no network required); `--live` flag for manual smoke testing against real API
+- [x] `auto_research.py` reporting hygiene — research always runs (removed the early-exit when at max positions); reporting no longer inflates AI hit counts
+
+**Bug fixes:**
+- [x] Zero/negative Kelly in `execute_swap.py` pre-validated BEFORE closing position — previously a zero-Kelly new trade would close the existing position but then abort, leaving the portfolio in a half-modified state
+- [x] Duplicate-bet guard (`should_trade_market`) queries live `self.trader.positions` — ignores stale `existing_position=False` flag from research JSON (the 2czul2Rync bug: repeated bets on same market)
+- [x] Regression tests for duplicate-bet bug added to `test_strategies.py`
+- [x] `datetime.utcfromtimestamp()` (deprecated) → `datetime.fromtimestamp(ts/1000, tz=timezone.utc)` in `harvest_resolved.py`
+
+**Tests:** 173 total across all suites (up from 137)
 
 ---
 
@@ -231,7 +261,7 @@ When all positions are full the bot was frozen. This feature turns `max_position
 - [x] `scripts/position_swap_checker.py` — finds all weak positions, pairs each with unique opportunity, writes `pending_swaps.json`, sends Telegram per proposal
 - [x] `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; sends confirmation to Telegram
 - [x] `automation/setup_cron_jobs.py` — added `position-swap-check` cron at `:40 * * * *` (exec, no LLM)
-- [x] `tests/test_swap.py` — 61 tests covering all paths (maths, filtering, flag-file logic, integration)
+- [x] `tests/test_swap.py` — 61 tests covering all paths (maths, filtering, flag-file logic, integration, zero-Kelly pre-validation, EV pipeline regression)
 
 **Cron schedule (updated):**
 ```
@@ -246,7 +276,7 @@ Mon 07:00    Weekly EV Report
 
 ---
 
-### 🟡 Medium Priority — Real Telegram Bot
+### 🟡 Next — Real Telegram Bot
 
 `automation/send_telegram.py` is currently a placeholder — it just prints to console.
 
@@ -261,6 +291,84 @@ Mon 07:00    Weekly EV Report
 
 > Bot token: in OpenClaw config on server (`~/.openclaw/openclaw.json`)
 > Group ID: `-5240775171`
+
+---
+
+### 🟡 Next — Category Exposure Caps
+
+Each market `category` (crypto/politics/ai_tech/sports/economics/science/other) is inferred by keyword at research time. Currently there is no limit on how many open positions can belong to the same category — the bot could go 8/10 slots into crypto during a volatile week.
+
+- [ ] Add `max_positions_per_category` config (suggested: 3 out of 10 total)
+- [ ] In `auto_trader.py` `should_trade_market()`: count open positions per category, block if at cap
+- [ ] Surface category breakdown in `daily_summary.py`
+
+---
+
+### 🟡 Next — Weighted Scoring + Adaptive Learning
+
+The model weights in Ollama/DeepSeek do not update after a trade — the model itself is frozen. What *can* learn is the **policy layer**: which strategies to trust, how much to size, and what context to give the AI. The goal is to turn `bet_outcomes` data into automated behavior changes, not just reports you have to read manually.
+
+**Phase A — Strategy reliability weights** (prerequisite for weighted scoring)
+
+- [ ] `scripts/compute_strategy_weights.py` — queries `bet_outcomes`, computes per-strategy EV accuracy ratio (realized EV / estimated EV) over last 90 days; writes `data/strategy_weights.json`
+- [ ] `data/strategy_weights.json` — committed to git; updated weekly by cron; initial value 1.0 for all strategies
+- [ ] `strategies.py` — each strategy returns `{"direction", "strength", "reliability_weight", "family"}`; `reliability_weight` loaded from `strategy_weights.json` at import
+- [ ] `auto_research.py` — composite score: `direction_sign × strength × reliability_weight`; replaces flat confidence as primary ranking key
+- [ ] Keep `confidence` field in output for backward compatibility (map score → 0.0–1.0)
+
+**Phase B — Dynamic risk scaling from EV accuracy**
+
+- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; if a strategy's EV ratio < 0.5 (overestimating edge by 2×): raise min confidence threshold for that strategy by 5pp; if EV ratio < 0.3: skip that strategy entirely for this cycle
+- [ ] `auto_trader.py` — Kelly fraction scales with EV ratio: `kelly_fraction = 0.5 × min(ev_ratio, 1.0)`; a strategy at EV ratio 0.6 gets half-Kelly × 0.6 instead of full half-Kelly
+- [ ] Add `ev_ratio_at_trade_time` to each trade record in `auto_trades.json` for audit trail
+
+**Phase C — Category-level learning from own trade history**
+
+- [ ] `scripts/compute_strategy_weights.py` — extend to also compute per-category EV accuracy (politics/crypto/sports/etc) from `bet_outcomes`; write to `data/category_accuracy.json`
+- [ ] `auto_trader.py` — category accuracy feeds the category exposure caps: if a category's EV ratio < 0.5, reduce its cap from 3 to 1 automatically
+- [ ] This complements the static calibration table — the public crowd bias corrects probability estimates, our own trade history corrects position sizing and exposure
+
+**Phase D — Self-performance note in AI prompt**
+
+- [ ] `ai_analyzer.py` — load `data/strategy_weights.json` at module import; build a compact 3-5 line note injected alongside the calibration table:
+  ```
+  Recent strategy performance (last 90 resolved trades):
+    creator_disagreement: EV ratio 1.2 (strong — trust this signal)
+    mean_reversion: EV ratio 0.4 (weak — apply extra skepticism)
+    momentum: EV ratio 0.8 (solid)
+  ```
+- [ ] This makes the AI reason with our actual system history, not just public crowd bias
+- [ ] Degrades gracefully: if `strategy_weights.json` absent, note is empty string
+
+**What this is NOT:**
+- Not fine-tuning the model weights — that's a much later step requiring clean labeled data and a stable signal stack
+- Not immediate per-trade learning — weights update weekly from resolved outcomes
+- The "intelligence" increase is: better context in prompts + better policy (sizing + thresholds) driven by actual P&L, not just confidence scores
+
+> Suggested cron addition: `weekly-strategy-weights` — Sundays 03:00 UTC (after harvest, before EV report)
+> Runs `compute_strategy_weights.py`, commits updated `data/strategy_weights.json` to main
+
+---
+
+### 🟡 Medium Priority — News Fetcher
+
+Add a real news signal to the fundamental family. The key design point: use a structured news API (not DDG/Google scraping) to get recent headlines per market topic.
+
+- [ ] `manifold_bot/news_fetcher.py` — takes a market question, extracts keywords, queries news API (e.g. NewsAPI.org free tier)
+- [ ] Returns: list of recent headlines with publication date and sentiment
+- [ ] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60-0.80 based on headline count and recency
+- [ ] Wire into `auto_research.py` — runs in parallel with stat strategies (not on every market — only top 20 candidates to stay within time budget)
+
+---
+
+### 🟡 Medium Priority — Whale Tracking
+
+Track large individual bettors on Manifold as a signal. When a known high-accuracy bettor places a big bet, that's strong evidence about the true probability.
+
+- [ ] `manifold_bot/whale_tracker.py` — fetches recent large bets via `/v0/bets` endpoint, filters by amount threshold (e.g. > M$500) and bettor profit history
+- [ ] `whale_strategy` in `strategies.py` — `family: "fundamental"`, confidence scales with whale's historical accuracy and bet size
+- [ ] Wire into `auto_research.py` as a supplemental fundamental signal
+- [ ] Requires: building a bettor-accuracy cache in SQLite (can reuse `data/calibration.db`)
 
 ---
 
@@ -341,6 +449,12 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Close open positions | 🔄 In Progress | Bot at 10/10 positions — auto-resolver will free slots as markets settle |
 | Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
+| Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
+| Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 173 tests total |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
+| Category exposure caps | ❌ Not started | |
+| Weighted scoring + adaptive learning | ❌ Not started | strategy weights → dynamic sizing → category accuracy → self-performance prompt note |
+| News fetcher | ❌ Not started | |
+| Whale tracking | ❌ Not started | |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |

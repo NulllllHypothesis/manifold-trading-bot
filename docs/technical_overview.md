@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-07 (smart-swap)* — Smart Position Swap complete (feature/smart-swap): multi-proposal Telegram flow, numbered approve/dismiss, `close_position_early()`, `pending_swaps.json`, new `:40` cron.
+*Last updated: 2026-04-07 (signal-families + code-quality)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
 
 ---
 
@@ -49,7 +49,10 @@ Every hour at :00 UTC
 │  - Gets 100+ markets            │
 │  - Pre-filter: is_stale_market  │
 │  - Scores with 6 strategies     │
-│  - Top 5 by confidence+recency  │
+│  - Family deduplication         │
+│  - Top 3 by composite score     │
+│    (confidence + priority_boost │
+│     × 0.15)                     │
 │  - AI analysis on top 3 ──────► deepseek-r1:14b (local, free)
 │    (YES/NO/SKIP + reasoning)    │  ~70-80s per market on CPU
 │    calibration table in prompt  │  crowd bias corrections injected
@@ -205,8 +208,8 @@ Bet with momentum if the market leans strongly and has had recent activity (last
 **Strategy 2 — Mean Reversion** (confidence 0.70)
 Bet against extreme probabilities (>80% or <20%), but only when fewer than 100 unique bettors have weighed in. Don't fight genuine deep consensus.
 
-**Strategy 3 — Volume Spike** (confidence 0.65)
-If a market's 24h volume is >2x the batch median, something is happening — bet in the direction it's already leaning.
+**Strategy 3 — Volume Spike Priority** (priority filter — not a directional signal)
+If a market's 24h volume is >2x the batch median, returns a `priority_boost` float (0.0–1.0). This value is added to the composite candidate score (`confidence + priority_boost × 0.15`) to rank which markets go to the AI first. It does NOT vote YES or NO and does NOT count as a signal family member.
 
 **Strategy 4 — Creator Disagreement** (confidence 0.75)
 If the market creator's resolution probability estimate differs from the crowd by ≥15pp, bet toward the creator. They often have inside information.
@@ -216,8 +219,20 @@ When one side of the AMM liquidity pool holds <15% of the total, bet toward that
 
 **Strategy 6 — Probability Bias** (confidence 0.70)
 Exploit systematic crowd overconfidence measured from 1,100+ resolved markets. The 60–70% bucket resolves YES only 47% of the time (+18pp bias) — bet NO. The 30–40% bucket: +11pp bias — also bet NO.
+Category-conditional: skips `ai_tech` (only 0.19pp bias) and `economics` (1.51pp bias) — neither clears the 4pp minimum threshold to act on. Fires on `politics` (+6pp), `crypto` (+5pp), `sports`, `science`, `other`.
 
-**The voting system** — `auto_research.py` runs all applicable strategies on each market, takes weighted average confidence of the majority direction. Markets that pass the threshold are sorted by confidence + recency, top candidates are sent to AI for deeper analysis.
+**Signal families and deduplication** — each strategy belongs to a family:
+
+| Family | Strategies |
+|--------|-----------|
+| `momentum` | probability_direction |
+| `contrarian` | mean_reversion, probability_bias |
+| `fundamental` | creator_disagreement, thin_market |
+| `filter` | volume_spike_priority |
+
+`auto_research.py` runs all strategies on each market, then deduplicates: **at most 1 signal per directional family** (highest confidence wins within a family). This prevents correlated strategies from stacking as independent evidence and inflating confidence. `thin_market` (filter) is confirmation-only — only included if a `contrarian` or `fundamental` signal agrees. The `filter` family provides `priority_boost` only.
+
+Composite score: `confidence + priority_boost × 0.15`. Top 3 by composite score are sent to AI. Markets that pass the 65% threshold after AI blending are candidates for trading.
 
 ---
 
@@ -312,16 +327,17 @@ These three files are what actually run on the server every hour. They're standa
 ---
 
 #### `automation/auto_research.py`
-**What it does:** The hourly market scanner.
+**What it does:** The hourly market scanner. Always runs — even when all positions are full, so `position_swap_checker.py` has fresh data.
 
 Flow:
-1. Checks if we're already at max positions — if yes, skips entirely (no point researching if we can't trade)
-2. Calls `api_client.get_markets(limit=100)` — fetches 100 live markets from Manifold
-3. Filters out: resolved markets, markets with liquidity under $100
-4. Runs all 3 strategies on each remaining market
-5. Calculates overall recommendation + confidence score per market
-6. Sorts by confidence (highest first)
-7. Saves to `market_research.json` — keeps the latest result plus a 24-hour history
+1. Calls `api_client.get_markets(limit=100)` — fetches 100 live markets from Manifold
+2. Filters out: resolved markets, stale markets (last bet > 72h AND volume24h < 10), liquidity under $100
+3. Runs all 6 strategies on each remaining market
+4. Family deduplication: keeps strongest signal per directional family (momentum/contrarian/fundamental); applies `thin_market` confirmation filter
+5. Computes `priority_boost` via `volume_spike_priority`, adds composite score (`confidence + priority_boost × 0.15`)
+6. Sorts by composite score (highest first); sends top 3 to AI (`_AI_CANDIDATE_COUNT = 3`)
+7. Blends stat + AI confidence; computes `estimated_ev` per recommendation (reference $25 bet)
+8. Saves to `market_research.json` — keeps the latest result plus a 24-hour history
 
 Output file structure (`market_research.json`):
 ```json
@@ -335,7 +351,10 @@ Output file structure (`market_research.json`):
         "probability": 0.72,
         "recommendation": "NO",
         "confidence": 0.65,
-        "strategies": ["volume_spike"]
+        "strategies": ["contrarian:mean_reversion"],
+        "priority_boost": 0.42,
+        "ai_was_candidate": true,
+        "estimated_ev": 4.20
       }
     ]
   },
@@ -360,10 +379,10 @@ If `schema_version < 2` (i.e. AI pass was skipped or aborted), prints a Telegram
 | Rule | Value | Meaning |
 |------|-------|---------|
 | Min confidence | 65% | Only trade if the strategy signal is strong enough |
-| Max positions | 5 | Never hold more than 5 open bets at once |
+| Max positions | 10 | Never hold more than 10 open bets at once |
 | Max position size | 10% of balance | Don't bet more than 10% of total cash on one trade |
 | Min liquidity | $200 | Don't trade illiquid markets (hard to exit) |
-| Cooldown | 6 hours | Don't double-up on same market within 6 hours |
+| No re-entry | — | Blocks any new bet on a market with an existing OPEN position (live check, not research flag) |
 | Max trades per run | 2 | Only place 2 trades max per hourly cycle |
 
 **Position sizing formula:**
@@ -453,7 +472,7 @@ On dismiss: marks `dismissed`, sends a brief Telegram acknowledgement.
 The live portfolio. Gitignored (runtime data). Supports up to 10 open positions. Balance and positions are the current live state on the server.
 
 #### `market_research.json`
-Contains the last 24 hours of hourly research runs (schema_version 2). Each run has ~50-100 market recommendations with AI scores on the top 5. Bridge between research and trading.
+Contains the last 24 hours of hourly research runs (schema_version 2). Each run has ~50-100 market recommendations with AI scores on the top 3 (`ai_was_candidate=True`). Bridge between research and trading.
 
 #### `auto_trades.json`
 Log of every trade the bot has executed. Every record includes `estimated_ev` (the AI's EV prediction at trade time), `ai_confidence`, and `strategies`. Used for the weekly EV accuracy report.
@@ -483,17 +502,17 @@ The old strategies only looked at the current probability number — they had no
 - AI agrees → boosted confidence (harder to game with weak stats)
 - AI disagrees → penalised to 40% (very unlikely to pass the 65% trading threshold)
 
-### Still present — Mean Reversion and Probability Direction Conflict
+### ✅ Fixed — Mean Reversion and Probability Direction Conflict
 
-These two strategies fundamentally disagree at the same probability levels. If a market is at 75%:
-- Probability Direction says: "Bet YES — momentum is up"
-- Mean Reversion says: "Bet NO — it's too high, it'll come down"
+These two strategies disagree at the same probability levels:
+- Probability Direction (`momentum` family) says: "Bet YES — momentum is up"
+- Mean Reversion (`contrarian` family) says: "Bet NO — it's too high"
 
-When both fire they cancel out (tie = skip). The AI layer above them partially compensates for this — if the stats cancel out but AI has conviction, AI can still push the score.
+This is now handled correctly by family deduplication. They belong to **different families**, so both can contribute their signals — but they do not cancel each other out or average together. The family with the stronger signal at 65%+ threshold wins. If both families fire in opposite directions, the AI blending layer above has the final say.
 
-### Still present — All Current Bets Are NO at 50%, Bot at Max Capacity
+### Current state — Bot at Max Capacity
 
-The bot now runs up to 10 open positions. All new trades require AI agreement (schema_version=2) and block re-entry on markets that already have an OPEN position. Use the smart-swap mechanism to replace underperforming positions rather than stacking bets.
+The bot runs up to 10 open positions. All new trades require AI agreement (schema_version=2). Re-entry on a market with an existing OPEN position is blocked by a live position check in `should_trade_market()` — this guard reads the live portfolio state, not the potentially-stale `existing_position` flag in `market_research.json` (the 2czul2Rync duplicate-bet bug is fixed and regression-tested). Use the smart-swap mechanism to replace underperforming positions when all slots are full.
 
 ---
 
@@ -520,17 +539,32 @@ The bot now runs up to 10 open positions. All new trades require AI agreement (s
 - ✅ **Smart Position Swap** (feature/smart-swap, 2026-04-07):
   - `paper_trader.py` — `entry_probability`, `entry_confidence` on every trade; `close_position_early()` added
   - `scripts/position_swap_checker.py` — finds all losing positions, pairs each with unique replacement, multi-proposal Telegram flow
-  - `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; Telegram confirmation
+  - `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; Telegram confirmation; zero/negative Kelly pre-validated BEFORE closing position
   - New `:40` cron `position-swap-check` in `setup_cron_jobs.py`
-  - 61 tests in `tests/test_swap.py` (137 total across all suites)
+  - 61 tests in `tests/test_swap.py`
+
+- ✅ **Signal family architecture + code quality** (2026-04-07):
+  - `strategies.py` — `SIGNAL_FAMILIES` dict; `volume_spike_priority` returns float 0.0–1.0; `probability_bias` category-conditional; `mean_reversion` close-time guard; `probability_direction` volume guard
+  - `auto_research.py` — family deduplication, composite ranking, `_AI_CANDIDATE_COUNT = 3`, research always runs
+  - `test_manifold.py` — 7 fully mocked unit tests (no network); `--live` flag for manual smoke test
+  - `test_strategies.py` — 48 tests including regression for duplicate-bet (2czul2Rync) bug
+  - **173 tests total across all suites**
 
 **Next steps, in priority order:**
 
 **1. Real Telegram Bot** — `send_telegram.py` is a placeholder that prints to console. Replace with real `python-telegram-bot` integration so swap proposals and confirmations actually reach Telegram.
 
-**2. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+**2. Category exposure caps** — add `max_positions_per_category` (suggest: 3/10) to prevent over-concentration in one topic during volatile periods.
 
-**4. SQLite storage** — Replace flat JSON state files with a proper database.
+**3. Weighted scoring function** — replace flat confidence with `direction_sign × strength × reliability_weight`. Reliability weights start equal and update from `bet_outcomes` table over time.
+
+**4. News fetcher** — structured news API integration as a `fundamental` family signal. Use keywords extracted from the market question.
+
+**5. Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; build bettor-accuracy cache in SQLite.
+
+**6. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
+
+**7. SQLite storage** — Replace flat JSON state files with a proper database.
 
 ---
 
@@ -542,7 +576,7 @@ The bot doesn't run on your laptop. It runs on a server (Aleksi's homelab) insid
 Docker Container (Linux)
     └── OpenClaw (Node.js AI agent gateway)
             ├── Cron scheduler (built-in, not OS cron)
-            │       ├── every 4h :00 UTC  → runs auto_research.py
+            │       ├── hourly   :00 UTC  → runs auto_research.py
             │       ├── hourly   :10 UTC  → runs resolve_positions.py
             │       ├── hourly   :20 UTC  → runs auto_trader.py
             │       ├── hourly   :40 UTC  → runs position_swap_checker.py
