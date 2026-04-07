@@ -269,7 +269,7 @@ class AutoTrader:
             amount=amount,
             probability=current_prob,
             estimated_ev=None,          # deliberately deferred until success confirmed
-            ai_confidence=confidence,
+            ai_confidence=recommendation.get('ai_confidence', confidence),
             strategies=recommendation.get('strategies', []),
         )
 
