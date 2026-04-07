@@ -67,6 +67,14 @@ Full rules in `AGENTS.md`.
 | `automation/send_telegram.py` | Telegram sender (currently placeholder — prints to console) | Called by daily_summary |
 | `automation/setup_cron_jobs.py` | Utility to recreate OpenClaw cron jobs if needed | Manual |
 
+### Calibration (`scripts/`)
+| File | What it does |
+|------|-------------|
+| `scripts/harvest_resolved.py` | Fetches 1,000+ resolved markets from Manifold API → `data/calibration.db` |
+| `scripts/analyze_calibration.py` | Measures crowd bias per probability bucket + category → `data/calibration_table.json` |
+| `scripts/weekly_ev_report.py` | Queries `bet_outcomes`, computes EV accuracy ratio by strategy + confidence band |
+| `scripts/resolve_positions.py` | Polls Manifold API for resolved positions, frees slots in `paper_trading_state.json` |
+
 ### Dev Tools (`scripts/`)
 `demo_bot.py`, `show_portfolio.py`, `get_market_ids.py`, `fix_portfolio.py`, `watch_demo.py`
 
@@ -80,21 +88,21 @@ Full rules in `AGENTS.md`.
 
 | ID | Name | Schedule |
 |---|---|---|
-| `359e61eb-...` | Manifold Market Research | `0 * * * *` UTC |
-| `57ce0ebc-...` | Manifold Auto Trading | `15 * * * *` UTC |
+| `359e61eb-...` | Manifold Market Research | `0 */4 * * *` UTC (every 4h) |
+| `00695c33-...` | Manifold Auto Trading | `15 * * * *` UTC |
 | `0a77ecb9-...` | Daily Trading Summary | `0 19 * * *` UTC |
+| `e9a54afc-...` | Weekly Calibration Harvest | `0 2 * * 0` UTC (Sundays) |
+| `d5a01246-...` | Weekly EV Accuracy Report | `0 7 * * 1` UTC (Mondays) |
 
 ---
 
-## Current Trading State (as of 2026-04-04)
+## Current Trading State (as of 2026-04-07)
 
-- **Paper balance:** $530 (started $1,000)
-- **Open positions:** 6 (exceeds max_positions=5 — bot is fully blocked from new trades)
-- **All positions:** NO at 50% probability, placed before AI integration
-- **Last trade:** 2026-04-03
+- **Paper balance:** ~$275
+- **Open positions:** 10/10 (bot blocked — waiting for markets to resolve on Manifold)
 - **Auto-trader confidence threshold:** 65%
-- **Trade logging:** `auto_trades.json` (6 trades total)
-- **🔴 Immediate action needed:** Close positions to unblock the bot (see "Close Mock Positions" below)
+- **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`)
+- **Active branch:** `feature/calibration` (all 30 tests passing — pending PR to main)
 
 ---
 
@@ -157,47 +165,42 @@ The bot was permanently frozen at max positions with no mechanism to detect when
 
 ---
 
-### 🟡 Medium Priority — Calibration & Feedback Loop
+### ✅ Calibration & Feedback Loop — DONE (branch: feature/calibration, 2026-04-07)
 
-The bot currently has no memory of what happened. Markets resolve, bets settle, and nothing changes about how future markets are scored. This closes that loop.
-
-**Step 1 — Harvest resolved markets (foundation)**
-- [ ] Script `scripts/harvest_resolved.py` — calls `GET /v0/markets?isResolved=true`, pages through results, saves to SQLite
-  - Fields to store: `market_id`, `question`, `probability_at_close`, `outcome` (YES/NO), `close_date`, `category` (inferred)
-  - Aim for 1,000+ resolved markets as a starting corpus
-- [ ] Schedule as a weekly cron job (Manifold resolves ~100 markets/day)
+**Step 1 — Harvest resolved markets**
+- [x] `scripts/harvest_resolved.py` — fetches resolved binary markets from Manifold API, saves to SQLite
+  - Fields: `market_id`, `question`, `probability_close`, `outcome` (YES/NO), `close_date`, `unique_bettors`, `category` (keyword-inferred)
+  - 1,121 resolved markets harvested as starting corpus; `data/calibration.db` created on server
+- [x] Weekly cron registered on server: `weekly-harvest` — Sundays 02:00 UTC (ID: `e9a54afc-...`)
+  - Runs `harvest_resolved.py --limit 2000 && analyze_calibration.py` to keep table fresh
 
 **Step 2 — Measure where the crowd is wrong**
-- [ ] Script `scripts/analyze_calibration.py` — groups resolved markets by probability bucket (0-10%, 10-20%, ..., 90-100%) and measures actual resolution rate per bucket
-  - If markets at 70% only resolve YES 55% of the time → crowd is overconfident at high probabilities
-  - Output: calibration table by bucket + by question category
+- [x] `scripts/analyze_calibration.py` — groups markets by 10pp probability bucket, measures actual YES rate
+  - Output: `data/calibration_table.json` — committed to git (small JSON, versioned over time)
+  - Key finding: **+18pp overconfidence at 60-70%** (crowd says 65%, actual YES rate 47%)
+  - Also breaks down by category (sports/crypto/politics/ai_tech/economics/science/other)
+  - Sports and economics: well-calibrated. Politics: +6pp overestimate. Crypto: +5pp.
 
 **Step 3 — Feed calibration into AI prompts**
-- [ ] Add a calibration context block to `ANALYSIS_PROMPT` in `ai_analyzer.py`:
-  ```
-  Historical calibration note: on this platform, markets at ~70% probability
-  resolve YES only 58% of the time (crowd tends to overprice high-probability events).
-  ```
-  No retraining needed — just prompt grounding with real data.
+- [x] `_CALIBRATION_NOTE` built at module import from `data/calibration_table.json` and injected into `ANALYSIS_PROMPT` in `ai_analyzer.py`
+  - AI now sees a 10-row correction table in every prompt; worst bucket flagged with `← MOST BIASED`
+  - Degrades gracefully: if file is absent, prompt is unchanged (empty string)
+  - Instructs AI: "if a market is at 65%, history says treat it as ~47% YES — adjust estimated_true_probability"
 
 **Step 4 — Close the loop: EV-based outcome tracking**
-- [ ] Store `estimated_ev` at trade time in `auto_trades.json`: `EV = ai_estimated_probability × payout_if_win - stake`
-  - All inputs already exist: `ai_estimated_probability` in recommendation, `payout_if_win` in `paper_trader.py`
-  - One extra field written by `auto_trader.py` at trade execution time
-- [ ] When `paper_trader.py` resolves a market, write to a `bet_outcomes` table:
-  `(market_id, our_recommendation, estimated_ev, ai_confidence, strategy, outcome, actual_pnl)`
-- [ ] Weekly summary: compare `estimated_ev` vs `actual_pnl` per trade — the gap is model error
-  - If EV=+$10 trades average +$3 in reality → AI overestimates edge by 3.3×, scale down
-  - If EV=+$10 trades average +$9 → model is well-calibrated, trust it more
-  - Break down by strategy and AI confidence band to find which combinations actually have edge
+- [x] `estimated_ev` stored at trade time in `auto_trades.json` and in the position record in `paper_trading_state.json`
+  - `auto_trader.py` computes EV before calling `place_paper_bet()` so it's available in both places
+  - `place_paper_bet()` now accepts `estimated_ev`, `ai_confidence`, `strategies` as optional params
+- [x] `paper_trader.py` writes to `bet_outcomes` SQLite table on every `resolve_market()` call:
+  - Schema: `market_id, our_recommendation, amount, probability, estimated_ev, ai_confidence, strategies (JSON), market_resolution, actual_pnl, ev_error, resolved_at`
+  - `ev_error = estimated_ev − actual_pnl` (model error; NULL when no AI estimate)
+- [x] `scripts/weekly_ev_report.py` — queries `bet_outcomes`, computes EV accuracy ratio, breakdowns by strategy and confidence band; outputs to console + `telegram_weekly_ev.txt`
+  - Interpretation: ratio 1.0 = well-calibrated, ratio 0.3 = AI overestimates edge by 3×
+- [x] `automation/daily_summary.py` appends weekly EV section on Mondays
+- [x] `weekly-ev-report` cron registered on server — Mondays 07:00 UTC (ID: `d5a01246-...`)
 
 **Why EV and not just confidence:**
 Confidence measures how sure the AI is. EV measures how much money we expect to make. Two trades at identical confidence can have completely different EV depending on the market's current price (which determines the payout). Tracking win-rate by confidence band misses this — tracking EV vs actual P&L directly measures whether the model's probability estimates are accurate in dollar terms.
-
-**Why this matters:**
-The current bot has genuine zero edge on statistics alone — all signals are generic. Calibration gives it something no one else has: a learned correction for this specific platform's crowd biases. A market at 72% that historically resolves YES only 56% of the time is a NO bet regardless of what the question says.
-
-> Prerequisite: SQLite storage (see below). Harvest script can use flat JSON as a stopgap.
 
 ---
 
@@ -331,7 +334,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | API key auto-loading | ✅ Done | `config.py` parses `.env` at import — no more 401s in cron/tests |
 | Cron timeout fix | ✅ Done | `max_markets` 5→3, worst case 270s < 300s limit |
 | Close open positions | 🔄 In Progress | Bot at 10/10 positions — auto-resolver will free slots as markets settle |
-| Calibration & feedback loop | ❌ Not started | Harvest resolved markets → measure crowd bias → prompt grounding |
+| Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
 | Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
