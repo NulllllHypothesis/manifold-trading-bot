@@ -2,34 +2,99 @@
 Trading strategies for Manifold Markets.
 
 Each strategy is a static method on TradingStrategies that takes a market dict
-and returns "YES", "NO", or None.  auto_research.py calls these and votes.
+and returns "YES", "NO", or None.  auto_research.py calls these using family-aware
+aggregation — correlated signals in the same family cannot stack.
 
-Strategy inventory:
-  probability_direction   — follow momentum if recently active (lastBetTime guard)
-  mean_reversion          — bet against extremes, guarded by uniqueBettorCount
-  volume_spike            — detect recent activity burst via volume24Hours
-  creator_disagreement    — bet toward creator's resolution estimate when crowd diverges
-  thin_market             — bet toward the underrepresented (thin) side of the liquidity pool
-  is_stale_market         — pre-filter: returns True if market has no recent activity
+Signal families
+---------------
+  momentum    — price-following signals (probability_direction)
+  contrarian  — price-fading signals (mean_reversion, thin_market, probability_bias)
+  fundamental — independent signals (creator_disagreement)
+  filter      — priority scoring only, no directional vote (volume_spike_priority)
 
-Confidence scores (used by auto_research.py voting):
-  probability_direction   0.65
-  mean_reversion          0.70
-  volume_spike            0.65
-  creator_disagreement    0.75
-  thin_market             0.65
-  probability_bias        0.70
+auto_research.py takes at most ONE signal from momentum and ONE from contrarian,
+then adds the fundamental if present.  thin_market is contrarian but confirmation-
+only: it only counts when at least one other contrarian or fundamental signal agrees.
+
+Confidence scores (used by auto_research.py after family deduplication):
+  probability_direction   0.65   momentum
+  mean_reversion          0.68   contrarian
+  probability_bias        0.70   contrarian (category-conditional)
+  creator_disagreement    0.75   fundamental
+  thin_market             0.65   contrarian (confirmation-only)
+  volume_spike_priority   —      filter (returns 0.0–1.0 priority boost, not YES/NO)
 """
 
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Category inference ────────────────────────────────────────────────────────
+# Mirrors the keyword logic in scripts/harvest_resolved.py._infer_category so
+# probability_bias_strategy can skip well-calibrated categories.
+
+_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    'crypto':    ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'blockchain',
+                  'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin'],
+    'politics':  ['trump', 'biden', 'election', 'congress', 'senate', 'president',
+                  'democrat', 'republican', 'vote', 'policy', 'legislation',
+                  'supreme court', 'governor', 'parliament'],
+    'ai_tech':   ['ai', 'gpt', 'llm', 'openai', 'anthropic', 'claude', 'gemini',
+                  'machine learning', 'artificial intelligence', 'neural', 'deepmind',
+                  'chatgpt', 'language model'],
+    'sports':    ['nba', 'nfl', 'mlb', 'nhl', 'fifa', 'world cup', 'olympics',
+                  'championship', 'tennis', 'golf', 'soccer', 'football',
+                  'basketball', 'baseball', 'premier league'],
+    'economics': ['gdp', 'inflation', 'federal reserve', 'fed rate', 'interest rate',
+                  'recession', 'stock market', 'nasdaq', 'sp500', 's&p', 'cpi',
+                  'unemployment', 'treasury'],
+    'science':   ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
+                  'cancer', 'physics', 'biology', 'crispr', 'fusion'],
+}
+
+# Category-level bias from data/calibration_table.json by_category.
+# Categories with very low overall bias are well-calibrated — the bucket-level
+# bias signal doesn't generalise there, so probability_bias should not fire.
+_CATEGORY_BIAS: Dict[str, float] = {
+    'other':     0.0439,
+    'sports':    0.0348,
+    'economics': 0.0151,
+    'politics':  0.0623,
+    'ai_tech':   0.0019,
+    'crypto':    0.0534,
+    'science':   0.0543,
+}
+# Minimum category-level bias required for probability_bias to fire.
+# ai_tech (0.19pp) and economics (1.51pp) are below this and will be skipped.
+_MIN_BIAS_TO_TRADE = 0.04
+
+
+def _infer_market_category(question: str) -> str:
+    """Return the category inferred from market question text."""
+    q = question.lower()
+    for category, keywords in _CATEGORY_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            return category
+    return 'other'
+
 
 class TradingStrategies:
     """Collection of trading strategies."""
+
+    # Signal family classification — used by auto_research.py to prevent
+    # correlated signals from stacking as if they were independent evidence.
+    SIGNAL_FAMILIES: Dict[str, str] = {
+        'probability_direction': 'momentum',
+        'mean_reversion':        'contrarian',
+        'thin_market':           'contrarian',   # confirmation-only within family
+        'probability_bias':      'contrarian',
+        'creator_disagreement':  'fundamental',
+        'volume_spike':          'filter',       # priority boost, not a directional vote
+    }
 
     # ------------------------------------------------------------------ #
     # Pre-filter
@@ -62,14 +127,23 @@ class TradingStrategies:
     @staticmethod
     def probability_direction_strategy(market: Dict) -> Optional[str]:
         """
-        Follow the direction of the current probability if the market is active.
+        Follow the direction of the current probability — but only when the market
+        shows recent, meaningful activity.
+
+        "The price moved" is not an edge by itself.  We want to follow price when
+        active participants are reinforcing a direction, not just a stale number
+        sitting in the market.  The two guards below enforce this:
+
+          1. lastBetTime ≤ 48h  — someone acted on this recently
+          2. volume24Hours ≥ 5  — not a ghost market with one old bet
 
         Rules:
-          - Skip the 45-55% coinflip zone (no edge).
-          - Skip if last bet was > 48 hours ago (stale signal).
-          - Otherwise bet with the crowd direction.
+          - Skip the 45-55% coinflip zone (no directional edge).
+          - Skip if last bet was > 48 hours ago.
+          - Skip if 24h volume < 5 mana (insufficient recent activity).
+          - Otherwise follow the crowd direction.
 
-        Confidence: 0.65 (meets stat floor — AI can boost or veto).
+        Family: momentum.  Confidence: 0.65.
         """
         probability = market.get('probability', 0.5)
 
@@ -84,6 +158,11 @@ class TradingStrategies:
             if hours_since > 48:
                 return None
 
+        # Volume guard — a direction without recent activity is noise, not signal
+        volume24 = market.get('volume24Hours') or 0
+        if volume24 < 5:
+            return None
+
         if probability > 0.55:
             return "YES"
         elif probability < 0.45:
@@ -94,53 +173,71 @@ class TradingStrategies:
     @staticmethod
     def mean_reversion_strategy(market: Dict) -> Optional[str]:
         """
-        Bet against extreme probabilities — but only when the crowd is thin.
+        Bet against extreme probabilities — but only in shallow, long-dated markets.
 
-        Logic: a market at 85% with 400 bettors is probably right.
-        A market at 85% with 3 bettors is probably mispriced.
+        A market at 85% with 400 bettors is probably right (deep consensus).
+        A market at 85% with 3 bettors may be mispriced (thin crowd).
+        A market at 85% closing tomorrow is almost certainly correct (converged).
 
         Rules:
-          - Fires at probability > 0.80 (bet NO) or < 0.20 (bet YES).
-          - Skipped if uniqueBettorCount > 100 (deep crowd consensus).
+          - Fires at probability > 0.85 (bet NO) or < 0.15 (bet YES).
+            Raised from 0.80/0.20 — markets in the 80-85% range are often genuinely
+            likely; fading them requires sharper conviction.
+          - Skipped if uniqueBettorCount > 100 (deep crowd, don't fight consensus).
+          - Skipped if market closes within 7 days (near-close extremes are usually
+            the crowd converging on correct information, not overconfidence).
 
-        Confidence: 0.70.
+        Family: contrarian.  Confidence: 0.68.
         """
         probability = market.get('probability', 0.5)
         bettor_count = market.get('uniqueBettorCount') or 0
 
-        if probability > 0.80:
-            if bettor_count > 100:
-                return None  # too many bettors — don't fight genuine consensus
-            return "NO"
+        is_extreme_high = probability > 0.85
+        is_extreme_low  = probability < 0.15
 
-        if probability < 0.20:
-            if bettor_count > 100:
+        if not (is_extreme_high or is_extreme_low):
+            return None
+
+        if bettor_count > 100:
+            return None  # too many bettors — don't fight genuine consensus
+
+        # Near-close markets converge to truth; mean reversion is wrong-footed there
+        close_time_ms = market.get('closeTime')
+        if close_time_ms:
+            days_to_close = (close_time_ms - time.time() * 1000) / (86_400_000)
+            if days_to_close < 7:
                 return None
-            return "YES"
 
-        return None
+        return "NO" if is_extreme_high else "YES"
 
     @staticmethod
-    def volume_spike_strategy(market: Dict, avg_volume: float, spike_multiplier: float = 2.0) -> Optional[str]:
+    def volume_spike_priority(market: Dict, avg_volume: float, spike_multiplier: float = 2.0) -> float:
         """
-        Detect unusual recent trading activity using volume24Hours.
+        Returns a candidate priority boost (0.0–1.0) when a market shows unusual
+        recent trading activity.  Does NOT produce a directional vote.
 
-        Uses 24h volume (not all-time volume) so a 2-year-old market with high
-        historical volume doesn't trigger on a quiet day.  avg_volume should be
-        the median volume24Hours across all markets in the current fetch batch.
+        Volume tells you *where to look*, not *which side to take*.  A spike means
+        new information arrived and the market is live; the direction of that
+        information is what the other strategies (or AI) determine.
 
-        spike_multiplier: how many times the median a market must trade to count
-        as a spike.  Default 2.0 — calibrated for 24h volume (not all-time).
+        Demoted from a directional strategy to a filter because "high volume,
+        follow the current price" is usually not an edge — the price has likely
+        already absorbed the new information by the time we observe the spike.
 
-        Confidence: 0.65.
+        Priority scale:
+          2× median → 0.25 boost   (mild spike — market is active)
+          3× median → 0.50 boost   (clear spike)
+          4× median → 0.75 boost   (strong spike)
+          5×+ median → 1.0 boost   (very high activity)
+
+        Family: filter.
         """
         volume24 = market.get('volume24Hours') or 0
-        probability = market.get('probability', 0.5)
-
-        if avg_volume > 0 and volume24 > avg_volume * spike_multiplier:
-            return "YES" if probability > 0.5 else "NO"
-
-        return None
+        if avg_volume <= 0 or volume24 <= avg_volume * spike_multiplier:
+            return 0.0
+        ratio = volume24 / avg_volume
+        # Linear scale from spike_multiplier (→0) to spike_multiplier*3 (→1.0)
+        return min(1.0, (ratio - spike_multiplier) / (spike_multiplier * 2))
 
     @staticmethod
     def creator_disagreement_strategy(market: Dict) -> Optional[str]:
@@ -293,28 +390,48 @@ class TradingStrategies:
     @staticmethod
     def probability_bias_strategy(market: Dict) -> Optional[str]:
         """
-        Exploit systematic crowd overconfidence measured from 1,100+ resolved markets.
+        Exploit systematic crowd overconfidence — but only in categories where
+        the bias is empirically reliable.
 
         Calibration findings (data/calibration_table.json):
-          60–70% bucket: crowd says ~65%, actual YES rate is ~47% → bias +18pp (LARGEST)
+          60–70% bucket: crowd says ~65%, actual YES rate is ~47% → bias +18pp
           30–40% bucket: crowd says ~35%, actual YES rate is ~24% → bias +11pp
 
-        In both ranges the crowd overestimates YES, so the edge is to bet NO.
+        However, the bias is NOT uniform across market categories.  By category:
+          ai_tech:   +0.19pp — crowd is near-perfectly calibrated → SKIP
+          economics: +1.51pp — well-calibrated → SKIP
+          sports:    +3.48pp — mild bias, below threshold → SKIP
+          politics:  +6.23pp — meaningful bias → FIRE
+          crypto:    +5.34pp — meaningful bias → FIRE
+          other:     +4.39pp — meaningful bias → FIRE
+          science:   +5.43pp — meaningful bias → FIRE
 
-        Confidence: 0.70 — data-backed with N=53 (60-70%) and N=63 (30-40%) samples.
-        Does NOT fire in the 40-60% zone where bias is noisier.
+        Applying a universal NO in the 60-70% range on an AI/tech or economics market
+        is a mistake: the crowd there tends to be correct.  This strategy now checks
+        category first and skips markets where the data says the crowd is reliable.
+
+        Threshold: _MIN_BIAS_TO_TRADE = 4pp.  Categories below this are skipped.
+
+        Family: contrarian.  Confidence: 0.70.
         """
         probability = market.get('probability', 0.5)
 
-        # 60-70%: strongest calibration edge (+18pp overconfidence)
-        if 0.60 <= probability < 0.70:
-            return "NO"
+        # Check price bucket first — only the two strongly biased ranges
+        if not (0.60 <= probability < 0.70 or 0.30 <= probability < 0.40):
+            return None
 
-        # 30-40%: secondary calibration edge (+11pp overconfidence)
-        if 0.30 <= probability < 0.40:
-            return "NO"
+        # Check category — skip well-calibrated topics
+        category = _infer_market_category(market.get('question', ''))
+        cat_bias = _CATEGORY_BIAS.get(category, _CATEGORY_BIAS['other'])
+        if cat_bias < _MIN_BIAS_TO_TRADE:
+            logger.debug(
+                "probability_bias: skipping %s market (category=%s, bias=%.4f < threshold %.4f)",
+                market.get('id', '?'), category, cat_bias, _MIN_BIAS_TO_TRADE,
+            )
+            return None
 
-        return None
+        # Both biased buckets show crowd overestimates YES → bet NO
+        return "NO"
 
     # ------------------------------------------------------------------ #
     # Utilities

@@ -112,103 +112,121 @@ class MarketResearcher:
                 if TradingStrategies.is_stale_market(market):
                     continue
 
-                # Apply trading strategies
-                strategies = []
+                # ── Run all strategies ───────────────────────────────────────
+                #
+                # Signal families prevent correlated signals from stacking:
+                #   momentum    — at most 1 signal taken (highest confidence)
+                #   contrarian  — at most 1 signal taken (highest confidence)
+                #   fundamental — always independent (creator_disagreement)
+                #   filter      — priority boost only, no directional vote
+                #
+                # thin_market is contrarian but confirmation-only: it only counts
+                # when at least one other contrarian or fundamental signal agrees.
 
-                # Probability direction — requires recent activity (lastBetTime guard built in)
-                prob_dir_rec = TradingStrategies.probability_direction_strategy(market)
-                if prob_dir_rec:
-                    strategies.append({
-                        'strategy': 'probability_direction',
-                        'recommendation': prob_dir_rec,
-                        'confidence': 0.65
-                    })
-
-                # Mean reversion — guarded by uniqueBettorCount (don't fight genuine consensus)
-                mean_rev_rec = TradingStrategies.mean_reversion_strategy(market)
-                if mean_rev_rec:
-                    strategies.append({
-                        'strategy': 'mean_reversion',
-                        'recommendation': mean_rev_rec,
-                        'confidence': 0.70
-                    })
-
-                # Volume spike — uses volume24Hours vs batch median (not all-time volume).
-                # The multiplier VOLUME_SPIKE_MULTIPLIER (2.0) is calibrated for 24h volumes:
-                # we compare market.volume24Hours against median_volume24h, so the ratio is
-                # dimensionally consistent and 2x is appropriate (same scale, same signal).
-                volume_rec = TradingStrategies.volume_spike_strategy(
+                # Volume spike → priority boost (0.0–1.0), not a directional vote
+                priority_boost = TradingStrategies.volume_spike_priority(
                     market, median_volume24h, spike_multiplier=VOLUME_SPIKE_MULTIPLIER
                 )
-                if volume_rec:
-                    strategies.append({
-                        'strategy': 'volume_spike',
-                        'recommendation': volume_rec,
-                        'confidence': 0.65
-                    })
 
-                # Creator disagreement — fires when creator's resolution estimate diverges ≥15pp
-                creator_rec = TradingStrategies.creator_disagreement_strategy(market)
-                if creator_rec:
-                    strategies.append({
-                        'strategy': 'creator_disagreement',
-                        'recommendation': creator_rec,
-                        'confidence': 0.75
-                    })
+                # Collect raw signals before family deduplication
+                raw_signals = []
 
-                # Thin market arb — fires when one side of the AMM pool holds < 15% of total
-                thin_rec = TradingStrategies.thin_market_strategy(market)
-                if thin_rec:
-                    strategies.append({
-                        'strategy': 'thin_market',
-                        'recommendation': thin_rec,
-                        'confidence': 0.65
-                    })
+                prob_dir_rec = TradingStrategies.probability_direction_strategy(market)
+                if prob_dir_rec:
+                    raw_signals.append({'strategy': 'probability_direction',
+                                        'recommendation': prob_dir_rec,
+                                        'confidence': 0.65,
+                                        'family': 'momentum'})
 
-                # Calibration bias — bet NO in 60-70% and 30-40% ranges where the crowd
-                # historically overestimates YES by 18pp and 11pp respectively.
+                mean_rev_rec = TradingStrategies.mean_reversion_strategy(market)
+                if mean_rev_rec:
+                    raw_signals.append({'strategy': 'mean_reversion',
+                                        'recommendation': mean_rev_rec,
+                                        'confidence': 0.68,
+                                        'family': 'contrarian'})
+
                 bias_rec = TradingStrategies.probability_bias_strategy(market)
                 if bias_rec:
-                    strategies.append({
-                        'strategy': 'probability_bias',
-                        'recommendation': bias_rec,
-                        'confidence': 0.70
-                    })
+                    raw_signals.append({'strategy': 'probability_bias',
+                                        'recommendation': bias_rec,
+                                        'confidence': 0.70,
+                                        'family': 'contrarian'})
 
-                if strategies:
-                    # Calculate overall recommendation by weighted average of agreeing votes
-                    yes_votes = sum(1 for s in strategies if s['recommendation'] == 'YES')
-                    no_votes = sum(1 for s in strategies if s['recommendation'] == 'NO')
+                creator_rec = TradingStrategies.creator_disagreement_strategy(market)
+                if creator_rec:
+                    raw_signals.append({'strategy': 'creator_disagreement',
+                                        'recommendation': creator_rec,
+                                        'confidence': 0.75,
+                                        'family': 'fundamental'})
 
-                    if yes_votes > no_votes:
-                        overall_rec = 'YES'
-                        confidence = sum(s['confidence'] for s in strategies if s['recommendation'] == 'YES') / yes_votes
-                    elif no_votes > yes_votes:
-                        overall_rec = 'NO'
-                        confidence = sum(s['confidence'] for s in strategies if s['recommendation'] == 'NO') / no_votes
-                    else:
-                        continue  # Skip ties
+                thin_rec = TradingStrategies.thin_market_strategy(market)
+                # thin_market is tracked separately — added only as confirmation
 
-                    # Check if we already have a position
-                    existing_position = market_id in self.trader.positions
+                # ── Family deduplication ──────────────────────────────────────
+                # From each family take the single highest-confidence signal.
+                # Multiple momentum or contrarian signals are correlated (they
+                # read the same underlying price movement) — averaging them
+                # inflates apparent confidence without adding real information.
+                active_signals = []
+                for family in ('momentum', 'contrarian', 'fundamental'):
+                    family_sigs = [s for s in raw_signals if s['family'] == family]
+                    if family_sigs:
+                        # Take the strongest signal from this family
+                        best = max(family_sigs, key=lambda s: s['confidence'])
+                        active_signals.append(best)
 
-                    recommendation = {
-                        'market_id': market_id,
-                        'question': question,
-                        'probability': probability,
-                        'volume': volume,
-                        'volume24h': market.get('volume24Hours') or 0,
-                        'liquidity': liquidity,
-                        'unique_bettors': market.get('uniqueBettorCount') or 0,
-                        'last_bet_time_ms': market.get('lastBetTime'),
-                        'recommendation': overall_rec,
-                        'confidence': round(confidence, 2),
-                        'strategies': [s['strategy'] for s in strategies],
-                        'existing_position': existing_position,
-                        'analyzed_at': datetime.now().isoformat()
-                    }
+                # thin_market: add only if another signal agrees (confirmation-only)
+                if thin_rec:
+                    other_agreeing = any(
+                        s['recommendation'] == thin_rec
+                        for s in active_signals
+                        if s['family'] in ('contrarian', 'fundamental')
+                    )
+                    if other_agreeing:
+                        active_signals.append({'strategy': 'thin_market',
+                                               'recommendation': thin_rec,
+                                               'confidence': 0.65,
+                                               'family': 'contrarian'})
 
-                    recommendations.append(recommendation)
+                if not active_signals:
+                    continue
+
+                # ── Determine overall recommendation ──────────────────────────
+                yes_votes = sum(1 for s in active_signals if s['recommendation'] == 'YES')
+                no_votes  = sum(1 for s in active_signals if s['recommendation'] == 'NO')
+
+                if yes_votes > no_votes:
+                    overall_rec = 'YES'
+                    confidence = sum(s['confidence'] for s in active_signals
+                                     if s['recommendation'] == 'YES') / yes_votes
+                elif no_votes > yes_votes:
+                    overall_rec = 'NO'
+                    confidence = sum(s['confidence'] for s in active_signals
+                                     if s['recommendation'] == 'NO') / no_votes
+                else:
+                    continue  # tied — no clear edge
+
+                # Check if we already have a position
+                existing_position = market_id in self.trader.positions
+
+                recommendation = {
+                    'market_id': market_id,
+                    'question': question,
+                    'probability': probability,
+                    'volume': volume,
+                    'volume24h': market.get('volume24Hours') or 0,
+                    'liquidity': liquidity,
+                    'unique_bettors': market.get('uniqueBettorCount') or 0,
+                    'last_bet_time_ms': market.get('lastBetTime'),
+                    'recommendation': overall_rec,
+                    'confidence': round(confidence, 2),
+                    'strategies': [s['strategy'] for s in active_signals],
+                    'priority_boost': round(priority_boost, 3),
+                    'existing_position': existing_position,
+                    'analyzed_at': datetime.now().isoformat()
+                }
+
+                recommendations.append(recommendation)
 
             # Sort by confidence (highest first) before AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
