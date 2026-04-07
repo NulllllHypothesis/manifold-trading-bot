@@ -68,7 +68,9 @@ def _build_calibration_note() -> str:
             lines.append(f"  {low:3d}–{high:3d}%   {crowd:3d}%       {actual:3d}%            {bias_str}{note}")
         lines.append(
             "Use these corrections: if a market is at 65%, history says treat it as ~47% YES. "
-            "Adjust your estimated_true_probability accordingly before deciding YES/NO/SKIP."
+            "Adjust your estimated_true_probability accordingly before deciding YES/NO/SKIP. "
+            "Note: this correction applies primarily to politics markets; "
+            "sports and economics markets are well-calibrated at all buckets and need no adjustment."
         )
         return "\n".join(lines)
     except Exception as e:
@@ -77,8 +79,18 @@ def _build_calibration_note() -> str:
 
 
 # Built once at import time. Each cron process picks up the latest table.
+_CALIBRATION_NOTE_MAX_LEN = 2000
 try:
-    _CALIBRATION_NOTE = _build_calibration_note()
+    _raw_calibration_note = _build_calibration_note()
+    if len(_raw_calibration_note) > _CALIBRATION_NOTE_MAX_LEN:
+        logger.warning(
+            "Calibration note truncated from %d to %d characters to stay within prompt budget.",
+            len(_raw_calibration_note),
+            _CALIBRATION_NOTE_MAX_LEN,
+        )
+        _CALIBRATION_NOTE = _raw_calibration_note[:_CALIBRATION_NOTE_MAX_LEN]
+    else:
+        _CALIBRATION_NOTE = _raw_calibration_note
 except (json.JSONDecodeError, KeyError):
     _CALIBRATION_NOTE = ''
 

@@ -256,36 +256,38 @@ class AutoTrader:
 
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
-        # Compute estimated EV before placing the bet so it can be stored in
-        # the position record (paper_trader.py) AND in auto_trades.json.
-        # EV = P(win) × payout_if_win - stake
-        # payout_if_win mirrors the formula used in place_paper_bet().
-        ai_prob = recommendation.get('ai_estimated_probability')
-        if ai_prob is not None:
-            if outcome == 'YES':
-                payout_if_win = amount / current_prob if current_prob > 0 else 0
-                win_prob = float(ai_prob)
-            else:  # NO
-                payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
-                win_prob = 1.0 - float(ai_prob)
-            estimated_ev = win_prob * payout_if_win - amount
-        else:
-            estimated_ev = None  # No AI estimate; calibration will skip this trade
-
         # Place paper trade — pass calibration fields so resolve_market() can
         # write them to bet_outcomes without a separate auto_trades.json lookup.
+        # estimated_ev is intentionally computed AFTER success is confirmed so
+        # that a partially-written position record never receives a stale EV value.
         success = self.trader.place_paper_bet(
             market_id=market_id,
             outcome=outcome,
             amount=amount,
             probability=current_prob,
-            estimated_ev=estimated_ev,
+            estimated_ev=None,  # will be patched into the log below on success
             ai_confidence=recommendation.get('ai_confidence', confidence),
             strategies=recommendation.get('strategies', []),
         )
 
-        if not success:
-            estimated_ev = None  # clear phantom EV for a trade that never happened
+        # Compute estimated EV only after confirming the bet was placed so the
+        # value is never associated with a failed / partially-written record.
+        # EV = P(win) × payout_if_win - stake
+        # payout_if_win mirrors the formula used in place_paper_bet().
+        if success:
+            ai_prob = recommendation.get('ai_estimated_probability')
+            if ai_prob is not None:
+                if outcome == 'YES':
+                    payout_if_win = amount / current_prob - amount if current_prob > 0 else 0
+                    win_prob = float(ai_prob)
+                else:  # NO
+                    payout_if_win = amount / (1 - current_prob) - amount if current_prob < 1 else 0
+                    win_prob = 1.0 - float(ai_prob)
+                estimated_ev = win_prob * payout_if_win - amount
+            else:
+                estimated_ev = None  # No AI estimate; calibration will skip this trade
+        else:
+            estimated_ev = None
 
         if success:
             print(f"  ✅ Trade executed successfully")

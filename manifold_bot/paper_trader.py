@@ -35,7 +35,8 @@ def _init_bet_outcomes_db() -> None:
             market_resolution  TEXT,    -- YES or NO (actual outcome)
             actual_pnl         REAL,    -- realized profit/loss
             ev_error           REAL,    -- estimated_ev - actual_pnl; NULL when estimated_ev is NULL
-            resolved_at        TEXT     -- ISO timestamp
+            resolved_at        TEXT,    -- ISO timestamp
+            UNIQUE(market_id, our_recommendation)
         )
     """)
     conn.execute("""

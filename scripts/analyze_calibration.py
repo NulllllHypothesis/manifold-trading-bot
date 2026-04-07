@@ -189,6 +189,7 @@ def save_table(buckets: list[dict], categories: list[dict]):
     os.makedirs(DB_DIR, exist_ok=True)
     output = {
         "generated_at":  datetime.utcnow().isoformat() + "Z",
+        "generated_at_unix": int(datetime.utcnow().timestamp()),
         "source_db":     DB_PATH,
         "description":   (
             "Crowd calibration table. For each 10pp probability bucket, "
