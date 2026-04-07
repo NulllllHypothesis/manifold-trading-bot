@@ -1,155 +1,155 @@
 {
-  "generated_at": "2026-04-07T07:55:46.384711Z",
-  "source_db": "/Users/amirghari/Desktop/Hackathon/workspace/data/calibration.db",
-  "description": "Crowd calibration table. For each 10pp probability bucket, 'actual_yes_rate' is the historical rate at which Manifold markets in that bucket resolved YES. 'bias' > 0 means crowd overestimates. Inject this into AI prompts to correct for systematic over/under-confidence.",
+  "generated_at": "EXAMPLE",
+  "source_db": "/home/hackathon/.openclaw/data/calibration.db",
+  "description": "Crowd calibration table. For each 10pp probability bucket, 'actual_yes_rate' is the historical rate at which Manifold markets in that bucket resolved YES. 'bias' > 0 means crowd overestimates. Inject this into AI prompts to correct for systematic over/under-confidence. THIS IS AN EXAMPLE FILE — copy to /home/hackathon/.openclaw/data/calibration_table.json and regenerate with the harvest cron.",
   "buckets": [
     {
       "bucket_low": 0.0,
       "bucket_high": 0.1,
       "crowd_midpoint": 0.05,
-      "actual_yes_rate": 0.013,
-      "sample_size": 307,
-      "bias": 0.037,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.1,
       "bucket_high": 0.2,
       "crowd_midpoint": 0.15,
-      "actual_yes_rate": 0.0845,
-      "sample_size": 71,
-      "bias": 0.0655,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.2,
       "bucket_high": 0.3,
       "crowd_midpoint": 0.25,
-      "actual_yes_rate": 0.2182,
-      "sample_size": 55,
-      "bias": 0.0318,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.3,
       "bucket_high": 0.4,
       "crowd_midpoint": 0.35,
-      "actual_yes_rate": 0.2381,
-      "sample_size": 63,
-      "bias": 0.1119,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.4,
       "bucket_high": 0.5,
       "crowd_midpoint": 0.45,
-      "actual_yes_rate": 0.3333,
-      "sample_size": 96,
-      "bias": 0.1167,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.5,
       "bucket_high": 0.6,
       "crowd_midpoint": 0.55,
-      "actual_yes_rate": 0.4809,
-      "sample_size": 131,
-      "bias": 0.0691,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.6,
       "bucket_high": 0.7,
       "crowd_midpoint": 0.65,
-      "actual_yes_rate": 0.4717,
-      "sample_size": 53,
-      "bias": 0.1783,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.7,
       "bucket_high": 0.8,
       "crowd_midpoint": 0.75,
-      "actual_yes_rate": 0.6875,
-      "sample_size": 48,
-      "bias": 0.0625,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.8,
       "bucket_high": 0.9,
       "crowd_midpoint": 0.85,
-      "actual_yes_rate": 0.8667,
-      "sample_size": 60,
-      "bias": -0.0167,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     },
     {
       "bucket_low": 0.9,
       "bucket_high": 1.0,
       "crowd_midpoint": 0.95,
-      "actual_yes_rate": 0.9916,
-      "sample_size": 237,
-      "bias": -0.0416,
-      "reliable": true
+      "actual_yes_rate": null,
+      "sample_size": 0,
+      "bias": null,
+      "reliable": false
     }
   ],
   "by_category": [
     {
       "category": "other",
-      "sample_size": 594,
-      "avg_crowd_prob": 0.4748,
-      "actual_yes_rate": 0.431,
-      "bias": 0.0439,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "sports",
-      "sample_size": 227,
-      "avg_crowd_prob": 0.4621,
-      "actual_yes_rate": 0.4273,
-      "bias": 0.0348,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "economics",
-      "sample_size": 104,
-      "avg_crowd_prob": 0.5151,
-      "actual_yes_rate": 0.5,
-      "bias": 0.0151,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "politics",
-      "sample_size": 62,
-      "avg_crowd_prob": 0.4172,
-      "actual_yes_rate": 0.3548,
-      "bias": 0.0623,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "ai_tech",
-      "sample_size": 61,
-      "avg_crowd_prob": 0.4445,
-      "actual_yes_rate": 0.4426,
-      "bias": 0.0019,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "crypto",
-      "sample_size": 58,
-      "avg_crowd_prob": 0.3465,
-      "actual_yes_rate": 0.2931,
-      "bias": 0.0534,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     },
     {
       "category": "science",
-      "sample_size": 15,
-      "avg_crowd_prob": 0.4543,
-      "actual_yes_rate": 0.4,
-      "bias": 0.0543,
-      "reliable": true
+      "sample_size": 0,
+      "avg_crowd_prob": null,
+      "actual_yes_rate": null,
+      "bias": null,
+      "reliable": false
     }
   ]
 }

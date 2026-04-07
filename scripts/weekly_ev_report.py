@@ -27,6 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_DIR  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "calibration.db")
 
+# Minimum requirements to compute a meaningful EV accuracy ratio
+MIN_EV_TRADES       = 20    # need at least this many trades with non-null estimated_ev
+MIN_AVG_EV_ABS      = 0.50  # |avg(estimated_ev)| must exceed this threshold (dollars)
+
 
 def _fetch_outcomes(days: int = None) -> list[dict]:
     """Load bet_outcomes rows, optionally filtered to the last N days."""
@@ -79,6 +83,12 @@ def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
         1.0 = perfectly calibrated
         0.3 = AI overestimates edge by 3×
         > 1.0 = AI underestimates (trades outperform predictions)
+
+    The ratio is only computed when:
+      - There are at least MIN_EV_TRADES trades with non-null estimated_ev
+      - |avg(estimated_ev)| > MIN_AVG_EV_ABS
+    Otherwise 'Insufficient data' is reported to avoid division-by-zero or
+    astronomically large/meaningless ratios early in deployment.
     """
     with_ev  = [o for o in outcomes if o['estimated_ev'] is not None]
     total    = len(outcomes)
@@ -107,28 +117,46 @@ def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
     avg_estimated_ev = sum(o['estimated_ev'] for o in with_ev) / ev_count
     avg_pnl          = sum(o['actual_pnl']   for o in with_ev) / ev_count
 
-    if abs(avg_estimated_ev) < 0.01:
-        ratio = None  # insufficient signal
-    else:
-        ratio = avg_pnl / avg_estimated_ev
-
     lines.append(f"\nAI-estimated EV trades: {ev_count} of {total}")
     lines.append(f"  Avg estimated EV:  ${avg_estimated_ev:+.2f}")
     lines.append(f"  Avg actual P&L:    ${avg_pnl:+.2f}")
-    if ratio is not None:
+
+    # Guard the division: require a minimum number of trades AND a meaningful
+    # average EV magnitude to avoid division-by-zero or nonsensical ratios.
+    insufficient_reason = None
+    if ev_count < MIN_EV_TRADES:
+        insufficient_reason = (
+            f"only {ev_count} trade(s) with estimated EV "
+            f"(need ≥ {MIN_EV_TRADES})"
+        )
+    elif abs(avg_estimated_ev) <= MIN_AVG_EV_ABS:
+        insufficient_reason = (
+            f"|avg estimated EV| = ${abs(avg_estimated_ev):.2f} "
+            f"≤ ${MIN_AVG_EV_ABS:.2f} threshold"
+        )
+
+    if insufficient_reason is not None:
+        lines.append(
+            f"  EV accuracy ratio: Insufficient data ({insufficient_reason})"
+        )
+        stats.update({
+            "avg_estimated_ev": round(avg_estimated_ev, 4),
+            "avg_actual_pnl": round(avg_pnl, 4),
+            "ev_accuracy_ratio": None,
+        })
+    else:
+        ratio = avg_pnl / avg_estimated_ev
         lines.append(f"  EV accuracy ratio: {ratio:.2f}×")
         if   ratio >= 0.85:  lines.append("  → Model well-calibrated — trust Kelly sizing")
         elif ratio >= 0.50:  lines.append("  → Model overestimates edge moderately — monitor")
         elif ratio >= 0.20:  lines.append("  → Model significantly overestimates — scale down bets")
         else:                lines.append("  → Model severely miscalibrated — review AI prompts")
-    else:
-        lines.append(f"  EV accuracy ratio: N/A (avg estimated EV too close to zero — insufficient signal)")
+        stats.update({
+            "avg_estimated_ev": round(avg_estimated_ev, 4),
+            "avg_actual_pnl": round(avg_pnl, 4),
+            "ev_accuracy_ratio": round(ratio, 3),
+        })
 
-    stats.update({
-        "avg_estimated_ev": round(avg_estimated_ev, 4),
-        "avg_actual_pnl": round(avg_pnl, 4),
-        "ev_accuracy_ratio": round(ratio, 3) if ratio is not None else None,
-    })
     return "\n".join(lines), stats
 
 

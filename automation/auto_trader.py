@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, FEE_RATE
 
 class AutoTrader:
     """Automated trading with risk management"""
@@ -256,38 +256,46 @@ class AutoTrader:
 
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
-        # Compute estimated EV before placing the bet so it can be stored in
-        # the position record (paper_trader.py) AND in auto_trades.json.
-        # EV = P(win) × payout_if_win - stake
-        # payout_if_win mirrors the formula used in place_paper_bet().
-        ai_prob = recommendation.get('ai_estimated_probability')
-        if ai_prob is not None:
-            if outcome == 'YES':
-                payout_if_win = amount / current_prob if current_prob > 0 else 0
-                win_prob = float(ai_prob)
-            else:  # NO
-                payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
-                win_prob = 1.0 - float(ai_prob)
-            estimated_ev = win_prob * payout_if_win - amount
-        else:
-            estimated_ev = None  # No AI estimate; calibration will skip this trade
-
-        # Place paper trade — pass calibration fields so resolve_market() can
-        # write them to bet_outcomes without a separate auto_trades.json lookup.
+        # Place paper trade WITHOUT estimated_ev first.  We compute EV only after
+        # confirming the bet was accepted so we never hand a non-null EV to
+        # place_paper_bet() on a path that might partially record the position
+        # before returning False (phantom-EV bug).
+        #
+        # place_paper_bet() is called with estimated_ev=None here; the record is
+        # updated to the real EV via update_position_ev() only on confirmed success.
         success = self.trader.place_paper_bet(
             market_id=market_id,
             outcome=outcome,
             amount=amount,
             probability=current_prob,
-            estimated_ev=estimated_ev,
+            estimated_ev=None,          # deliberately deferred until success confirmed
             ai_confidence=confidence,
             strategies=recommendation.get('strategies', []),
         )
 
-        if not success:
-            estimated_ev = None  # clear phantom EV for a trade that never happened
-
         if success:
+            # Compute estimated EV now that we know the bet was accepted.
+            # EV = P(win) × payout_if_win - stake
+            # payout_if_win applies the platform fee so EV reflects actual take-home
+            # winnings rather than gross payout. Without this, every EV estimate is
+            # inflated by ~FEE_RATE, corrupting the calibration signal in ev_error.
+            ai_prob = recommendation.get('ai_estimated_probability')
+            if ai_prob is not None:
+                if outcome == 'YES':
+                    payout_if_win = (amount / current_prob) * (1 - FEE_RATE) if current_prob > 0 else 0
+                    win_prob = float(ai_prob)
+                else:  # NO
+                    payout_if_win = (amount / (1 - current_prob)) * (1 - FEE_RATE) if current_prob < 1 else 0
+                    win_prob = 1.0 - float(ai_prob)
+                estimated_ev = win_prob * payout_if_win - amount
+            else:
+                estimated_ev = None  # No AI estimate available
+
+            # Patch the EV into the position record that place_paper_bet() just wrote.
+            # This keeps bet_outcomes accurate without ever passing EV on the failure path.
+            if estimated_ev is not None and hasattr(self.trader, 'update_position_ev'):
+                self.trader.update_position_ev(market_id, estimated_ev)
+
             print(f"  ✅ Trade executed successfully")
 
             # Build reasoning
@@ -331,90 +339,3 @@ class AutoTrader:
                     trades = data.get('trades', [])
             except:
                 trades = []
-
-        # Add new trade
-        trades.append(trade_data)
-
-        # Keep only last 100 trades
-        if len(trades) > 100:
-            trades = trades[-100:]
-
-        # Save
-        data = {
-            'total_trades': len(trades),
-            'trades': trades
-        }
-
-        with open(self.trade_log_file, 'w') as f:
-            json.dump(data, f, indent=2)
-
-    def run_trading_cycle(self):
-        """Main trading cycle"""
-        print(f"\n{'='*60}")
-        print(f"AUTO TRADING CYCLE - {datetime.now()}")
-        print(f"{'='*60}")
-
-        print(f"Starting balance: ${self.trader.balance:.2f}")
-        open_positions = sum(1 for pos_list in self.trader.positions.values()
-                                   for pos in pos_list if pos.get('status') == 'OPEN')
-        print(f"Open positions: {open_positions}")
-
-        # Load latest research
-        research = self.load_latest_research()
-        if not research or not research.get('recommendations'):
-            print("No research recommendations available")
-            return 0
-
-        recommendations = research['recommendations']
-        print(f"Loaded {len(recommendations)} research recommendations")
-
-        # Filter and sort recommendations
-        tradable_recs = []
-        for rec in recommendations:
-            if self.should_trade_market(rec['market_id'], rec):
-                tradable_recs.append(rec)
-
-        if not tradable_recs:
-            print("No tradable opportunities after risk filtering")
-            return 0
-
-        # Sort by confidence (highest first)
-        tradable_recs.sort(key=lambda x: x['confidence'], reverse=True)
-
-        print(f"\nFound {len(tradable_recs)} tradable opportunities")
-
-        # Execute top 1-2 trades (risk management)
-        max_trades_per_cycle = 2
-        trades_executed = 0
-
-        for rec in tradable_recs[:max_trades_per_cycle]:
-            if trades_executed >= max_trades_per_cycle:
-                break
-
-            print(f"\n{'─'*40}")
-            if self.execute_trade(rec):
-                trades_executed += 1
-
-        print(f"\n{'='*60}")
-        print(f"Trading cycle complete")
-        print(f"Trades executed: {trades_executed}")
-        print(f"Ending balance: ${self.trader.balance:.2f}")
-        print(f"{'='*60}")
-
-        return trades_executed
-
-def main():
-    """Main function"""
-    trader = AutoTrader()
-    trades_executed = trader.run_trading_cycle()
-
-    # Return number of trades executed
-    return trades_executed
-
-if __name__ == "__main__":
-    try:
-        num_trades = main()
-        sys.exit(0)
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        sys.exit(1)

@@ -21,6 +21,12 @@ Usage:
   python3 scripts/harvest_resolved.py           # fetch up to 1000 markets
   python3 scripts/harvest_resolved.py --limit 2000
   python3 scripts/harvest_resolved.py --refresh  # wipe and re-fetch everything
+
+Safety:
+  Harvest writes to a staging table (resolved_markets_staging) first.
+  Only on success (row count >= SANITY_THRESHOLD) does it atomically replace
+  the live resolved_markets table. This prevents a partial API failure from
+  poisoning the calibration table that feeds every AI prompt.
 """
 
 import sys
@@ -35,10 +41,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import ManifoldAPI
 from manifold_bot.config import MANIFOLD_API_KEY
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+# Minimum number of rows that must be harvested before we consider the run
+# successful and allow analyze_calibration.py to proceed. If the harvest is
+# interrupted (API timeout, rate limit, etc.) and we end up below this number
+# we abort rather than letting a corrupt/partial dataset poison the prompts.
+SANITY_THRESHOLD = 500
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "calibration.db")
+
+LIVE_TABLE    = "resolved_markets"
+STAGING_TABLE = "resolved_markets_staging"
 
 
 def _infer_category(question: str) -> str:
@@ -73,33 +90,64 @@ def _infer_category(question: str) -> str:
     return 'other'
 
 
-def init_db(conn: sqlite3.Connection):
-    """Create tables if they don't exist yet, migrating schema when needed."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS resolved_markets (
+def _create_market_table(conn: sqlite3.Connection, table_name: str):
+    """Create a resolved-markets table (live or staging) with the canonical schema."""
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
             market_id         TEXT PRIMARY KEY,
             question          TEXT NOT NULL,
-            probability_close REAL,          -- crowd prob at market close
-            outcome           TEXT,          -- 'YES' or 'NO'
-            close_date        TEXT,          -- ISO datetime string
+            probability_close REAL,
+            outcome           TEXT,
+            close_date        TEXT,
             unique_bettors    INTEGER,
-            category          TEXT           -- inferred topic bucket
+            category          TEXT
         )
     """)
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_prob_close_{table_name}
+        ON {table_name}(probability_close)
+    """)
+
+
+def init_db(conn: sqlite3.Connection):
+    """Create tables if they don't exist yet, migrating schema when needed."""
+    # Live table
+    _create_market_table(conn, LIVE_TABLE)
+
     # Schema migration: add category column to existing databases that predate it
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(resolved_markets)")}
     if 'category' not in existing_cols:
         conn.execute("ALTER TABLE resolved_markets ADD COLUMN category TEXT")
-    # Index for fast bucket queries in step 2
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_prob_close
-        ON resolved_markets(probability_close)
-    """)
+
+    # Staging table — always recreated fresh at harvest start (see harvest())
+    _create_market_table(conn, STAGING_TABLE)
+
     conn.commit()
 
 
-def count_rows(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM resolved_markets").fetchone()[0]
+def count_rows(conn: sqlite3.Connection, table: str = LIVE_TABLE) -> int:
+    return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def atomic_promote_staging(conn: sqlite3.Connection):
+    """
+    Atomically replace the live table with the staging table inside a single
+    SQLite transaction.
+
+    Steps (all-or-nothing):
+      1. Drop the old live table.
+      2. Rename staging → live.
+      3. Recreate the index on the new live table (index names are global in
+         SQLite so the staging index was already dropped with the table rename).
+    """
+    with conn:  # BEGIN … COMMIT / ROLLBACK
+        conn.execute(f"DROP TABLE IF EXISTS {LIVE_TABLE}")
+        conn.execute(f"ALTER TABLE {STAGING_TABLE} RENAME TO {LIVE_TABLE}")
+        # Recreate index (the old one was on the now-gone table name)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_prob_close
+            ON {LIVE_TABLE}(probability_close)
+        """)
 
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
@@ -170,27 +218,38 @@ def parse_market(m: dict) -> dict | None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def harvest(target: int = 1000, refresh: bool = False):
+def harvest(target: int = 1000, refresh: bool = False) -> int:
+    """
+    Harvest resolved markets into the staging table, then atomically promote to
+    the live table only if the final row count meets SANITY_THRESHOLD.
+
+    Returns the final live row count on success, or exits with a non-zero status
+    code if the sanity check fails so that a chained `&&` command (e.g.
+    analyze_calibration.py) does not run on bad data.
+    """
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
-    if refresh:
-        print("--refresh: wiping existing data")
-        conn.execute("DELETE FROM resolved_markets")
-        conn.commit()
+    # Always start with a clean staging table so a previous failed run's
+    # partial data doesn't mix with this run's data.
+    print("Resetting staging table...")
+    conn.execute(f"DROP TABLE IF EXISTS {STAGING_TABLE}")
+    _create_market_table(conn, STAGING_TABLE)
+    conn.commit()
 
-    existing = count_rows(conn)
-    print(f"DB already has {existing} rows. Target: {target}")
+    existing_live = count_rows(conn, LIVE_TABLE)
+    print(f"Live DB has {existing_live} rows. Target: {target}")
 
-    if existing >= target and not refresh:
-        print(f"Already have enough data ({existing} >= {target}). Use --refresh to re-fetch.")
+    if existing_live >= target and not refresh:
+        print(f"Already have enough data ({existing_live} >= {target}). Use --refresh to re-fetch.")
         conn.close()
-        return existing
+        return existing_live
 
     api = ManifoldAPI(MANIFOLD_API_KEY)
     if not MANIFOLD_API_KEY:
         print("ERROR: MANIFOLD_API_KEY not set. Check your .env file.")
+        conn.close()
         sys.exit(1)
 
     inserted = 0
@@ -202,7 +261,7 @@ def harvest(target: int = 1000, refresh: bool = False):
     print(f"\nFetching resolved BINARY markets from Manifold API...")
     print(f"(Each page = up to 1000 markets. We stop when we reach {target} total rows.)\n")
 
-    while count_rows(conn) < target:
+    while count_rows(conn, STAGING_TABLE) < target:
         page_num += 1
         print(f"Page {page_num}: fetching (cursor={before or 'start'})...", end=" ", flush=True)
 
@@ -225,8 +284,8 @@ def harvest(target: int = 1000, refresh: bool = False):
                 skipped_bad += 1
                 continue
             try:
-                conn.execute("""
-                    INSERT OR IGNORE INTO resolved_markets
+                conn.execute(f"""
+                    INSERT OR IGNORE INTO {STAGING_TABLE}
                     (market_id, question, probability_close, outcome, close_date, unique_bettors, category)
                     VALUES (:market_id, :question, :probability_close, :outcome, :close_date, :unique_bettors, :category)
                 """, parsed)
@@ -239,7 +298,8 @@ def harvest(target: int = 1000, refresh: bool = False):
                 print(f"  DB error: {e}")
 
         conn.commit()
-        print(f"  → inserted {page_inserted} | total rows: {count_rows(conn)}")
+        staging_count = count_rows(conn, STAGING_TABLE)
+        print(f"  → inserted {page_inserted} | staging rows: {staging_count}")
 
         # Set cursor to the last market ID for next page
         before = markets[-1]["id"]
@@ -247,31 +307,39 @@ def harvest(target: int = 1000, refresh: bool = False):
         # Small delay to be polite to Manifold's API
         time.sleep(0.3)
 
-    final_count = count_rows(conn)
+    staging_count = count_rows(conn, STAGING_TABLE)
+
+    print(f"\n{'='*55}")
+    print(f"Harvest fetch phase complete")
+    print(f"  Rows in staging:  {staging_count}")
+    print(f"  Sanity threshold: {SANITY_THRESHOLD}")
+    print(f"  Newly inserted:   {inserted}")
+    print(f"  Skipped (dup):    {skipped_dup}")
+    print(f"  Skipped (bad):    {skipped_bad}")
+
+    # ── Sanity check before touching the live table ───────────────────────────
+    if staging_count < SANITY_THRESHOLD:
+        print(f"\nERROR: Harvest produced only {staging_count} rows, which is below the")
+        print(f"  sanity threshold of {SANITY_THRESHOLD}. This likely indicates a partial")
+        print(f"  failure (API timeout, rate limit, etc.).")
+        print(f"  The live table has NOT been updated. Aborting so that")
+        print(f"  analyze_calibration.py does not run on corrupt data.")
+        print(f"{'='*55}")
+        conn.close()
+        sys.exit(1)
+
+    # ── Atomically promote staging → live ─────────────────────────────────────
+    print(f"\nSanity check passed ({staging_count} >= {SANITY_THRESHOLD}).")
+    print("Atomically promoting staging table to live...")
+    atomic_promote_staging(conn)
+
+    final_count = count_rows(conn, LIVE_TABLE)
     conn.close()
 
     print(f"\n{'='*55}")
     print(f"Harvest complete")
     print(f"  Rows in DB:       {final_count}")
-    print(f"  Newly inserted:   {inserted}")
-    print(f"  Skipped (dup):    {skipped_dup}")
-    print(f"  Skipped (bad):    {skipped_bad}")
     print(f"  DB path:          {DB_PATH}")
     print(f"{'='*55}")
     print(f"\nBackup command (run locally):")
-    print(f"  scp hackathon@100.116.161.112:/home/hackathon/.openclaw/workspace/data/calibration.db ~/Desktop/calibration_backup.db")
-
-    return final_count
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Harvest resolved markets into SQLite")
-    parser.add_argument("--limit", type=int, default=1000, help="Target number of rows (default: 1000)")
-    parser.add_argument("--refresh", action="store_true", help="Wipe existing data and re-fetch")
-    args = parser.parse_args()
-
-    harvest(target=args.limit, refresh=args.refresh)
-
-
-if __name__ == "__main__":
-    main()
+    print(f"  scp hackathon@100.116.161.112:/home/hackathon/.openclaw
