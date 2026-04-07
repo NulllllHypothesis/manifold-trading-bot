@@ -28,7 +28,7 @@ This is **paper trading** — we're not using real money or real mana. We simula
 Every hour, automatically, without anyone touching anything:
 
 1. **Scans ~100 live Manifold markets** — reads current probabilities, volumes, liquidity
-2. **Scores each market** using 3 simple rules — picks which ones look like good bets
+2. **Scores each market** using 6 strategies — picks which ones look like good bets
 3. **Saves the findings** to a file called `market_research.json`
 4. **15 minutes later**, reads that file and **places paper bets** on the best opportunities
 5. **Once a day at 7pm UTC**, sends a **performance summary** to a Telegram group
@@ -40,7 +40,7 @@ The bot runs on a server at a friend's house (Aleksi's homelab). An AI agent fra
 ## Part 2 — The Full Cycle, Step by Step
 
 ```
-Every 4h at :00 UTC
+Every hour at :00 UTC
         │
         ▼
 ┌─────────────────────────────────┐
@@ -48,7 +48,7 @@ Every 4h at :00 UTC
 │  - Calls Manifold API           │
 │  - Gets 100+ markets            │
 │  - Pre-filter: is_stale_market  │
-│  - Scores with 5 strategies     │
+│  - Scores with 6 strategies     │
 │  - Top 5 by confidence+recency  │
 │  - AI analysis on top 3 ──────► deepseek-r1:14b (local, free)
 │    (YES/NO/SKIP + reasoning)    │  ~70-80s per market on CPU
@@ -81,7 +81,7 @@ Every 4h at :00 UTC
 │    • confidence ≥ 65%           │
 │    • max 10 open positions      │
 │    • liquidity ≥ $200           │
-│    • 4h cooldown per market     │
+│    • no re-entry on OPEN pos    │
 │    • AI veto (SKIP) respected   │
 │  - Kelly sizing (half-Kelly)    │
 │  - Picks top 1-2 trades         │
@@ -197,34 +197,27 @@ There's a singleton at the bottom — `api_client = ManifoldAPI()` — that the 
 ---
 
 #### `manifold_bot/strategies.py`
-**What it does:** The 3 trading strategies and a scoring function. This is where the bot decides whether a market is worth betting on and which way.
+**What it does:** The 6 trading strategies and Kelly sizing. This is where the bot decides whether a market is worth betting on and which way.
 
-**Strategy 1 — Probability Direction**
-```python
-if probability > 0.55:  return "YES"
-if probability < 0.45:  return "NO"
-return None
-```
-Simple rule: if the market leans strongly one way, bet with the crowd. Logic: crowds tend to be right, so ride the momentum. Doesn't fire near 50/50 (the threshold is 0.05 away from 50%).
+**Strategy 1 — Probability Direction** (confidence 0.65)
+Bet with momentum if the market leans strongly and has had recent activity (last bet < 48h). Skips the 45–55% coinflip zone.
 
-**Strategy 2 — Mean Reversion**
-```python
-if probability > 0.8:  return "NO"   # too high, bet it comes down
-if probability < 0.2:  return "YES"  # too low, bet it comes up
-return None
-```
-Opposite logic: if something is at 85% probability, it's probably overpriced. Bet against extreme consensus. Classic contrarian strategy.
+**Strategy 2 — Mean Reversion** (confidence 0.70)
+Bet against extreme probabilities (>80% or <20%), but only when fewer than 100 unique bettors have weighed in. Don't fight genuine deep consensus.
 
-**Strategy 3 — Volume Spike**
-```python
-if current_volume > avg_volume * 2:
-    return "YES" if probability > 0.5 else "NO"
-```
-If a market suddenly has a lot of activity (2x the median volume of all fetched markets), something is happening — bet in the direction it's already leaning. `avg_volume` is now the **median** of all fetched markets each run (was hardcoded to 100 before; switched from mean to median to avoid a few high-volume markets inflating the baseline and suppressing all signals).
+**Strategy 3 — Volume Spike** (confidence 0.65)
+If a market's 24h volume is >2x the batch median, something is happening — bet in the direction it's already leaning.
 
-**The voting system** — `analyze_market_for_trading()` runs all 3 strategies on a market, counts the YES votes vs NO votes, and sets `confidence = votes_for_winner / total_votes`. So if 2 strategies say NO and 1 says YES, confidence is 0.67 (67%).
+**Strategy 4 — Creator Disagreement** (confidence 0.75)
+If the market creator's resolution probability estimate differs from the crowd by ≥15pp, bet toward the creator. They often have inside information.
 
-**The honest problem with this:** The confidence scores cluster around 0.65 because almost everything that passes the volume spike threshold gets a 65% score (only 1 of 1 strategies fired, so 1/1 = 100%... wait, actually the issue is different — see Part 4 for the real breakdown).
+**Strategy 5 — Thin Market** (confidence 0.65)
+When one side of the AMM liquidity pool holds <15% of the total, bet toward that underrepresented side — it's underpriced.
+
+**Strategy 6 — Probability Bias** (confidence 0.70)
+Exploit systematic crowd overconfidence measured from 1,100+ resolved markets. The 60–70% bucket resolves YES only 47% of the time (+18pp bias) — bet NO. The 30–40% bucket: +11pp bias — also bet NO.
+
+**The voting system** — `auto_research.py` runs all applicable strategies on each market, takes weighted average confidence of the majority direction. Markets that pass the threshold are sorted by confidence + recency, top candidates are sent to AI for deeper analysis.
 
 ---
 
@@ -272,16 +265,15 @@ What it gets back:
 - AI disagrees → `confidence = stat × (0.4 + (1 - ai_conf) × 0.4)` — penalty scales with AI confidence; a very certain AI disagreement keeps only 40% of the stat score
 - AI says SKIP → statistical confidence unchanged, no AI boost
 
-`MIN_CONFIDENCE` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change. **Current value is 0.60** (changed from 0.65 by the risk-parameters PR — this is a known regression; 4 tests in `tests/test_ai.py` are failing because of it. Recommended: revert to 0.65).
+`MIN_CONFIDENCE` lives in `config.py` and is imported by both `auto_trader.py` and `auto_research.py` — one place to change. **Current value is 0.65.**
 
 **Distillation logging** (merged in PR #5):
 Every LLM call is appended to `logs/llm_calls.jsonl` (gitignored). Each record stores:
 - `timestamp`, `model`, `market_id`
 - `system_prompt_sha256` — hash of the static prompt so you can verify it hasn't changed between runs without bloating every record
-- `chain_of_thought` — the `<think>...</think>` block extracted from the raw model response (reasoning trace only, no market data echo)
 - `parsed_output` — the structured fields (recommendation, confidence, etc.)
 
-Raw responses and full prompts are intentionally NOT logged — the model may echo market data back, raising compliance concerns. The log rotates at 100MB, keeping 3 backups.
+Raw responses, full prompts, and chain-of-thought are intentionally NOT logged — the model may echo market data back, raising compliance concerns. The log rotates at 100MB, keeping 3 backups.
 
 **Robustness guards:**
 - `batch_analyze` is called with `delay=2` and `per_market_timeout=90` — prevents a hung Ollama call from stalling the hourly cron job. Each market runs in a `ThreadPoolExecutor(max_workers=1)` with a timeout.
@@ -384,7 +376,7 @@ position_size = base_size * multiplier
 
 So with $684 balance and 65% confidence: `$68.4 * 1.0 = $68.4`, rounded to nearest $5 = `$70`.
 
-**Why trades aren't executing right now:** 6 positions are open against a max of 5. The bot is completely blocked — `should_trade_market()` rejects everything at the max positions check before even looking at confidence. Need to close some positions first (see Part 5).
+**Why trades aren't executing:** If all 10 position slots are full, `should_trade_market()` rejects everything at the max positions check. Use the smart-swap mechanism to replace underperforming positions.
 
 ---
 
@@ -458,7 +450,7 @@ On dismiss: marks `dismissed`, sends a brief Telegram acknowledgement.
 ### Supporting Files
 
 #### `manifold_bot/paper_trading_state.json`
-The live portfolio. Gitignored (runtime data). Current state: 6 open positions all betting NO at 50% probability, $530 balance remaining from $1000 start. All 6 positions were placed before the AI integration — the bot is currently at max capacity and cannot place new trades.
+The live portfolio. Gitignored (runtime data). Supports up to 10 open positions. Balance and positions are the current live state on the server.
 
 #### `market_research.json`
 Contains the last 24 hours of hourly research runs (schema_version 2). Each run has ~50-100 market recommendations with AI scores on the top 5. Bridge between research and trading.
@@ -501,7 +493,7 @@ When both fire they cancel out (tie = skip). The AI layer above them partially c
 
 ### Still present — All Current Bets Are NO at 50%, Bot at Max Capacity
 
-All 6 open positions are NO bets at exactly 50% probability — payout of 2x, barely better than a coin flip. These were placed before the AI integration. The bot is now blocked at `max_positions=5` (actually 6, exceeding the limit), so no new trades execute until positions close or are manually cleared. Future trades will require AI agreement, which should produce better-differentiated entries.
+The bot now runs up to 10 open positions. All new trades require AI agreement (schema_version=2) and block re-entry on markets that already have an OPEN position. Use the smart-swap mechanism to replace underperforming positions rather than stacking bets.
 
 ---
 

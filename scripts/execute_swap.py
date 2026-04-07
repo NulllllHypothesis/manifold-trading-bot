@@ -121,12 +121,29 @@ def execute_swap(swap: dict, trader: PaperTrader) -> bool:
     confidence = open_rec.get('confidence', 0)
     estimated_ev = open_rec.get('estimated_ev')
     ai_confidence = open_rec.get('ai_confidence', confidence)
+    ai_estimated_prob = open_rec.get('ai_estimated_probability')
     strategies = swap.get('open_strategies', open_rec.get('strategies', []))
 
     from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
-    base_size = trader.balance * 0.10
-    confidence_multiplier = min(confidence / max(MIN_CONFIDENCE, 0.01), 2.0)
-    raw_size = base_size * confidence_multiplier
+    from manifold_bot.strategies import TradingStrategies
+
+    # Use Kelly sizing when AI probability estimate is available — same logic as
+    # auto_trader.py so swap trades are comparable in the weekly EV report.
+    mkt_p = max(0.01, min(0.99, current_open_prob))
+    if ai_estimated_prob is not None and outcome in ('YES', 'NO'):
+        if outcome == 'YES':
+            net_odds = (1.0 - mkt_p) / mkt_p
+            win_prob = float(ai_estimated_prob)
+        else:
+            net_odds = mkt_p / (1.0 - mkt_p)
+            win_prob = 1.0 - float(ai_estimated_prob)
+        kelly = TradingStrategies.calculate_kelly_criterion(win_prob, net_odds) * 0.5
+        raw_size = trader.balance * kelly if kelly > 0 else 0
+    else:
+        base_size = trader.balance * 0.10
+        confidence_multiplier = min(confidence / max(MIN_CONFIDENCE, 0.01), 2.0)
+        raw_size = base_size * confidence_multiplier
+
     amount = round(min(max(raw_size, MIN_BET_AMOUNT), MAX_BET_AMOUNT) / 5) * 5
     amount = max(amount, MIN_BET_AMOUNT)
 

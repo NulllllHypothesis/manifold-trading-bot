@@ -130,7 +130,7 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 - [x] Schema version guard in `auto_trader.py` — handles both flat and nested file layouts, refuses to trade on v1
 - [x] Auto-fixing review agent in `.github/scripts/claude-review.js` — reviews PRs and commits fixes directly
 - [x] PR #2 merged to main
-- [x] **Distillation logging** — every LLM call logged to `logs/llm_calls.jsonl` (gitignored): timestamp, model, market_id, system_prompt_sha256, chain_of_thought (extracted from `<think>` blocks), parsed_output. Log rotates at 100MB, 3 backups. Raw responses intentionally excluded (compliance). PR #5 merged 2026-04-06.
+- [x] **Distillation logging** — every LLM call logged to `logs/llm_calls.jsonl` (gitignored): timestamp, model, market_id, system_prompt_sha256, parsed_output. Log rotates at 100MB, 3 backups. Raw responses, full prompts, and chain-of-thought intentionally excluded (compliance). PR #5 merged 2026-04-06.
 - [x] PR #3 (addDistillation) closed — all changes included in PR #5
 
 > No new API keys needed. Ollama is free/local. DeepSeek API key already on server.
@@ -161,7 +161,7 @@ The bot was permanently frozen at max positions with no mechanism to detect when
 
 - [x] `scripts/resolve_positions.py` — polls Manifold API for each open position, calls `PaperTrader.resolve_market()` on any that have settled, prints before/after slot count
 - [x] `PaperTrader.auto_resolve_markets()` was already implemented in `paper_trader.py` — script is a thin wrapper
-- [x] New cron job `position-resolution` at `:30` every hour (between research `:00` and trading `:15+1h`)
+- [x] New cron job `position-resolution` at `:10` every hour (between research `:00` and trading `:20`)
 - [x] Added to `test_automation.py` test suite
 
 ---
@@ -190,8 +190,9 @@ The bot was permanently frozen at max positions with no mechanism to detect when
 
 **Step 4 — Close the loop: EV-based outcome tracking**
 - [x] `estimated_ev` stored at trade time in `auto_trades.json` and in the position record in `paper_trading_state.json`
-  - `auto_trader.py` computes EV before calling `place_paper_bet()` so it's available in both places
-  - `place_paper_bet()` now accepts `estimated_ev`, `ai_confidence`, `strategies` as optional params
+  - `auto_trader.py` computes EV before calling `place_paper_bet()` so it flows into the position record (fixed — was previously passed as None)
+  - `auto_research.py` computes `estimated_ev` on every recommendation using a $25 reference bet so `position_swap_checker` can rank opportunities
+  - `place_paper_bet()` accepts `estimated_ev`, `ai_confidence`, `strategies` as optional params
 - [x] `paper_trader.py` writes to `bet_outcomes` SQLite table on every `resolve_market()` call:
   - Schema: `market_id, our_recommendation, amount, probability, estimated_ev, ai_confidence, strategies (JSON), market_resolution, actual_pnl, ev_error, resolved_at`
   - `ev_error = estimated_ev − actual_pnl` (model error; NULL when no AI estimate)
@@ -339,7 +340,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Cron timeout fix | ✅ Done | `max_markets` 5→3, worst case 270s < 300s limit |
 | Close open positions | 🔄 In Progress | Bot at 10/10 positions — auto-resolver will free slots as markets settle |
 | Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
-| Smart position swap | 🔴 Next | EV-based swap with Telegram approval — planned, branch: feature/smart-swap |
+| Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |

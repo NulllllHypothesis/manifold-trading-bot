@@ -364,6 +364,26 @@ class MarketResearcher:
                         rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
                     # if ai returned something unexpected, leave confidence unchanged
 
+            # Compute estimated_ev for every recommendation now that ai_estimated_probability
+            # is set. This value is consumed by position_swap_checker to rank opportunities
+            # and gate swap proposals (requires ev > 0). Uses a fixed reference bet for
+            # cross-market comparability; auto_trader.py will recompute with actual size.
+            _EV_REF = 25.0
+            for rec in recommendations:
+                ai_p = rec.get('ai_estimated_probability')
+                direction = rec.get('recommendation')
+                mkt_p = max(0.01, min(0.99, rec.get('probability', 0.5)))
+                if ai_p is not None and direction in ('YES', 'NO'):
+                    if direction == 'YES':
+                        gross = _EV_REF / mkt_p
+                        win_p = float(ai_p)
+                    else:
+                        gross = _EV_REF / (1.0 - mkt_p)
+                        win_p = 1.0 - float(ai_p)
+                    rec['estimated_ev'] = round(win_p * gross - _EV_REF, 4)
+                else:
+                    rec['estimated_ev'] = None
+
             # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
