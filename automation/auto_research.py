@@ -112,11 +112,6 @@ class MarketResearcher:
                 if TradingStrategies.is_stale_market(market):
                     continue
 
-                # Skip coinflip zone before momentum/direction strategies; mean_reversion
-                # and creator_disagreement operate outside this band anyway.
-                if 0.45 <= probability <= 0.55:
-                    continue
-
                 # Apply trading strategies
                 strategies = []
 
@@ -126,7 +121,7 @@ class MarketResearcher:
                     strategies.append({
                         'strategy': 'probability_direction',
                         'recommendation': prob_dir_rec,
-                        'confidence': 0.60
+                        'confidence': 0.65
                     })
 
                 # Mean reversion — guarded by uniqueBettorCount (don't fight genuine consensus)
@@ -168,6 +163,16 @@ class MarketResearcher:
                         'strategy': 'thin_market',
                         'recommendation': thin_rec,
                         'confidence': 0.65
+                    })
+
+                # Calibration bias — bet NO in 60-70% and 30-40% ranges where the crowd
+                # historically overestimates YES by 18pp and 11pp respectively.
+                bias_rec = TradingStrategies.probability_bias_strategy(market)
+                if bias_rec:
+                    strategies.append({
+                        'strategy': 'probability_bias',
+                        'recommendation': bias_rec,
+                        'confidence': 0.70
                     })
 
                 if strategies:
