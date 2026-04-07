@@ -83,11 +83,8 @@ _CALIBRATION_NOTE_MAX_LEN = 2000
 try:
     _raw_calibration_note = _build_calibration_note()
     if len(_raw_calibration_note) > _CALIBRATION_NOTE_MAX_LEN:
-        logger.warning(
-            "Calibration note truncated from %d to %d characters to stay within prompt budget.",
-            len(_raw_calibration_note),
-            _CALIBRATION_NOTE_MAX_LEN,
-        )
+        # logger is not yet defined at module level here — use print
+        print(f"[ai_analyzer] calibration note truncated from {len(_raw_calibration_note)} to {_CALIBRATION_NOTE_MAX_LEN} chars")
         _CALIBRATION_NOTE = _raw_calibration_note[:_CALIBRATION_NOTE_MAX_LEN]
     else:
         _CALIBRATION_NOTE = _raw_calibration_note

@@ -278,11 +278,12 @@ class AutoTrader:
             ai_prob = recommendation.get('ai_estimated_probability')
             if ai_prob is not None:
                 if outcome == 'YES':
-                    payout_if_win = amount / current_prob - amount if current_prob > 0 else 0
+                    payout_if_win = amount / current_prob if current_prob > 0 else 0
                     win_prob = float(ai_prob)
                 else:  # NO
-                    payout_if_win = amount / (1 - current_prob) - amount if current_prob < 1 else 0
+                    payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
                     win_prob = 1.0 - float(ai_prob)
+                # payout_if_win is gross (stake + profit), so EV = win_prob * gross - stake
                 estimated_ev = win_prob * payout_if_win - amount
             else:
                 estimated_ev = None  # No AI estimate; calibration will skip this trade
