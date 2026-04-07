@@ -258,37 +258,16 @@ class AutoTrader:
 
         # Compute estimated EV before placing the bet so it can be stored in
         # the position record (paper_trader.py) AND in auto_trades.json.
-        #
-        # place_paper_bet() records payout_if_win as gross (stake returned + profit),
-        # computed as:
-        #   YES: amount / current_prob
-        #   NO:  amount / (1 - current_prob)
-        #
-        # With gross payout semantics:
-        #   EV = win_prob * gross_payout - amount
-        #      = win_prob * (stake + profit) - stake
-        #
-        # This is the standard formulation: if you win you receive gross_payout
-        # (which already includes your returned stake), and if you lose you lose
-        # the full stake.  So subtracting `amount` once is correct — there is no
-        # double-counting of the stake.
-        #
-        # Expanded for clarity:
-        #   EV = win_prob * gross_payout - [win_prob * amount + (1-win_prob) * amount]
-        #      = win_prob * (gross_payout - amount) - (1-win_prob) * amount
-        #      = win_prob * net_profit - (1-win_prob) * amount   ✓
+        # EV = P(win) × payout_if_win - stake
+        # payout_if_win mirrors the formula used in place_paper_bet().
         ai_prob = recommendation.get('ai_estimated_probability')
         if ai_prob is not None:
             if outcome == 'YES':
-                # Gross payout = stake / market_prob  (matches place_paper_bet)
                 payout_if_win = amount / current_prob if current_prob > 0 else 0
                 win_prob = float(ai_prob)
             else:  # NO
-                # Gross payout = stake / (1 - market_prob)  (matches place_paper_bet)
                 payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
                 win_prob = 1.0 - float(ai_prob)
-            # payout_if_win is gross (includes returned stake), so:
-            # EV = win_prob * gross_payout - stake  is correct.
             estimated_ev = win_prob * payout_if_win - amount
         else:
             estimated_ev = None  # No AI estimate; calibration will skip this trade
@@ -305,10 +284,8 @@ class AutoTrader:
             strategies=recommendation.get('strategies', []),
         )
 
-        # If place_paper_bet() failed, clear estimated_ev so no downstream code
-        # can accidentally log a phantom EV value for a trade that never happened.
         if not success:
-            estimated_ev = None
+            estimated_ev = None  # clear phantom EV for a trade that never happened
 
         if success:
             print(f"  ✅ Trade executed successfully")
@@ -336,4 +313,108 @@ class AutoTrader:
                 'balance_after': self.trader.balance
             })
 
-            # Save
+            # Save state
+            self.trader.save_state()
+            return True
+        else:
+            print(f"  ❌ Trade failed")
+            return False
+
+    def log_trade(self, trade_data: Dict):
+        """Log auto-trade to file"""
+        # Load existing trades
+        trades = []
+        if os.path.exists(self.trade_log_file):
+            try:
+                with open(self.trade_log_file, 'r') as f:
+                    data = json.load(f)
+                    trades = data.get('trades', [])
+            except:
+                trades = []
+
+        # Add new trade
+        trades.append(trade_data)
+
+        # Keep only last 100 trades
+        if len(trades) > 100:
+            trades = trades[-100:]
+
+        # Save
+        data = {
+            'total_trades': len(trades),
+            'trades': trades
+        }
+
+        with open(self.trade_log_file, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def run_trading_cycle(self):
+        """Main trading cycle"""
+        print(f"\n{'='*60}")
+        print(f"AUTO TRADING CYCLE - {datetime.now()}")
+        print(f"{'='*60}")
+
+        print(f"Starting balance: ${self.trader.balance:.2f}")
+        open_positions = sum(1 for pos_list in self.trader.positions.values()
+                                   for pos in pos_list if pos.get('status') == 'OPEN')
+        print(f"Open positions: {open_positions}")
+
+        # Load latest research
+        research = self.load_latest_research()
+        if not research or not research.get('recommendations'):
+            print("No research recommendations available")
+            return 0
+
+        recommendations = research['recommendations']
+        print(f"Loaded {len(recommendations)} research recommendations")
+
+        # Filter and sort recommendations
+        tradable_recs = []
+        for rec in recommendations:
+            if self.should_trade_market(rec['market_id'], rec):
+                tradable_recs.append(rec)
+
+        if not tradable_recs:
+            print("No tradable opportunities after risk filtering")
+            return 0
+
+        # Sort by confidence (highest first)
+        tradable_recs.sort(key=lambda x: x['confidence'], reverse=True)
+
+        print(f"\nFound {len(tradable_recs)} tradable opportunities")
+
+        # Execute top 1-2 trades (risk management)
+        max_trades_per_cycle = 2
+        trades_executed = 0
+
+        for rec in tradable_recs[:max_trades_per_cycle]:
+            if trades_executed >= max_trades_per_cycle:
+                break
+
+            print(f"\n{'─'*40}")
+            if self.execute_trade(rec):
+                trades_executed += 1
+
+        print(f"\n{'='*60}")
+        print(f"Trading cycle complete")
+        print(f"Trades executed: {trades_executed}")
+        print(f"Ending balance: ${self.trader.balance:.2f}")
+        print(f"{'='*60}")
+
+        return trades_executed
+
+def main():
+    """Main function"""
+    trader = AutoTrader()
+    trades_executed = trader.run_trading_cycle()
+
+    # Return number of trades executed
+    return trades_executed
+
+if __name__ == "__main__":
+    try:
+        num_trades = main()
+        sys.exit(0)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        sys.exit(1)

@@ -256,6 +256,29 @@ Follow this every time, no exceptions:
 - If an existing test breaks because of your change, you must fix it — not skip it.
 - Do not mark a PR as ready until you have seen the output `✅ SUCCESS` for every test.
 
+### ⚠️ File Editing Rules — Read Before Touching Any Python File
+
+**Never truncate a file.** This is the #1 way to silently break the bot.
+
+When you edit a Python file, you must verify you didn't cut it short:
+
+```bash
+# After any edit, check the file ends properly:
+python3 -m py_compile <file>     # must exit 0 (no syntax errors)
+wc -l <file>                     # line count must be >= what it was before your edit
+tail -5 <file>                   # confirm the file ends with real code, not a partial line
+```
+
+**Rules:**
+- Use **targeted edits** (patch only the lines you need to change). Never rewrite a whole file to make a small change.
+- If a file is too large to fit in context, read only the section you need to edit, patch it, then verify with `py_compile`.
+- If `py_compile` fails → stop, do not commit, fix the file before proceeding.
+- If `wc -l` is significantly lower than before → you truncated something. Restore from git and try again:
+  ```bash
+  git checkout HEAD -- <file>
+  ```
+- **Never use `--no-verify` on git push.** The pre-push hook exists to catch exactly these errors.
+
 ### Git Sync Schedule
 
 Keep your local workspace in sync with the remote automatically:
