@@ -468,16 +468,11 @@ def main():
     """Main function"""
     researcher = MarketResearcher()
 
-    # Skip research if at max positions (now 10, increased from 5)
-    open_positions = sum(
-        1 for trades in researcher.trader.positions.values()
-        if any(t.get('status') == 'OPEN' for t in (trades if isinstance(trades, list) else [trades]))
-    )
-    max_positions = 10  # Increased from 5 to match auto_trader.py
-    if open_positions >= max_positions:
-        print(f"At max positions ({open_positions}/{max_positions}). Skipping research.")
-        return 0
-
+    # Research always runs regardless of position count.
+    # Previously it skipped at max positions, but this caused a 1-hour lag:
+    # resolve_positions.py frees slots at :10 while research runs at :00, so
+    # research would skip, then the trader at :20 had stale recommendations,
+    # and position_swap_checker at :40 had no estimated_ev to rank swaps with.
     recommendations = researcher.run_hourly_research()
 
     # Return number of recommendations for cron job monitoring
