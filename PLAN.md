@@ -205,84 +205,43 @@ Confidence measures how sure the AI is. EV measures how much money we expect to 
 
 ---
 
-### 🔴 Next Feature — Smart Position Swap (Human-in-the-Loop)
+### ✅ Smart Position Swap — DONE (branch: feature/smart-swap)
 
-When all 5 positions are full, the bot is currently frozen. This feature turns `max_positions` from a hard block into a dynamic portfolio manager — but keeps humans in control of every swap.
+When all positions are full the bot was frozen. This feature turns `max_positions` from a hard block into a dynamic portfolio manager with human approval via Telegram.
 
 **How it works:**
-1. New cron job runs when positions are full (or piggybacks on the existing trading cron)
-2. For each open position, fetch the **current market probability** from the Manifold API and compute:
-   - **Unrealised P&L direction** — has the market moved for or against us since entry?
-   - **Time to close** — markets resolving soon that are going against us are the worst holders
-3. For each new high-confidence opportunity from `market_research.json`, compute **Expected Value**:
-   ```
-   EV = estimated_true_probability × payout_if_win - stake
-   ```
-4. If `new_opportunity.EV > weakest_position.EV` AND the weakest position is losing (market moved against us):
-   - Send a Telegram message to the group:
-     > "Position X (NO on 'Will Y happen?' — entered 50%, now 65%, losing $12) could be replaced by Market Z (82% AI confidence, EV +$34). Reply /approve to swap."
-   - Write a `pending_swap.json` flag file with the proposed trade
-5. Human replies `/approve` in Telegram → OpenClaw executes the close + new trade
+1. Cron job at `:40` runs `scripts/position_swap_checker.py`
+2. Scans ALL open positions, fetches current probability from Manifold API, computes unrealised P&L for each
+3. Finds all losing positions (unrealised_pnl < 0), sorted worst-first
+4. For each loser, finds the best unique replacement from `market_research.json` (confidence ≥ 65%, AI not SKIP, positive EV)
+5. Proposes a swap only if `new_opportunity_ev > abs(unrealised_loss)` — crystallising a loss is only worth it if the new trade is clearly better
+6. Writes all qualifying proposals to `pending_swaps.json` as a numbered list
+7. Sends one Telegram message per proposal — each clearly numbered for selective approval
 
-**Why EV over confidence:**
-- Confidence is frozen at entry time and doesn't reflect market movement
-- A position entered at 65% that's now at 30% is winning — don't touch it
-- A position entered at 65% that's now at 75% is losing — strong candidate to swap
-- EV captures both the AI's conviction AND the current market price in one number
+**Human interaction (Telegram):**
+- Bot posts: `♻️ Swap Proposal #1` ... `Reply "approve swap 1" to execute. Reply "dismiss swap 1" to skip.`
+- Multiple proposals in one run → multiple numbered messages
+- Each proposal independent — approve one, dismiss another
+- OpenClaw executes: `python3 scripts/execute_swap.py --id 1` or `--id 2 --dismiss`
+- Proposals expire after 4h; checker re-evaluates next `:40`
 
-**Prerequisites:**
-- [ ] Store `entry_confidence` and `entry_probability` in `paper_trading_state.json` at trade time (1-line change in `paper_trader.py`)
-- [ ] Add `get_current_probability(market_id)` call in swap checker — uses existing `manifold_api.py`
-- [ ] `scripts/position_swap_checker.py` — standalone script that runs the swap logic
-- [ ] Wire into cron (new job or extend existing trading cron)
-- [ ] `pending_swap.json` flag file checked by OpenClaw before executing
+**Files built:**
+- [x] `manifold_bot/paper_trader.py` — added `entry_probability`, `entry_confidence` to every trade record; added `close_position_early(market_id, current_prob)` method
+- [x] `scripts/position_swap_checker.py` — finds all weak positions, pairs each with unique opportunity, writes `pending_swaps.json`, sends Telegram per proposal
+- [x] `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; sends confirmation to Telegram
+- [x] `automation/setup_cron_jobs.py` — added `position-swap-check` cron at `:40 * * * *` (exec, no LLM)
+- [x] `tests/test_swap.py` — 61 tests covering all paths (maths, filtering, flag-file logic, integration)
 
-**Implementation plan:**
-
-1. `paper_trader.py` — add `entry_probability` and `entry_confidence` to the trade record in `place_paper_bet()`. One line. No schema migration needed (new fields just won't exist on old records — handle gracefully).
-
-2. `scripts/position_swap_checker.py` — new script:
-   ```
-   for each OPEN position in paper_trading_state.json:
-       current_prob = api.get_market(market_id)['probability']
-       unrealised_pnl = estimated_move_pnl(entry_prob, current_prob, outcome, amount)
-       current_ev = compute_ev(current_prob, entry_outcome, amount, ai_prob=None)
-       # mark position as weak if: moving against us AND current_ev < 0
-   
-   for each recommendation in market_research.json (confidence >= MIN_CONFIDENCE):
-       new_ev = recommendation['estimated_ev']
-       if new_ev > weakest_position.current_ev:
-           write pending_swap.json
-           send Telegram message
-           break  # one proposal at a time
-   ```
-
-3. `pending_swap.json` — written by checker, read by a new cron. Format:
-   ```json
-   {
-     "close_market_id": "...",
-     "close_reason": "EV -$4.20, market moved against us",
-     "open_market_id": "...",
-     "open_recommendation": {"confidence": 0.81, "estimated_ev": 12.50, ...},
-     "proposed_at": "2026-04-07T19:00:00",
-     "status": "pending"  // → "approved" | "rejected" | "expired"
-   }
-   ```
-
-4. Telegram message format:
-   > ♻️ **Position Swap Proposal**
-   > Close: NO on "Will X happen?" — entered 50%, now 72%, unrealised -$8
-   > Open: YES on "Will Y happen?" — AI 81% confidence, EV +$12.50
-   > Reply `/approve` to execute, `/skip` to dismiss.
-
-5. `/approve` handler — for now: human SSHes in and runs `python3 scripts/execute_swap.py`. Later: OpenClaw skill.
-
-6. New cron job `position-swap-check` at `:40` (after trading at `:20`, before next research at `:00`).
-
-**Branch:** `feature/smart-swap` off current `main`
-
-> Depends on Real Telegram Bot below for the `/approve` command to work interactively.
-> Can be partially built without it — bot posts the message, human manually runs a close script.
+**Cron schedule (updated):**
+```
+:00  Market Research
+:10  Position Resolution
+:20  Auto Trading
+:40  Position Swap Check   ← new
+19:00 daily  Daily Summary
+Sun 02:00    Weekly Harvest
+Mon 07:00    Weekly EV Report
+```
 
 ---
 

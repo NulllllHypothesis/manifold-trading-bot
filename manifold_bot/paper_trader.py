@@ -186,6 +186,9 @@ class PaperTrader:
             'outcome': outcome,
             'amount': amount,
             'probability': probability,
+            # Entry snapshot — used by position_swap_checker to measure drift
+            'entry_probability': probability,
+            'entry_confidence': ai_confidence,
             'payout_if_win': payout,
             'profit_if_win': profit_if_win,
             'profit_if_lose': profit_if_lose,
@@ -280,6 +283,74 @@ class PaperTrader:
         
         self.save_state()
     
+
+    def close_position_early(self, market_id: str, current_prob: float) -> Optional[float]:
+        """
+        Close an open position early at the current market probability.
+
+        Simulates selling the position back to the market at the current price.
+        Return value is based on share value at current_prob vs entry_prob.
+
+          YES position: current_value = amount * current_prob / entry_prob
+          NO  position: current_value = amount * (1 - current_prob) / (1 - entry_prob)
+
+        Returns:
+            float: The realised P&L (current_value - amount), or None if no open position.
+        """
+        if market_id not in self.positions:
+            print(f"No positions in market {market_id}")
+            return None
+
+        _init_bet_outcomes_db()
+
+        positions = self.positions[market_id]
+        total_pnl = 0.0
+        any_closed = False
+
+        for trade in positions:
+            if trade['status'] != 'OPEN':
+                continue
+
+            entry_prob = trade.get('entry_probability') or trade.get('probability', 0.5)
+            amount = trade['amount']
+            outcome = trade['outcome']
+
+            if outcome == 'YES':
+                ep = max(entry_prob, 0.001)
+                current_value = amount * current_prob / ep
+            else:  # NO
+                ep = max(1.0 - entry_prob, 0.001)
+                current_value = amount * (1.0 - current_prob) / ep
+
+            pnl = current_value - amount
+            trade['status'] = 'CLOSED_EARLY'
+            trade['actual_outcome'] = 'CLOSED_EARLY'
+            trade['profit'] = round(pnl, 4)
+            total_pnl += pnl
+            any_closed = True
+
+            _write_bet_outcome(trade, market_resolution='CLOSED_EARLY', actual_pnl=round(pnl, 4))
+            print(f"Trade {trade['trade_id']}: CLOSED_EARLY {pnl:+.2f}")
+
+        if not any_closed:
+            print(f"No open positions to close in {market_id}")
+            return None
+
+        # Sync trade_history records
+        closed_ids = {t['trade_id'] for t in positions if t.get('status') == 'CLOSED_EARLY'}
+        for th in self.trade_history:
+            if th['trade_id'] in closed_ids:
+                for pos in positions:
+                    if pos['trade_id'] == th['trade_id']:
+                        th['status'] = pos['status']
+                        th['profit'] = pos['profit']
+                        break
+
+        self.balance += total_pnl
+        print(f"Market {market_id} closed early. P&L: {total_pnl:+.2f}")
+        print(f"New balance: ${self.balance:.2f}")
+        self.save_state()
+        return round(total_pnl, 4)
 
     def auto_resolve_markets(self):
         """Auto-check Manifold for resolved markets and update positions"""

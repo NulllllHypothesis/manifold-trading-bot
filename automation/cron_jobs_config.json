@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-04-07T11:47:57.279638",
+  "created_at": "2026-04-07T17:27:00.939656",
   "jobs": {
     "market-research-hourly": {
       "name": "Manifold Market Research",
@@ -81,6 +81,30 @@
         "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py",
         "model": "deepseek/deepseek-chat",
         "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
+    "position-swap-check": {
+      "name": "Manifold Position Swap Check",
+      "schedule": {
+        "kind": "cron",
+        "expr": "40 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "python3",
+        "args": [
+          "/home/hackathon/.openclaw/workspace/scripts/position_swap_checker.py"
+        ],
+        "timeoutSeconds": 120
       },
       "sessionTarget": "isolated",
       "delivery": {
