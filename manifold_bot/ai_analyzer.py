@@ -243,7 +243,7 @@ def _call_ollama(prompt: str) -> Optional[str]:
                 "stream": False,
                 "options": {"temperature": 0.3}
             },
-            timeout=60
+            timeout=(5, 60)  # (connect_timeout, read_timeout) — fail fast if Ollama unreachable
         )
         if response.status_code == 200:
             return response.json().get("response", "")
@@ -415,32 +415,50 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
     """
     results = {}
     count = 0
+    # Wall-clock deadline for the entire batch. Each market gets per_market_timeout,
+    # but we also enforce a total budget so a slow first market can't eat all slots.
+    batch_deadline = time.monotonic() + per_market_timeout * max(len(markets[:max_markets]), 1) + 10
 
     for market in markets[:max_markets]:
         market_id = market.get("id", "")
         if not market_id:
             continue
 
+        if time.monotonic() > batch_deadline:
+            logger.warning("AI batch global timeout reached — stopping early after %d results.", len(results))
+            break
+
         result = None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(analyze_market, market)
-            try:
-                result = future.result(timeout=per_market_timeout)
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    "AI analysis timed out after %.1fs for market %s (%s) — skipping.",
-                    per_market_timeout,
-                    market_id,
-                    market.get("question", "")[:60],
-                )
-                result = None
-            except Exception as exc:
-                logger.warning(
-                    "AI analysis raised an unexpected error for market %s: %s — skipping.",
-                    market_id,
-                    exc,
-                )
-                result = None
+        # Do NOT use `with ThreadPoolExecutor` here. The context manager calls
+        # shutdown(wait=True) on exit — even when a TimeoutError is raised — which
+        # blocks the main thread until the background thread's requests.post() call
+        # finishes. That means the actual hang is future_timeout + requests_timeout
+        # (up to 150s per market, 450s for 3 markets), busting the 300s cron budget.
+        # Instead, shut down with wait=False so the background thread is abandoned
+        # immediately after timeout and the loop moves on.
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(analyze_market, market)
+        try:
+            result = future.result(timeout=per_market_timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "AI analysis timed out after %.1fs for market %s (%s) — skipping.",
+                per_market_timeout,
+                market_id,
+                market.get("question", "")[:60],
+            )
+            result = None
+        except Exception as exc:
+            logger.warning(
+                "AI analysis raised an unexpected error for market %s: %s — skipping.",
+                market_id,
+                exc,
+            )
+            result = None
+        finally:
+            # wait=False: do not block on the background thread. It will clean up
+            # on its own once the underlying requests call completes or errors.
+            executor.shutdown(wait=False)
 
         if result:
             results[market_id] = result
