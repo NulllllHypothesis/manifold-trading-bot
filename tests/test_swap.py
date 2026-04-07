@@ -726,5 +726,202 @@ class TestRunSwapCheck(unittest.TestCase):
             self.assertEqual(ids, list(range(1, len(ids) + 1)))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression: zero/negative Kelly must not place a bet (execute_swap.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestExecuteSwapZeroKelly(unittest.TestCase):
+    """
+    Regression test: when the replacement trade has zero or negative Kelly edge,
+    execute_swap() must return False without calling place_paper_bet or
+    close_position_early.  Previously it closed the losing position and then
+    fell through to the MIN_BET_AMOUNT clamp, placing a guaranteed-loss $1 bet.
+    """
+
+    def _make_swap(self, ai_prob, outcome='YES', mkt_prob=0.60):
+        """Build a minimal swap dict where ai_prob drives the Kelly calc."""
+        return {
+            'close_market_id': 'mkt_close',
+            'close_question': 'Close question',
+            'close_current_probability': 0.70,
+            'open_market_id': 'mkt_open',
+            'open_question': 'Open question',
+            'open_recommendation': {
+                'recommendation': outcome,
+                'confidence': 0.70,
+                'probability': mkt_prob,
+                'ai_estimated_probability': ai_prob,
+                'estimated_ev': -5.0,
+            },
+            'open_strategies': [],
+        }
+
+    def _make_trader(self, balance=200.0):
+        trader = MagicMock(spec=PaperTrader)
+        trader.balance = balance
+        return trader
+
+    def _api_returning(self, prob):
+        api = MagicMock()
+        api.get_market.return_value = {'probability': prob}
+        return api
+
+    def test_negative_kelly_yes_does_not_close_or_bet(self):
+        """YES at 60% market with AI prob 0.40 → Kelly < 0 → abort before close."""
+        from scripts.execute_swap import execute_swap
+        trader = self._make_trader()
+        swap = self._make_swap(ai_prob=0.40, outcome='YES', mkt_prob=0.60)
+        with patch('scripts.execute_swap.api_client', self._api_returning(0.60)):
+            result = execute_swap(swap, trader)
+        self.assertFalse(result)
+        trader.close_position_early.assert_not_called()
+        trader.place_paper_bet.assert_not_called()
+
+    def test_negative_kelly_no_does_not_close_or_bet(self):
+        """NO at 30% market with AI prob 0.25 → Kelly < 0 for NO → abort before close."""
+        from scripts.execute_swap import execute_swap
+        trader = self._make_trader()
+        # NO at 30%: win_prob = 1 - ai_prob = 0.75, net_odds = 0.30/0.70 ≈ 0.43
+        # Kelly = (0.75*0.43 - 0.25)/0.43 ≈ (0.32-0.25)/0.43 > 0, so use low prob instead
+        # NO at 20%: win_prob = 1 - 0.85 = 0.15, net_odds = 0.20/0.80 = 0.25
+        # Kelly = (0.15*0.25 - 0.85)/0.25 < 0 → negative
+        swap = self._make_swap(ai_prob=0.85, outcome='NO', mkt_prob=0.20)
+        with patch('scripts.execute_swap.api_client', self._api_returning(0.20)):
+            result = execute_swap(swap, trader)
+        self.assertFalse(result)
+        trader.close_position_early.assert_not_called()
+        trader.place_paper_bet.assert_not_called()
+
+    def test_positive_kelly_proceeds_to_close_and_bet(self):
+        """Positive Kelly edge → close_position_early and place_paper_bet are called."""
+        from scripts.execute_swap import execute_swap
+        trader = self._make_trader(balance=200.0)
+        trader.close_position_early.return_value = -10.0
+        trader.place_paper_bet.return_value = True
+        # YES at 30%: AI thinks 70% → strong positive Kelly
+        swap = self._make_swap(ai_prob=0.70, outcome='YES', mkt_prob=0.30)
+        with patch('scripts.execute_swap.api_client', self._api_returning(0.30)):
+            result = execute_swap(swap, trader)
+        self.assertTrue(result)
+        trader.close_position_early.assert_called_once()
+        trader.place_paper_bet.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression: full EV pipeline (place_paper_bet → resolve_market → bet_outcomes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestEvPipelineRegression(unittest.TestCase):
+    """
+    Regression test: estimated_ev set at trade time must flow through to the
+    bet_outcomes SQLite row after resolution, unchanged.
+
+    Bug history: auto_trader.py used to compute EV *after* place_paper_bet,
+    so the position record had estimated_ev=None, and _write_bet_outcome()
+    wrote NULL into every calibration row.  The fix moved the EV computation
+    before place_paper_bet.  This test locks that in end-to-end.
+    """
+
+    def setUp(self):
+        # Isolated temp state file so this test never touches real state
+        fd, path = tempfile.mkstemp(suffix='.json')
+        os.close(fd)
+        self._state_path = path
+        fd2, db_path = tempfile.mkstemp(suffix='.db')
+        os.close(fd2)
+        self._db_path = db_path
+
+    def tearDown(self):
+        for p in (self._state_path, self._db_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    def test_estimated_ev_survives_place_and_resolve(self):
+        """EV written at trade time must appear unchanged in bet_outcomes after resolution."""
+        from pathlib import Path as _Path
+        state_path = _Path(self._state_path)
+        db_path = _Path(self._db_path)
+        _sp = self._state_path  # capture for lambda — 'self' inside lambda is PaperTrader
+
+        with (
+            patch('manifold_bot.paper_trader._DB_PATH', db_path),
+            patch.object(
+                PaperTrader, '__init__',
+                lambda self, **kw: self.__dict__.update(
+                    balance=1000.0,
+                    positions={},
+                    trade_history=[],
+                    state_file=_sp,
+                )
+            ),
+            patch.object(PaperTrader, 'save_state'),
+        ):
+            trader = PaperTrader()
+            ev_at_trade_time = 7.25
+            trader.place_paper_bet(
+                market_id='ev_test_mkt',
+                outcome='YES',
+                amount=50.0,
+                probability=0.40,
+                estimated_ev=ev_at_trade_time,
+                ai_confidence=0.72,
+                strategies=['probability_bias'],
+            )
+            trader.resolve_market('ev_test_mkt', 'YES')
+
+        # Read the bet_outcomes row written by resolve_market
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT estimated_ev FROM bet_outcomes WHERE market_id = 'ev_test_mkt'"
+        ).fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row, "bet_outcomes row was not written")
+        self.assertAlmostEqual(row[0], ev_at_trade_time, places=4,
+                               msg="estimated_ev mutated between place and resolve")
+
+    def test_none_ev_writes_null_to_bet_outcomes(self):
+        """When no AI estimate is available, bet_outcomes.estimated_ev must be NULL."""
+        from pathlib import Path as _Path
+        db_path = _Path(self._db_path)
+        _sp = self._state_path  # capture for lambda
+
+        with (
+            patch('manifold_bot.paper_trader._DB_PATH', db_path),
+            patch.object(
+                PaperTrader, '__init__',
+                lambda self, **kw: self.__dict__.update(
+                    balance=1000.0,
+                    positions={},
+                    trade_history=[],
+                    state_file=_sp,
+                )
+            ),
+            patch.object(PaperTrader, 'save_state'),
+        ):
+            trader = PaperTrader()
+            trader.place_paper_bet(
+                market_id='no_ev_mkt',
+                outcome='NO',
+                amount=20.0,
+                probability=0.65,
+                estimated_ev=None,
+            )
+            trader.resolve_market('no_ev_mkt', 'NO')
+
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT estimated_ev FROM bet_outcomes WHERE market_id = 'no_ev_mkt'"
+        ).fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row, "bet_outcomes row was not written")
+        self.assertIsNone(row[0], "estimated_ev should be NULL when no AI estimate provided")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

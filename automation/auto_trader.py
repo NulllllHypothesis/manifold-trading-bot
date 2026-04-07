@@ -32,7 +32,6 @@ class AutoTrader:
         self.max_positions = 10  # Increased from 5 to allow more diversification (currently 8 open)
         self.max_position_size = 0.1  # 10% of balance per trade
         self.min_confidence = MIN_CONFIDENCE
-        self.cooldown_hours = 4  # Reduced from 6 hours to allow faster re-entry
 
     def load_latest_research(self) -> Optional[Dict]:
         """Load the latest market research"""
@@ -367,8 +366,12 @@ class AutoTrader:
             print("No tradable opportunities after risk filtering")
             return 0
 
-        # Sort by confidence (highest first)
-        tradable_recs.sort(key=lambda x: x['confidence'], reverse=True)
+        # Sort by estimated EV (highest first) — confidence is a gate, not a ranking signal.
+        # Recs without an AI EV estimate (None) are ranked below any EV > 0.
+        tradable_recs.sort(
+            key=lambda x: x['estimated_ev'] if x.get('estimated_ev') is not None else 0.0,
+            reverse=True,
+        )
 
         print(f"\nFound {len(tradable_recs)} tradable opportunities")
 

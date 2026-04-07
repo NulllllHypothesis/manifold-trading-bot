@@ -101,6 +101,48 @@ def execute_swap(swap: dict, trader: PaperTrader) -> bool:
     open_id = swap['open_market_id']
     open_rec = swap['open_recommendation']
 
+    from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
+    from manifold_bot.strategies import TradingStrategies
+
+    # ── 0. Pre-validate new trade before touching any positions ───────────────
+    # Compute sizing first so a zero/negative Kelly edge aborts cleanly without
+    # leaving the portfolio in a half-closed state.
+    outcome = open_rec.get('recommendation')
+    if outcome not in ('YES', 'NO'):
+        print(f"  Invalid outcome {outcome!r} — aborting.")
+        return False
+
+    confidence = open_rec.get('confidence', 0)
+    estimated_ev = open_rec.get('estimated_ev')
+    ai_confidence = open_rec.get('ai_confidence', confidence)
+    ai_estimated_prob = open_rec.get('ai_estimated_probability')
+    strategies = swap.get('open_strategies', open_rec.get('strategies', []))
+
+    current_open_prob = get_current_prob(open_id, open_rec.get('probability', 0.5))
+    mkt_p = max(0.01, min(0.99, current_open_prob))
+
+    if ai_estimated_prob is not None:
+        # Kelly sizing — same logic as auto_trader.py so trades are comparable.
+        if outcome == 'YES':
+            net_odds = (1.0 - mkt_p) / mkt_p
+            win_prob = float(ai_estimated_prob)
+        else:
+            net_odds = mkt_p / (1.0 - mkt_p)
+            win_prob = 1.0 - float(ai_estimated_prob)
+        kelly = TradingStrategies.calculate_kelly_criterion(win_prob, net_odds)
+        if kelly <= 0:
+            print(f"  Zero/negative Kelly edge (k={kelly:.3f}) — aborting swap without closing position")
+            return False
+        kelly *= 0.5
+        raw_size = trader.balance * kelly
+    else:
+        base_size = trader.balance * 0.10
+        confidence_multiplier = min(confidence / max(MIN_CONFIDENCE, 0.01), 2.0)
+        raw_size = base_size * confidence_multiplier
+
+    amount = round(min(max(raw_size, MIN_BET_AMOUNT), MAX_BET_AMOUNT) / 5) * 5
+    amount = max(amount, MIN_BET_AMOUNT)
+
     # ── 1. Close weak position ────────────────────────────────────────────────
     print(f"\n[1/2] Closing position: {close_id}")
     print(f"      {swap['close_question'][:80]}")
@@ -115,41 +157,6 @@ def execute_swap(swap: dict, trader: PaperTrader) -> bool:
     # ── 2. Open new position ──────────────────────────────────────────────────
     print(f"\n[2/2] Opening new position: {open_id}")
     print(f"      {swap['open_question'][:80]}")
-
-    current_open_prob = get_current_prob(open_id, open_rec.get('probability', 0.5))
-    outcome = open_rec.get('recommendation')
-    confidence = open_rec.get('confidence', 0)
-    estimated_ev = open_rec.get('estimated_ev')
-    ai_confidence = open_rec.get('ai_confidence', confidence)
-    ai_estimated_prob = open_rec.get('ai_estimated_probability')
-    strategies = swap.get('open_strategies', open_rec.get('strategies', []))
-
-    from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
-    from manifold_bot.strategies import TradingStrategies
-
-    # Use Kelly sizing when AI probability estimate is available — same logic as
-    # auto_trader.py so swap trades are comparable in the weekly EV report.
-    mkt_p = max(0.01, min(0.99, current_open_prob))
-    if ai_estimated_prob is not None and outcome in ('YES', 'NO'):
-        if outcome == 'YES':
-            net_odds = (1.0 - mkt_p) / mkt_p
-            win_prob = float(ai_estimated_prob)
-        else:
-            net_odds = mkt_p / (1.0 - mkt_p)
-            win_prob = 1.0 - float(ai_estimated_prob)
-        kelly = TradingStrategies.calculate_kelly_criterion(win_prob, net_odds) * 0.5
-        raw_size = trader.balance * kelly if kelly > 0 else 0
-    else:
-        base_size = trader.balance * 0.10
-        confidence_multiplier = min(confidence / max(MIN_CONFIDENCE, 0.01), 2.0)
-        raw_size = base_size * confidence_multiplier
-
-    amount = round(min(max(raw_size, MIN_BET_AMOUNT), MAX_BET_AMOUNT) / 5) * 5
-    amount = max(amount, MIN_BET_AMOUNT)
-
-    if outcome not in ('YES', 'NO'):
-        print(f"  Invalid outcome {outcome!r} — aborting.")
-        return False
 
     success = trader.place_paper_bet(
         market_id=open_id,

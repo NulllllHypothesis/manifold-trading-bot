@@ -12,8 +12,8 @@ A complete automated trading system for Manifold Markets with:
 
 ### 2. **Hourly Auto Trading** (`automation/auto_trader.py`)
 - Executes trades based on research
-- Risk management: max 5 positions, 10% per trade
-- Cooldown periods to avoid overtrading
+- Risk management: max 10 positions, 10% per trade, open-position guard prevents re-entry
+- Selects trades by estimated EV (highest edge first); confidence is a hard gate (≥65%)
 - Logs all auto-trades to `auto_trades.json`
 
 ### 3. **Daily Summary Report** (`automation/daily_summary.py`)
@@ -23,10 +23,14 @@ A complete automated trading system for Manifold Markets with:
 - Ready for automated delivery
 
 ### 4. **Cron Job Configuration** (`automation/setup_cron_jobs.py`)
-- 3 scheduled jobs:
+- 7 scheduled jobs:
   - Research: Every hour at :00 (UTC)
-  - Trading: Every hour at :15 (UTC)
+  - Position Resolution: Every hour at :10 (UTC)
+  - Trading: Every hour at :20 (UTC)
+  - Position Swap Check: Every hour at :40 (UTC)
   - Summary: Daily at 19:00 (UTC)
+  - Calibration Harvest: Sundays at 02:00 (UTC)
+  - EV Accuracy Report: Mondays at 07:00 (UTC)
 - Telegram delivery configured for group chat
 
 ## 📊 Current Trading Status
@@ -87,17 +91,20 @@ Contains 3 pre-configured jobs:
 3. `daily-summary` - Runs at 19:00 UTC daily
 
 ### Risk Parameters (in `automation/auto_trader.py`)
-- `max_positions`: 5 (maximum open positions)
-- `max_position_size`: 0.1 (10% of balance per trade)
-- `min_confidence`: 0.65 (65% confidence minimum)
-- `cooldown_hours`: 6 (hours before trading same market)
+- `max_positions`: 10 (maximum open positions)
+- `max_position_size`: 0.1 (10% of balance per trade, Kelly sizing when AI estimate available)
+- `min_confidence`: 0.65 (65% confidence minimum, hard gate)
+- Open-position guard: no re-entry on any market already held (use swap to replace)
 
 ## 📈 Expected Workflow
 
-1. **:00 every hour** - Research runs, analyzes markets, saves recommendations
-2. **:15 every hour** - Trading runs, executes 1-2 best opportunities
-3. **19:00 daily** - Summary generated, sent to Telegram group
-4. **Continuous** - Paper trader state saved after each trade
+1. **:00 every hour** — Research runs, analyzes markets, saves recommendations
+2. **:10 every hour** — Position resolution frees closed slots
+3. **:20 every hour** — Trading runs, executes up to 2 highest-EV opportunities
+4. **:40 every hour** — Swap checker proposes replacements for losing positions
+5. **19:00 daily** — Summary generated, sent to Telegram group
+6. **Sunday 02:00** — Calibration harvest fetches 2000+ resolved markets
+7. **Monday 07:00** — EV accuracy report by strategy and confidence band
 
 ## 🗂️ Project Structure
 
