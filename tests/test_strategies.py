@@ -347,6 +347,82 @@ class TestOpenPositionGuard(unittest.TestCase):
         }
         self.assertFalse(trader.should_trade_market('target', rec))
 
+    # ── Regression: stale existing_position flag (bug: market 2czul2Rync) ────
+    #
+    # Root cause: auto_research.py set existing_position at scan time.
+    # By the time auto_trader.py ran (up to 20 minutes later), the position
+    # was already OPEN in the live state. The old code trusted the research
+    # flag and allowed re-entry, causing 3 consecutive bets on the same
+    # market (2czul2Rync) and a -$190 loss.
+    #
+    # Fix: should_trade_market() queries self.trader.positions directly,
+    # ignoring the stale research flag entirely.
+
+    def test_stale_false_flag_blocked_by_live_open_position(self):
+        """
+        Research says existing_position=False (stale), but trader has an OPEN
+        position in the live state. Must be blocked — live state wins.
+        """
+        positions = {'2czul2Rync': [{'status': 'OPEN', 'timestamp': '2026-01-01T00:00:00'}]}
+        trader = self._make_trader(positions)
+        rec = {
+            'market_id': '2czul2Rync',
+            'confidence': 0.80,
+            'probability': 0.65,
+            'liquidity': 500,
+            'existing_position': False,   # stale — research ran before position opened
+            'ai_recommendation': 'NO',
+            'ai_returned_skip': False,
+        }
+        self.assertFalse(trader.should_trade_market('2czul2Rync', rec))
+
+    def test_third_bet_on_same_market_blocked(self):
+        """
+        Simulate the exact 2czul2Rync scenario: two prior bets already in
+        the position list, both OPEN. A third bet must be blocked regardless
+        of confidence or what research says.
+        """
+        positions = {
+            '2czul2Rync': [
+                {'status': 'OPEN', 'timestamp': '2026-01-01T10:00:00'},
+                {'status': 'OPEN', 'timestamp': '2026-01-01T11:00:00'},
+            ]
+        }
+        trader = self._make_trader(positions)
+        for confidence in (0.65, 0.80, 0.95, 1.0):
+            with self.subTest(confidence=confidence):
+                rec = {
+                    'market_id': '2czul2Rync',
+                    'confidence': confidence,
+                    'probability': 0.65,
+                    'liquidity': 500,
+                    'existing_position': False,  # stale flag — must be ignored
+                    'ai_recommendation': 'NO',
+                    'ai_returned_skip': False,
+                }
+                self.assertFalse(
+                    trader.should_trade_market('2czul2Rync', rec),
+                    f"Third bet allowed at confidence={confidence} — regression!"
+                )
+
+    def test_research_flag_true_also_blocked(self):
+        """
+        When research correctly reports existing_position=True AND live state
+        has an OPEN position, must also be blocked (belt-and-suspenders check).
+        """
+        positions = {'mkt_dup': [{'status': 'OPEN', 'timestamp': '2026-01-01T00:00:00'}]}
+        trader = self._make_trader(positions)
+        rec = {
+            'market_id': 'mkt_dup',
+            'confidence': 0.75,
+            'probability': 0.65,
+            'liquidity': 500,
+            'existing_position': True,
+            'ai_recommendation': 'NO',
+            'ai_returned_skip': False,
+        }
+        self.assertFalse(trader.should_trade_market('mkt_dup', rec))
+
 
 if __name__ == '__main__':
     unittest.main()
