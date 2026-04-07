@@ -18,6 +18,9 @@ MANIFOLD_API_KEY = os.environ.get("MANIFOLD_API_KEY", "")
 if not MANIFOLD_API_KEY:
     print("WARNING: MANIFOLD_API_KEY not set. Export it: export MANIFOLD_API_KEY=your-key-here")
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_GROUP_ID  = os.environ.get("TELEGRAM_GROUP_ID", "-5240775171")
+
 MANIFOLD_API_BASE = "https://api.manifold.markets"
 
 ENDPOINTS = {

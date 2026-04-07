@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""
+Telegram bot command handlers for the Manifold paper trading bot.
+
+Each handler reads live state from JSON files and formats a concise
+Telegram-ready response. Handlers are designed to be called by OpenClaw
+when a user sends a slash command in the Telegram group.
+
+Usage (OpenClaw cron/skill prompt):
+    python3 automation/telegram_bot.py portfolio
+    python3 automation/telegram_bot.py positions
+    python3 automation/telegram_bot.py scan
+
+The script prints the formatted response to stdout (OpenClaw reads stdout
+and forwards it to Telegram) AND sends it directly via the Bot API so it
+arrives even if the LLM intermediary is slow.
+
+Commands:
+    portfolio  — balance, P&L, win rate summary
+    positions  — list all open positions with entry vs current price
+    scan       — top 5 opportunities from latest market_research.json
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from manifold_bot.config import INITIAL_BALANCE
+from automation.send_telegram import send_message
+
+# ── File paths ─────────────────────────────────────────────────────────────────
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_STATE_FILE   = os.path.join(_ROOT, "manifold_bot", "paper_trading_state.json")
+_RESEARCH_FILE = os.path.join(_ROOT, "market_research.json")
+
+
+def _load_state() -> dict:
+    if not os.path.exists(_STATE_FILE):
+        return {}
+    with open(_STATE_FILE) as f:
+        return json.load(f)
+
+
+def _load_research() -> dict:
+    if not os.path.exists(_RESEARCH_FILE):
+        return {}
+    with open(_RESEARCH_FILE) as f:
+        return json.load(f)
+
+
+# ── /portfolio ─────────────────────────────────────────────────────────────────
+
+def cmd_portfolio() -> str:
+    state = _load_state()
+    if not state:
+        return "No trading state found yet — bot hasn't run."
+
+    balance = state.get("balance", 0)
+    total_pnl = balance - INITIAL_BALANCE
+    pnl_pct = (total_pnl / INITIAL_BALANCE) * 100
+
+    history = state.get("trade_history", [])
+    closed = [t for t in history if t.get("status") in ("WIN", "LOSE", "CLOSED_EARLY")]
+    wins   = [t for t in closed if t.get("status") == "WIN"]
+    win_rate = len(wins) / len(closed) * 100 if closed else 0
+
+    positions = state.get("positions", {})
+    open_count = sum(
+        1 for trades in positions.values()
+        for t in trades if t.get("status") == "OPEN"
+    )
+    total_invested = sum(
+        t.get("amount", 0)
+        for trades in positions.values()
+        for t in trades if t.get("status") == "OPEN"
+    )
+
+    pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+    msg  = "💰 *PORTFOLIO*\n"
+    msg += f"Balance:   ${balance:,.2f}\n"
+    msg += f"P&L:       {pnl_emoji} ${total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+    msg += f"Invested:  ${total_invested:,.2f}\n\n"
+    msg += f"Positions: {open_count}/10 slots used\n"
+    if closed:
+        msg += f"Win rate:  {win_rate:.0f}% ({len(wins)}W / {len(closed) - len(wins)}L from {len(closed)} closed)\n"
+    msg += f"\n_Updated {datetime.now().strftime('%H:%M UTC')}_"
+    return msg
+
+
+# ── /positions ─────────────────────────────────────────────────────────────────
+
+def cmd_positions() -> str:
+    state = _load_state()
+    if not state:
+        return "No trading state found yet."
+
+    positions = state.get("positions", {})
+    open_trades = []
+    for market_id, trades in positions.items():
+        for t in trades:
+            if t.get("status") == "OPEN":
+                open_trades.append((market_id, t))
+
+    if not open_trades:
+        return "No open positions right now."
+
+    msg = f"📋 *OPEN POSITIONS* ({len(open_trades)}/10)\n\n"
+    for i, (market_id, t) in enumerate(open_trades, 1):
+        direction = t.get("outcome", "?")
+        amount    = t.get("amount", 0)
+        entry_p   = t.get("entry_probability") or t.get("probability", 0)
+        question  = t.get("question", market_id)[:55]
+        conf      = t.get("entry_confidence") or t.get("confidence", 0)
+
+        # Rough unrealised P&L estimate using entry probability as proxy
+        # (current probability not available without live API call)
+        direction_symbol = "🟢" if direction == "YES" else "🔴"
+        msg += f"{i}. {direction_symbol} *{direction}* — {question}...\n"
+        msg += f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%\n"
+
+    msg += f"\n_Updated {datetime.now().strftime('%H:%M UTC')}_"
+    return msg
+
+
+# ── /scan ──────────────────────────────────────────────────────────────────────
+
+def cmd_scan() -> str:
+    research = _load_research()
+    if not research:
+        return "No research data yet — waiting for next hourly scan."
+
+    latest = research.get("latest", research)
+    recs   = latest.get("recommendations", [])
+    ts     = latest.get("timestamp", "")
+
+    if not recs:
+        return "Latest research found no opportunities."
+
+    # Show top 5 by confidence, skipping markets already held
+    top = [r for r in recs if not r.get("existing_position")][:5]
+    if not top:
+        top = recs[:5]
+
+    try:
+        scan_time = datetime.fromisoformat(ts).strftime("%H:%M UTC") if ts else "unknown"
+    except Exception:
+        scan_time = ts[:16] if ts else "unknown"
+
+    msg = f"🔍 *TOP OPPORTUNITIES* (scan at {scan_time})\n\n"
+    for i, r in enumerate(top, 1):
+        direction = r.get("recommendation", "?")
+        conf      = r.get("confidence", 0)
+        prob      = r.get("probability", 0)
+        question  = r.get("question", r.get("market_id", "?"))[:55]
+        strats    = ", ".join(r.get("strategies", []))
+        ev        = r.get("estimated_ev")
+
+        ai_rec  = r.get("ai_recommendation")
+        ai_conf = r.get("ai_confidence", 0)
+        ai_note = ""
+        if ai_rec and ai_rec != "SKIP" and r.get("ai_was_candidate"):
+            ai_note = f" | AI: {ai_rec} {ai_conf*100:.0f}%"
+        elif r.get("ai_returned_skip"):
+            ai_note = " | AI: SKIP"
+
+        ev_note = f" | EV ${ev:+.2f}" if ev is not None else ""
+        direction_symbol = "🟢" if direction == "YES" else "🔴"
+
+        msg += f"{i}. {direction_symbol} *{direction}* {conf*100:.0f}% — {question}...\n"
+        msg += f"   Mkt: {prob*100:.0f}%{ai_note}{ev_note}\n"
+        msg += f"   _{strats}_\n\n"
+
+    schema = latest.get("schema_version", 1)
+    if schema < 2:
+        msg += "⚠️ _AI analysis unavailable for this scan (schema v1)_\n"
+
+    return msg.rstrip()
+
+
+# ── CLI entry point ────────────────────────────────────────────────────────────
+
+_COMMANDS = {
+    "portfolio": cmd_portfolio,
+    "positions": cmd_positions,
+    "scan":      cmd_scan,
+}
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in _COMMANDS:
+        print(f"Usage: python3 automation/telegram_bot.py [{' | '.join(_COMMANDS)}]")
+        return 1
+
+    cmd = sys.argv[1]
+    response = _COMMANDS[cmd]()
+
+    # Print for OpenClaw / stdout capture
+    print(response)
+
+    # Also send directly via Bot API (works for exec cron jobs)
+    send_message(response)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

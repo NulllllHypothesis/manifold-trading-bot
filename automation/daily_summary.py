@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.config import INITIAL_BALANCE
+from automation.send_telegram import send_message as _tg_send
 
 try:
     from scripts.weekly_ev_report import generate_report as _ev_report
@@ -249,27 +250,25 @@ class DailySummary:
         return summary
 
     def send_to_telegram(self, message: str):
-        """Send message to Telegram group"""
-        # This would integrate with python-telegram-bot
-        # For now, we'll print it and the cron job can handle delivery
+        """Send message to Telegram group via Bot API."""
+        # Always print so OpenClaw / cron stdout capture sees it too
         print("\n" + "="*60)
-        print("TELEGRAM MESSAGE READY:")
+        print("TELEGRAM DAILY SUMMARY:")
         print("="*60)
         print(message)
         print("="*60)
 
-        # In a real implementation, you would:
-        # 1. Import python-telegram-bot
-        # 2. Use bot.send_message(chat_id=GROUP_ID, text=message, parse_mode='Markdown')
-        # 3. Handle errors and retries
-
-        # For now, we'll create a file that can be sent by another script
+        # Save to file as backup
         telegram_file = "telegram_daily_summary.txt"
         with open(telegram_file, 'w') as f:
             f.write(message)
 
-        print(f"\nMessage saved to {telegram_file}")
-        print("To send manually: python3 automation/send_telegram.py")
+        # Send directly via Bot API
+        success = _tg_send(message)
+        if success:
+            print("\nMessage sent to Telegram group.")
+        else:
+            print(f"\nMessage saved to {telegram_file} (Telegram send failed — check TELEGRAM_BOT_TOKEN).")
 
     def generate_report(self):
         """Generate and deliver daily report"""
