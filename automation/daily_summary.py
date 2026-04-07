@@ -16,6 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.paper_trader import PaperTrader
 
+try:
+    from scripts.weekly_ev_report import generate_report as _ev_report
+except Exception:
+    _ev_report = None
+
 class DailySummary:
     """Generate daily trading summary"""
 
@@ -214,6 +219,29 @@ class DailySummary:
             summary += "⚠️ *CHALLENGING DAY* - Review strategies.\n"
 
         summary += "\n"
+
+        # On Mondays, append the weekly EV accuracy section
+        if datetime.now().weekday() == 0:  # 0 = Monday
+            summary += "📐 *WEEKLY EV ACCURACY*\n"
+            # Attempt a fresh local import in case the module became available
+            # after the top-level try/except; fall back to the cached reference.
+            ev_report_fn = _ev_report
+            if ev_report_fn is None:
+                try:
+                    from scripts.weekly_ev_report import generate_report as ev_report_fn
+                except Exception:
+                    ev_report_fn = None
+
+            if ev_report_fn is None:
+                ev_section = "_(EV report unavailable: module could not be imported)_\n"
+            else:
+                try:
+                    ev_section = ev_report_fn()
+                except Exception as e:
+                    ev_section = f"EV report unavailable: {e}"
+            summary += ev_section
+            summary += "\n"
+
         summary += "Next report: Tomorrow at 19:00 UTC\n"
         summary += "#Hackathon2026 #TradingBot"
 

@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-06* — AI integration complete, distillation logging merged (PR #5), calibration loop planned.
+*Last updated: 2026-04-07* — Calibration & feedback loop complete (feature/calibration): crowd bias table, AI prompt injection, bet_outcomes tracking, weekly EV report, 2 new weekly crons registered on server.
 
 ---
 
@@ -40,47 +40,77 @@ The bot runs on a server at a friend's house (Aleksi's homelab). An AI agent fra
 ## Part 2 — The Full Cycle, Step by Step
 
 ```
-Every hour at :00 UTC
+Every 4h at :00 UTC
         │
         ▼
 ┌─────────────────────────────────┐
 │  auto_research.py runs          │
 │  - Calls Manifold API           │
-│  - Gets 100 markets             │
-│  - Filters: resolved, low liq   │
-│  - Scores with 3 strategies     │
-│  - Sorts by confidence          │
-│  - AI analysis on top 5 ──────► deepseek-r1:14b (local, free)
-│    (YES/NO/SKIP + reasoning)    │  ~60s per market on CPU
+│  - Gets 100+ markets            │
+│  - Pre-filter: is_stale_market  │
+│  - Scores with 5 strategies     │
+│  - Top 5 by confidence+recency  │
+│  - AI analysis on top 3 ──────► deepseek-r1:14b (local, free)
+│    (YES/NO/SKIP + reasoning)    │  ~70-80s per market on CPU
+│    calibration table in prompt  │  crowd bias corrections injected
 │  - Blends stat + AI confidence  │
-│  - Saves to market_research.json│
+│  - Saves market_research.json   │
+│    schema_version=2             │
 └─────────────────────────────────┘
         │
-        │  (15 minutes pass)
+        │  (:10 every hour)
+        ▼
+┌─────────────────────────────────┐
+│  resolve_positions.py runs      │
+│  - Polls Manifold API for each  │
+│    open position                │
+│  - Calls resolve_market() on    │
+│    any that settled             │
+│  - Writes bet_outcomes to SQLite│
+│    (estimated_ev vs actual_pnl) │
+│  - Frees slots for new trades   │
+└─────────────────────────────────┘
+        │
+        │  (:15 every hour)
         ▼
 ┌─────────────────────────────────┐
 │  auto_trader.py runs            │
 │  - Reads market_research.json   │
+│  - Refuses schema_version < 2   │
 │  - Filters by risk rules:       │
 │    • confidence ≥ 65%           │
-│    • max 5 open positions       │
+│    • max 10 open positions      │
 │    • liquidity ≥ $200           │
-│    • 6h cooldown per market     │
+│    • 4h cooldown per market     │
+│    • AI veto (SKIP) respected   │
+│  - Kelly sizing (half-Kelly)    │
 │  - Picks top 1-2 trades         │
-│  - Calls PaperTrader to         │
-│    simulate the bet             │
+│  - Stores estimated_ev at trade │
 │  - Updates paper_trading_state  │
 └─────────────────────────────────┘
         │
-        │  (daily at 7pm UTC)
+        │  (daily at 19:00 UTC)
         ▼
 ┌─────────────────────────────────┐
 │  daily_summary.py runs          │
 │  - Reads state + trade history  │
 │  - Calculates P&L, win rate     │
+│  - Mondays: appends weekly EV   │
+│    accuracy section             │
 │  - Formats a Telegram message   │
-│  - OpenClaw delivers it to      │
-│    the group chat               │
+│  - OpenClaw delivers to group   │
+└─────────────────────────────────┘
+        │
+        │  (Sundays 02:00 UTC)
+        ▼
+┌─────────────────────────────────┐
+│  harvest_resolved.py runs       │
+│  - Fetches 2000+ resolved       │
+│    markets from Manifold API    │
+│  - Saves to data/calibration.db │
+│  - Runs analyze_calibration.py  │
+│  - Rebuilds calibration_table   │
+│    .json for next AI cycle      │
 └─────────────────────────────────┘
 ```
 
@@ -170,6 +200,15 @@ Volume: $5,200
 Liquidity: $1,400
 Close date: 2027-01-01
 
+Crowd calibration (measured over 1,000+ resolved Manifold markets):
+  Bucket      Crowd says  Actual YES rate  Bias
+    0– 10%     5%          1%            +4pp
+   ...
+   60– 70%    65%         47%            +18pp ← MOST BIASED
+   ...
+Use these corrections: if a market is at 65%, history says treat it
+as ~47% YES. Adjust your estimated_true_probability accordingly.
+
 Is this mispriced? Should we bet YES, NO, or skip?
 ```
 
@@ -217,8 +256,8 @@ Raw responses and full prompts are intentionally NOT logged — the model may ec
 - Max positions: 5 — **currently at max, bot is blocked from new trades until a position closes**
 
 Key methods:
-- `place_paper_bet(market_id, outcome, amount, probability)` — deducts from balance, saves to state
-- `resolve_market(market_id, outcome)` — settles a bet when a market closes, adds/removes from balance
+- `place_paper_bet(market_id, outcome, amount, probability, estimated_ev, ai_confidence, strategies)` — deducts from balance, saves to state. The last 3 params are optional calibration fields stored in the position record for later lookup.
+- `resolve_market(market_id, outcome)` — settles a bet, updates balance, and **writes a row to the `bet_outcomes` SQLite table** (`data/calibration.db`) with `estimated_ev`, `ai_confidence`, `actual_pnl`, and `ev_error = estimated_ev − actual_pnl`
 - `auto_resolve_markets()` — checks Manifold API for any markets that have resolved, settles them automatically
 - `get_performance_metrics()` — calculates win rate, P&L, profit factor, etc.
 
@@ -333,7 +372,15 @@ The live portfolio. Gitignored (runtime data). Current state: 6 open positions a
 Contains the last 24 hours of hourly research runs (schema_version 2). Each run has ~50-100 market recommendations with AI scores on the top 5. Bridge between research and trading.
 
 #### `auto_trades.json`
-Log of every trade the bot has actually executed. 6 trades total, last on 2026-04-03.
+Log of every trade the bot has executed. Every record includes `estimated_ev` (the AI's EV prediction at trade time), `ai_confidence`, and `strategies`. Used for the weekly EV accuracy report.
+
+#### `data/calibration.db` (gitignored)
+SQLite database with two tables:
+- `resolved_markets` — 1,121+ historical Manifold markets with `probability_close`, `outcome`, `category`
+- `bet_outcomes` — one row per resolved position: `estimated_ev`, `actual_pnl`, `ev_error`, `strategies`
+
+#### `data/calibration_table.json` (committed)
+Crowd bias correction table generated weekly by `analyze_calibration.py`. Loaded by `ai_analyzer.py` at import time and injected into every AI prompt. Key finding: **+18pp overconfidence in the 60-70% probability bucket**.
 
 #### `generate_report.py` / `generate_pdf.py`
 One-off scripts (hardcoded to server paths) that generate a human-readable PDF trading report using `reportlab`. Not part of the automated pipeline — run manually on the server for ad-hoc reporting.
@@ -376,24 +423,30 @@ All 6 open positions are NO bets at exactly 50% probability — payout of 2x, ba
 - ✅ Auto-fixing review agent (commits fixes directly to PR branch)
 - ✅ `per_market_timeout` enforcement via `concurrent.futures` (prevents hung Ollama stalling cron)
 - ✅ Distillation logging — every LLM call appended to `logs/llm_calls.jsonl` with CoT extraction and log rotation (PR #5, merged 2026-04-06)
+- ✅ 5 strategies with Kelly sizing, AI veto, recency boost, stale market pre-filter (PR #6)
+- ✅ Position resolution loop — `scripts/resolve_positions.py` + cron at :10 frees frozen slots
+- ✅ EV stored at trade time — `estimated_ev` in every `auto_trades.json` record and position record
+- ✅ **Calibration & feedback loop** (feature/calibration, 2026-04-07):
+  - `scripts/harvest_resolved.py` → 1,121 markets in `data/calibration.db`
+  - `scripts/analyze_calibration.py` → `data/calibration_table.json` with bucket + category breakdown
+  - `ai_analyzer.py` — calibration table injected into every AI prompt
+  - `paper_trader.py` — `bet_outcomes` table written on every market resolution
+  - `scripts/weekly_ev_report.py` — EV accuracy ratio by strategy + confidence band
+  - 2 new weekly crons on server (harvest Sundays, EV report Mondays)
 
 **Immediate blockers:**
-- 🔴 Close 2 stale positions on server (`6pAcuEd22A`, `yEcN9AzZ05`) — pre-AI NO bets at 50%, no signal. Bot is at 6/5 positions; blocked from new trades until these close. Edit `manifold_bot/paper_trading_state.json` on the server.
-- 🟡 Revert `MIN_CONFIDENCE` to 0.65 in `manifold_bot/config.py` — was changed to 0.60 by the risk-parameters PR. 4 tests in `tests/test_ai.py` are currently failing because of this. The tests are correct; the change was a bad call.
+- 🟡 Merge `feature/calibration` PR to main (all 30 tests passing)
+- 🟡 Bot at 10/10 positions — waiting for markets to auto-resolve via the `:10` cron
 
 **Next steps, in priority order:**
 
-**1. Calibration & feedback loop** — Harvest resolved markets from Manifold API, measure where crowd is systematically wrong by probability bucket, inject that context into AI prompts. Full plan in PLAN.md.
+**1. Smart position swap** — When positions are full, compare EV of open positions vs new opportunities. Propose swap via Telegram with `/approve` flow. Full spec in PLAN.md.
 
-**2. Avoid 50% markets** — Add a pre-filter: skip any market where probability is between 45-55%. No edge there — the crowd is saying "I don't know," and so is our strategy.
+**2. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
 
-**3. Smart position swap** — When positions are full, evaluate whether any existing position should be replaced by a higher-EV new opportunity. EV-based comparison with Telegram approval. Full spec in PLAN.md.
+**3. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
 
-**4. Real Telegram bot commands** — `/portfolio`, `/scan`, `/positions` — currently a placeholder that just prints to console.
-
-**5. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
-
-**6. SQLite storage** — Replace the flat JSON state files with a proper database.
+**4. SQLite storage** — Replace flat JSON state files with a proper database.
 
 ---
 
@@ -405,13 +458,19 @@ The bot doesn't run on your laptop. It runs on a server (Aleksi's homelab) insid
 Docker Container (Linux)
     └── OpenClaw (Node.js AI agent gateway)
             ├── Cron scheduler (built-in, not OS cron)
-            │       ├── :00 UTC → runs auto_research.py
-            │       ├── :15 UTC → runs auto_trader.py
-            │       └── 19:00 UTC → runs daily_summary.py
+            │       ├── every 4h :00 UTC  → runs auto_research.py
+            │       ├── hourly   :10 UTC  → runs resolve_positions.py
+            │       ├── hourly   :15 UTC  → runs auto_trader.py
+            │       ├── daily 19:00 UTC   → runs daily_summary.py
+            │       ├── Sundays  02:00    → runs harvest_resolved.py + analyze_calibration.py
+            │       └── Mondays  07:00    → runs weekly_ev_report.py
             ├── Telegram bot (@hackathon_26_bot)
             │       └── sends results to group -5240775171
             └── Git workspace (~/.openclaw/workspace/)
-                    └── This repo (checked out, pulled every run)
+                    ├── This repo (feature/calibration branch)
+                    └── data/calibration.db (SQLite, gitignored)
+                        ├── resolved_markets (1,121+ rows)
+                        └── bet_outcomes (written on each resolution)
 ```
 
 The scripts run inside the container's shell. OpenClaw executes them as shell commands (via its `coding` tools profile), reads stdout, and forwards summaries to Telegram.
@@ -420,4 +479,4 @@ The scripts run inside the container's shell. OpenClaw executes them as shell co
 
 ---
 
-*Last updated: 2026-04-06*
+*Last updated: 2026-04-07*

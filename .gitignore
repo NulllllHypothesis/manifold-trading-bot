@@ -22,6 +22,9 @@ manifold_bot/paper_trading_state.json
 # Memory logs (local session notes, not committed)
 memory/
 
+# Calibration database (SQLite binary — generated at runtime, never committed)
+data/*.db
+
 # Root-level script copies (stale duplicates — canonical copies are in automation/)
 /auto_research.py
 /auto_trader.py

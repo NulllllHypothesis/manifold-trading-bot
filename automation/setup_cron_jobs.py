@@ -162,6 +162,66 @@ def create_cron_jobs():
     }
     jobs.append(("daily-summary", summary_job))
 
+    # Job 5: Weekly Calibration Harvest (Sundays at 02:00 UTC)
+    # Fetches 2000+ resolved markets from Manifold and updates the calibration
+    # table — giving the AI fresh crowd-bias corrections every week.
+    harvest_job = {
+        "name": "Weekly Calibration Harvest",
+        "schedule": {
+            "kind": "cron",
+            "expr": "0 2 * * 0",   # Sundays at 02:00 UTC
+            "tz": "UTC"
+        },
+        "payload": {
+            "kind": "exec",
+            "command": "bash",
+            "args": [
+                "-c",
+                "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
+            ],
+            "timeoutSeconds": 300
+        },
+        "sessionTarget": "isolated",
+        "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": TELEGRAM_CHANNEL_ID,
+            "bestEffort": True
+        },
+        "enabled": True
+    }
+    jobs.append(("weekly-harvest", harvest_job))
+
+    # Job 6: Weekly EV Accuracy Report (Mondays at 07:00 UTC)
+    # Queries bet_outcomes table, computes estimated_ev vs actual_pnl,
+    # and sends breakdown by strategy and confidence band to Telegram.
+    ev_report_job = {
+        "name": "Weekly EV Accuracy Report",
+        "schedule": {
+            "kind": "cron",
+            "expr": "0 7 * * 1",   # Mondays at 07:00 UTC
+            "tz": "UTC"
+        },
+        "payload": {
+            "kind": "exec",
+            "command": "bash",
+            "args": [
+                "-c",
+                "cd /home/hackathon/.openclaw/workspace && python3 scripts/weekly_ev_report.py --telegram"
+            ],
+            "timeoutSeconds": 60
+        },
+        "sessionTarget": "isolated",
+        "delivery": {
+            "mode": "announce",
+            "channel": "telegram",
+            "to": TELEGRAM_CHANNEL_ID,
+            "bestEffort": True
+        },
+        "enabled": True
+    }
+    jobs.append(("weekly-ev-report", ev_report_job))
+
     return jobs
 
 def save_jobs_to_file(jobs):

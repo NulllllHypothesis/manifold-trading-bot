@@ -1,9 +1,7 @@
 name: Agent Review
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:  # manual trigger only — auto-review disabled
 
 jobs:
   claude-review:

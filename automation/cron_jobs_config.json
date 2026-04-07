@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-04-06T10:47:25.618083",
+  "created_at": "2026-04-07T11:47:57.279638",
   "jobs": {
     "market-research-hourly": {
       "name": "Manifold Market Research",
@@ -81,6 +81,56 @@
         "message": "Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py",
         "model": "deepseek/deepseek-chat",
         "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
+    "weekly-harvest": {
+      "name": "Weekly Calibration Harvest",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 2 * * 0",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py"
+        ],
+        "timeoutSeconds": 300
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "announce",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
+    },
+    "weekly-ev-report": {
+      "name": "Weekly EV Accuracy Report",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 7 * * 1",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/weekly_ev_report.py --telegram"
+        ],
+        "timeoutSeconds": 60
       },
       "sessionTarget": "isolated",
       "delivery": {
