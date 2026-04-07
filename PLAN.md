@@ -102,7 +102,8 @@ Full rules in `AGENTS.md`.
 - **Open positions:** 10/10 (bot blocked — waiting for markets to resolve on Manifold)
 - **Auto-trader confidence threshold:** 65%
 - **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`)
-- **Active branch:** `feature/calibration` (all 30 tests passing — pending PR to main)
+- **Active branch:** `main` (feature/calibration merged — PR #8, 76 tests passing)
+- **Agent auto-reviewer:** DISABLED — caused file truncation bugs on 3/4 PRs. Human review only.
 
 ---
 
@@ -204,7 +205,7 @@ Confidence measures how sure the AI is. EV measures how much money we expect to 
 
 ---
 
-### 🟡 Medium Priority — Smart Position Swap (Human-in-the-Loop)
+### 🔴 Next Feature — Smart Position Swap (Human-in-the-Loop)
 
 When all 5 positions are full, the bot is currently frozen. This feature turns `max_positions` from a hard block into a dynamic portfolio manager — but keeps humans in control of every swap.
 
@@ -235,6 +236,50 @@ When all 5 positions are full, the bot is currently frozen. This feature turns `
 - [ ] `scripts/position_swap_checker.py` — standalone script that runs the swap logic
 - [ ] Wire into cron (new job or extend existing trading cron)
 - [ ] `pending_swap.json` flag file checked by OpenClaw before executing
+
+**Implementation plan:**
+
+1. `paper_trader.py` — add `entry_probability` and `entry_confidence` to the trade record in `place_paper_bet()`. One line. No schema migration needed (new fields just won't exist on old records — handle gracefully).
+
+2. `scripts/position_swap_checker.py` — new script:
+   ```
+   for each OPEN position in paper_trading_state.json:
+       current_prob = api.get_market(market_id)['probability']
+       unrealised_pnl = estimated_move_pnl(entry_prob, current_prob, outcome, amount)
+       current_ev = compute_ev(current_prob, entry_outcome, amount, ai_prob=None)
+       # mark position as weak if: moving against us AND current_ev < 0
+   
+   for each recommendation in market_research.json (confidence >= MIN_CONFIDENCE):
+       new_ev = recommendation['estimated_ev']
+       if new_ev > weakest_position.current_ev:
+           write pending_swap.json
+           send Telegram message
+           break  # one proposal at a time
+   ```
+
+3. `pending_swap.json` — written by checker, read by a new cron. Format:
+   ```json
+   {
+     "close_market_id": "...",
+     "close_reason": "EV -$4.20, market moved against us",
+     "open_market_id": "...",
+     "open_recommendation": {"confidence": 0.81, "estimated_ev": 12.50, ...},
+     "proposed_at": "2026-04-07T19:00:00",
+     "status": "pending"  // → "approved" | "rejected" | "expired"
+   }
+   ```
+
+4. Telegram message format:
+   > ♻️ **Position Swap Proposal**
+   > Close: NO on "Will X happen?" — entered 50%, now 72%, unrealised -$8
+   > Open: YES on "Will Y happen?" — AI 81% confidence, EV +$12.50
+   > Reply `/approve` to execute, `/skip` to dismiss.
+
+5. `/approve` handler — for now: human SSHes in and runs `python3 scripts/execute_swap.py`. Later: OpenClaw skill.
+
+6. New cron job `position-swap-check` at `:40` (after trading at `:20`, before next research at `:00`).
+
+**Branch:** `feature/smart-swap` off current `main`
 
 > Depends on Real Telegram Bot below for the `/approve` command to work interactively.
 > Can be partially built without it — bot posts the message, human manually runs a close script.
@@ -335,7 +380,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Cron timeout fix | ✅ Done | `max_markets` 5→3, worst case 270s < 300s limit |
 | Close open positions | 🔄 In Progress | Bot at 10/10 positions — auto-resolver will free slots as markets settle |
 | Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
-| Smart position swap | ❌ Not started | EV-based swap with Telegram approval |
+| Smart position swap | 🔴 Next | EV-based swap with Telegram approval — planned, branch: feature/smart-swap |
 | Telegram bot commands | ❌ Not started | Placeholder only right now |
 | Web dashboard | ❌ Not started | |
 | SQLite storage | ❌ Not started | |
