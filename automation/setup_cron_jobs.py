@@ -2,16 +2,20 @@
 """
 Setup cron jobs for automated trading system.
 This creates OpenClaw cron jobs for:
-1. Hourly market research
+1. Hourly market research (swap check runs inside this, not as a separate job)
 2. Hourly position resolution (after research, before trading)
 3. Hourly trading (after research and resolution)
 4. Daily summary report
+5. Weekly calibration harvest
+6. Weekly EV accuracy report
 
 Schedule per hour:
-  :00 - Market Research
+  :00 - Market Research (includes swap check at end if positions full)
   :10 - Position Resolution (frees slots before trading)
   :20 - Auto Trading (uses freed slots from resolution)
-  :40 - Position Swap Check (proposes Telegram swap if positions full + losing)
+  19:00 daily  - Daily Summary Report
+  Sun 02:00    - Weekly Calibration Harvest
+  Mon 07:00    - Weekly EV Accuracy Report
 """
 
 import sys
@@ -164,37 +168,13 @@ def create_cron_jobs():
     }
     jobs.append(("daily-summary", summary_job))
 
-    # Job 5: Position Swap Check (at :40 of every hour)
-    # Runs after auto-trading (:20) to check if any losing position should be
-    # swapped for a better opportunity.  Fully deterministic — uses exec (no LLM).
-    swap_check_job = {
-        "name": "Manifold Position Swap Check",
-        "schedule": {
-            "kind": "cron",
-            "expr": "40 * * * *",  # Every hour at minute 40
-            "tz": "UTC"
-        },
-        "payload": {
-            "kind": "exec",
-            "command": "bash",
-            "args": [
-                "-c",
-                "cd /home/hackathon/.openclaw/workspace && git fetch origin --quiet && git checkout main --quiet && git pull origin main --quiet && python3 scripts/position_swap_checker.py"
-            ],
-            "timeoutSeconds": 120
-        },
-        "sessionTarget": "isolated",
-        "delivery": {
-            "mode": "announce",
-            "channel": "telegram",
-            "to": TELEGRAM_CHANNEL_ID,
-            "bestEffort": True
-        },
-        "enabled": True
-    }
-    jobs.append(("position-swap-check", swap_check_job))
+    # NOTE: Position swap check is intentionally NOT a separate cron job.
+    # run_swap_check() is called directly by auto_research.py at the end of
+    # each hourly research run. This ensures swaps are only evaluated when
+    # fresh opportunity data exists — not on a blind timer. The :40 standalone
+    # cron was removed to prevent unnecessary API calls and Telegram noise.
 
-    # Job 6: Weekly Calibration Harvest (Sundays at 02:00 UTC)
+    # Job 5: Weekly Calibration Harvest (Sundays at 02:00 UTC)
     # Fetches 2000+ resolved markets from Manifold and updates the calibration
     # table — giving the AI fresh crowd-bias corrections every week.
     harvest_job = {
@@ -278,12 +258,13 @@ def print_setup_instructions(jobs):
     print("CRON JOB SETUP INSTRUCTIONS")
     print("="*60)
 
-    print("\n📋 JOB SCHEDULE (all times UTC, repeating every hour):")
-    print("   :00 - Market Research")
-    print("   :10 - Position Resolution (frees slots before trading)")
-    print("   :20 - Auto Trading (uses freed slots from resolution)")
-    print("   :40 - Position Swap Check (proposes swap via Telegram if positions full)")
-    print("   19:00 daily - Daily Summary Report")
+    print("\n📋 JOB SCHEDULE (all times UTC):")
+    print("   :00  - Market Research (swap check runs inside this)")
+    print("   :10  - Position Resolution (frees slots before trading)")
+    print("   :20  - Auto Trading (uses freed slots from resolution)")
+    print("   19:00 daily  - Daily Summary Report")
+    print("   Sun 02:00    - Weekly Calibration Harvest")
+    print("   Mon 07:00    - Weekly EV Accuracy Report")
     print()
     for job_id, job_def in jobs:
         name = job_def.get("name", job_id)

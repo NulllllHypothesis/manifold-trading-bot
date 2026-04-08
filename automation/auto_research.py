@@ -22,6 +22,7 @@ from manifold_bot.strategies import TradingStrategies
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE
+from scripts.position_swap_checker import run_swap_check
 
 # Single source of truth for the trading threshold — imported from config.py.
 # auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
@@ -503,6 +504,13 @@ def main():
     # research would skip, then the trader at :20 had stale recommendations,
     # and position_swap_checker at :40 had no estimated_ev to rank swaps with.
     recommendations = researcher.run_hourly_research()
+
+    # Trigger swap check immediately after research completes.
+    # This replaces the standalone :40 cron job — swaps are only evaluated
+    # when fresh research exists, not on a blind timer. run_swap_check() is
+    # a no-op when positions are not full or no qualifying pairs are found.
+    print(f"\n--- Swap check (triggered by research) ---")
+    run_swap_check()
 
     # Return number of recommendations for cron job monitoring
     return len(recommendations)
