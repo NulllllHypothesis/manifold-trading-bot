@@ -16,9 +16,11 @@ and forwards it to Telegram) AND sends it directly via the Bot API so it
 arrives even if the LLM intermediary is slow.
 
 Commands:
-    portfolio  — balance, P&L, win rate summary
-    positions  — list all open positions with entry vs current price
-    scan       — top 5 opportunities from latest market_research.json
+    portfolio       — balance, P&L, win rate summary
+    positions       — list all open positions with entry vs current price
+    scan            — top 5 opportunities from latest market_research.json
+    autotrader-on   — remove flag file, resume automated trading
+    autotrader-off  — create flag file, pause automated trading
 """
 
 import json
@@ -33,8 +35,9 @@ from automation.send_telegram import send_message
 
 # ── File paths ─────────────────────────────────────────────────────────────────
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATE_FILE   = os.path.join(_ROOT, "manifold_bot", "paper_trading_state.json")
+_STATE_FILE    = os.path.join(_ROOT, "manifold_bot", "paper_trading_state.json")
 _RESEARCH_FILE = os.path.join(_ROOT, "market_research.json")
+_FLAG_FILE     = os.path.join(_ROOT, "autotrader_disabled.flag")
 
 
 def _load_state() -> dict:
@@ -180,17 +183,35 @@ def cmd_scan() -> str:
     return msg.rstrip()
 
 
+# ── /autotrader on | off ───────────────────────────────────────────────────────
+
+def cmd_autotrader_off() -> str:
+    with open(_FLAG_FILE, "w") as f:
+        f.write(f"Disabled at {datetime.now(timezone.utc).isoformat()}\n")
+    return "🚫 *Auto-trader DISABLED*\nNo new trades will be placed until re-enabled.\nUse `/autotrader on` to resume."
+
+
+def cmd_autotrader_on() -> str:
+    if os.path.exists(_FLAG_FILE):
+        os.remove(_FLAG_FILE)
+        return "✅ *Auto-trader ENABLED*\nTrading will resume on the next hourly cycle."
+    return "✅ *Auto-trader is already ENABLED* (flag file was not present)."
+
+
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
 _COMMANDS = {
-    "portfolio": cmd_portfolio,
-    "positions": cmd_positions,
-    "scan":      cmd_scan,
+    "portfolio":      cmd_portfolio,
+    "positions":      cmd_positions,
+    "scan":           cmd_scan,
+    "autotrader-on":  cmd_autotrader_on,
+    "autotrader-off": cmd_autotrader_off,
 }
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in _COMMANDS:
-        print(f"Usage: python3 automation/telegram_bot.py [{' | '.join(_COMMANDS)}]")
+        cmds = " | ".join(_COMMANDS)
+        print(f"Usage: python3 automation/telegram_bot.py [{cmds}]")
         return 1
 
     cmd = sys.argv[1]

@@ -13,6 +13,25 @@ from typing import Dict, List, Optional, Tuple
 from .manifold_api import api_client
 from .config import INITIAL_BALANCE, MIN_BET_AMOUNT, MAX_BET_AMOUNT
 
+def _notify_resolution(market_id: str, question: str, outcome: str, our_bet: str, total_pnl: float, new_balance: float) -> None:
+    """Send a Telegram notification when a market resolves. Never raises — resolution must not fail due to Telegram."""
+    try:
+        import sys, os
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from automation.send_telegram import send_message
+        won = our_bet == outcome
+        emoji = "✅" if won else "❌"
+        pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+        msg = (
+            f"{emoji} *Market Resolved*\n"
+            f"{question[:80]}\n\n"
+            f"Resolved: *{outcome}* | Our bet: *{our_bet}*\n"
+            f"P&L: *{pnl_str}* | Balance: ${new_balance:.2f}"
+        )
+        send_message(msg)
+    except Exception:
+        pass  # never block resolution
+
 # SQLite database — shared with calibration scripts
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DB_PATH = _PROJECT_ROOT / "data" / "calibration.db"
@@ -214,16 +233,18 @@ class PaperTrader:
         self.save_state()
         return True
     
-    def resolve_market(self, market_id: str, outcome: str):
+    def resolve_market(self, market_id: str, outcome: str, question: str = ""):
         """
         Resolve a market and calculate P&L.
 
         Args:
             market_id: Market to resolve
-            outcome: Actual outcome ("YES" or "NO")
+            outcome:   Actual outcome ("YES" or "NO")
+            question:  Human-readable question text for Telegram notification (optional)
 
         Side-effect: appends one row per resolved position to the bet_outcomes
         SQLite table in data/calibration.db for EV calibration tracking.
+        Sends a Telegram notification per resolved market (best-effort, never raises).
         """
         if market_id not in self.positions:
             print(f"No positions in market {market_id}")
@@ -276,11 +297,26 @@ class PaperTrader:
         
         # Update balance
         self.balance += total_pnl
-        
+
         print(f"Market {market_id} resolved as {outcome}")
         print(f"Total P&L: ${total_pnl:.2f}")
         print(f"New balance: ${self.balance:.2f}")
-        
+
+        # Notify Telegram — use bet direction of first resolved trade as "our bet"
+        if updated_trade_ids:
+            our_bet = next(
+                (p['outcome'] for p in positions if p.get('trade_id') in updated_trade_ids),
+                "?"
+            )
+            _notify_resolution(
+                market_id=market_id,
+                question=question or market_id,
+                outcome=outcome,
+                our_bet=our_bet,
+                total_pnl=total_pnl,
+                new_balance=self.balance,
+            )
+
         self.save_state()
     
 
@@ -364,8 +400,9 @@ class PaperTrader:
                 if market.get('isResolved', False):
                     resolution = market.get('resolution', '')
                     if resolution in ['YES', 'NO']:
-                        print(f"Auto-resolving {market.get('question', market_id)[:50]}... as {resolution}")
-                        self.resolve_market(market_id, resolution)
+                        q = market.get('question', market_id)
+                        print(f"Auto-resolving {q[:50]}... as {resolution}")
+                        self.resolve_market(market_id, resolution, question=q)
                         resolved_count += 1
             except Exception as e:
                 print(f"Error checking market {market_id}: {e}")

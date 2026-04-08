@@ -395,8 +395,16 @@ class AutoTrader:
 
         return trades_executed
 
+_FLAG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "autotrader_disabled.flag")
+
+
 def main():
     """Main function"""
+    if os.path.exists(_FLAG_FILE):
+        print("🚫 Auto-trader is DISABLED (autotrader_disabled.flag exists). No trades will be placed.")
+        print("   To re-enable: /autotrader on  (or delete autotrader_disabled.flag)")
+        return 0
+
     trader = AutoTrader()
     trades_executed = trader.run_trading_cycle()
 
