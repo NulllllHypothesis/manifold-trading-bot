@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.config import INITIAL_BALANCE
+from manifold_bot.strategies import _infer_market_category
 from automation.send_telegram import send_message as _tg_send
 
 try:
@@ -189,6 +190,18 @@ class DailySummary:
         metrics['total_open_positions'] = len(open_positions)
         metrics['total_invested'] = sum(p['total_invested'] for p in open_positions)
 
+        # Category breakdown of open positions
+        category_breakdown = {}
+        for market_id, trades in positions.items():
+            open_trades = [t for t in trades if t.get('status') == 'OPEN']
+            if open_trades:
+                # Use stored category from first open trade, fallback to inference
+                trade = open_trades[0]
+                cat = trade.get('category') or _infer_market_category(trade.get('question', market_id))
+                category_breakdown[cat] = category_breakdown.get(cat, 0) + 1
+        if category_breakdown:
+            metrics['category_breakdown'] = category_breakdown
+
         # Research activity
         research = data.get('research', {})
         research_history = research.get('history', [])
@@ -261,6 +274,12 @@ class DailySummary:
             for i, pos in enumerate(metrics['open_positions'][:3], 1):
                 summary += f"{i}. Market {pos['market_id'][:8]}...\n"
                 summary += f"   ${pos['total_invested']:.2f} ({pos['trades']} trades)\n"
+
+        if metrics.get('category_breakdown'):
+            summary += "\n🗂 *BY CATEGORY*\n"
+            for cat, count in sorted(metrics['category_breakdown'].items(), key=lambda x: -x[1]):
+                bar = "█" * count
+                summary += f"  {cat:<12} {bar} {count}\n"
 
         summary += "\n"
 

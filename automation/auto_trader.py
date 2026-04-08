@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS_PER_CATEGORY
+from manifold_bot.strategies import _infer_market_category
 
 class AutoTrader:
     """Automated trading with risk management"""
@@ -106,6 +107,23 @@ class AutoTrader:
 
         if open_positions >= self.max_positions:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
+            return False
+
+        # Check category exposure cap — prevent over-concentration in one topic.
+        # Category comes from the research recommendation; fall back to inference
+        # from the question text when not present (e.g. manual test calls).
+        rec_category = recommendation.get('category') or _infer_market_category(
+            recommendation.get('question', '')
+        )
+        open_in_category = sum(
+            1
+            for pos_list in self.trader.positions.values()
+            for pos in pos_list
+            if pos.get('status') == 'OPEN'
+            and (pos.get('category') or _infer_market_category(pos.get('question', ''))) == rec_category
+        )
+        if open_in_category >= MAX_POSITIONS_PER_CATEGORY:
+            print(f"  Category cap reached: {rec_category} has {open_in_category}/{MAX_POSITIONS_PER_CATEGORY} open positions")
             return False
 
         # Check market liquidity
@@ -274,6 +292,8 @@ class AutoTrader:
             ai_confidence=recommendation.get('ai_confidence', confidence),
             ai_estimated_probability=ai_prob,
             strategies=recommendation.get('strategies', []),
+            category=recommendation.get('category'),
+            question=recommendation.get('question'),
         )
 
         if success:

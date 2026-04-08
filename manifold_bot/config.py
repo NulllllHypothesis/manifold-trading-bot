@@ -45,3 +45,8 @@ MAX_BET_AMOUNT = 100
 #   auto_research.py: _STAT_BOOST_FLOOR = 0.65                  (hardcoded — decoupled so changing MIN_CONFIDENCE doesn't shift the floor unexpectedly)
 #   auto_research.py: _MAX_AI_BOOST    = MIN_CONFIDENCE + 0.10  (0.75 — cap for exactly-floor markets)
 MIN_CONFIDENCE = 0.65
+
+# Maximum open positions allowed per market category (crypto/politics/ai_tech/etc).
+# Prevents the bot from going all-in on one topic during a volatile week.
+# 3 out of 10 total slots per category means no single category can dominate.
+MAX_POSITIONS_PER_CATEGORY = 3

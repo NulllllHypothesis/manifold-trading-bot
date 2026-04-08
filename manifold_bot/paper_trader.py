@@ -185,7 +185,9 @@ class PaperTrader:
                        estimated_ev: Optional[float] = None,
                        ai_confidence: Optional[float] = None,
                        ai_estimated_probability: Optional[float] = None,
-                       strategies: Optional[List[str]] = None) -> bool:
+                       strategies: Optional[List[str]] = None,
+                       category: Optional[str] = None,
+                       question: Optional[str] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
@@ -252,6 +254,9 @@ class PaperTrader:
             'ai_confidence': ai_confidence,
             'ai_estimated_probability': ai_estimated_probability,
             'strategies': strategies,
+            # Category and question stored for exposure-cap counting and daily summary
+            'category': category or 'other',
+            'question': question or market_id,
         }
         
         # Update balance and positions

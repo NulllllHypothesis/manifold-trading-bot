@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time as _time
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.strategies import TradingStrategies
+from manifold_bot.strategies import TradingStrategies, _infer_market_category
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE
@@ -213,6 +213,7 @@ class MarketResearcher:
                 recommendation = {
                     'market_id': market_id,
                     'question': question,
+                    'category': _infer_market_category(question),
                     'probability': probability,
                     'volume': volume,
                     'volume24h': market.get('volume24Hours') or 0,
