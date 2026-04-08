@@ -27,14 +27,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_DIR  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "calibration.db")
 
+# ── Minimum-sample gates ────────────────────────────────────────────────────────
+# Never adapt the system from tiny samples. These constants gate every
+# adaptation decision: strategy weights, category caps, Kelly scaling.
+# Below the gate, the relevant report section is shown but flagged as
+# "insufficient data — for reference only, not used for adaptation".
+MIN_SAMPLES_GLOBAL       = 20   # overall EV accuracy — below this, no global Kelly adjustment
+MIN_SAMPLES_PER_STRATEGY = 10   # per-strategy reliability weight — below this, keep weight = 1.0
+MIN_SAMPLES_PER_CATEGORY  = 8   # per-category accuracy — below this, keep default cap
 
-def _fetch_outcomes(days: int = None) -> list[dict]:
-    """Load bet_outcomes rows, optionally filtered to the last N days."""
+
+def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
+    """
+    Load bet_outcomes rows, filtered by era and optionally by recency.
+
+    Args:
+        days: If set, only return rows from the last N days.
+        era:  'post_ev_fix' (default) — only trusted rows where EV pipeline was
+              working correctly.  Pass None to load all rows (e.g. for health checks).
+    """
     if not os.path.exists(DB_PATH):
         return []
 
     conn = sqlite3.connect(DB_PATH)
-    # Check table exists
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='bet_outcomes'"
     ).fetchone()
@@ -42,30 +57,96 @@ def _fetch_outcomes(days: int = None) -> list[dict]:
         conn.close()
         return []
 
+    conditions = []
+    params: list = []
+
+    if era:
+        conditions.append("(era = ? OR (era IS NULL AND ? = 'pre_ev_fix'))")
+        params.extend([era, era])
+
     if days:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-        rows = conn.execute("""
-            SELECT market_id, our_recommendation, amount, probability,
-                   estimated_ev, ai_confidence, strategies,
-                   market_resolution, actual_pnl, ev_error, resolved_at
-            FROM bet_outcomes
-            WHERE resolved_at >= ?
-            ORDER BY resolved_at
-        """, (cutoff,)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT market_id, our_recommendation, amount, probability,
-                   estimated_ev, ai_confidence, strategies,
-                   market_resolution, actual_pnl, ev_error, resolved_at
-            FROM bet_outcomes
-            ORDER BY resolved_at
-        """).fetchall()
+        conditions.append("resolved_at >= ?")
+        params.append(cutoff)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    rows = conn.execute(f"""
+        SELECT market_id, our_recommendation, amount, probability,
+               estimated_ev, ai_confidence, ai_estimated_probability, strategies,
+               market_resolution, actual_pnl, ev_error, era, resolved_at
+        FROM bet_outcomes
+        {where}
+        ORDER BY resolved_at
+    """, params).fetchall()
     conn.close()
 
     cols = ['market_id', 'our_recommendation', 'amount', 'probability',
-            'estimated_ev', 'ai_confidence', 'strategies',
-            'market_resolution', 'actual_pnl', 'ev_error', 'resolved_at']
+            'estimated_ev', 'ai_confidence', 'ai_estimated_probability', 'strategies',
+            'market_resolution', 'actual_pnl', 'ev_error', 'era', 'resolved_at']
     return [dict(zip(cols, row)) for row in rows]
+
+
+def _direction_accuracy_section(outcomes: list[dict]) -> str:
+    """
+    Compute direction accuracy: did we bet the right way regardless of sizing?
+
+    This is the simplest calibration check — no EV math needed, works even
+    without estimated_ev.  A strategy with direction accuracy below 50% has
+    literal negative edge.
+
+    Also computes per-strategy direction accuracy to surface which strategies
+    are calling direction correctly vs. just getting lucky on sizing.
+    """
+    if not outcomes:
+        return "No resolved trades."
+
+    total = len(outcomes)
+    correct = sum(
+        1 for o in outcomes
+        if o.get("our_recommendation") == o.get("market_resolution")
+    )
+    acc = correct / total
+
+    lines = [f"Direction correct: {correct}/{total} ({acc*100:.0f}%)"]
+
+    gate_note = ""
+    if total < MIN_SAMPLES_GLOBAL:
+        gate_note = f"  ⚠️  {total} trades < {MIN_SAMPLES_GLOBAL} min — reference only, not used for adaptation"
+        lines.append(gate_note)
+    elif acc >= 0.60:
+        lines.append("  → Strong direction signal — strategies finding real edge")
+    elif acc >= 0.50:
+        lines.append("  → Marginal edge — monitor over more trades")
+    else:
+        lines.append("  → Below 50% — strategies calling direction WRONG on average")
+
+    # Per-strategy breakdown (only show strategies with >= 3 trades)
+    by_strategy: dict[str, list[bool]] = {}
+    for o in outcomes:
+        raw = o.get("strategies")
+        try:
+            strats = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            strats = [str(raw)] if raw else []
+        correct_call = o.get("our_recommendation") == o.get("market_resolution")
+        for s in (strats or ["unknown"]):
+            by_strategy.setdefault(s, []).append(correct_call)
+
+    strategy_lines = []
+    for strat, calls in sorted(by_strategy.items(), key=lambda x: len(x[1]), reverse=True):
+        if len(calls) < 3:
+            continue
+        strat_acc = sum(calls) / len(calls)
+        flag = "✅" if strat_acc >= 0.60 else ("⚠️" if strat_acc >= 0.50 else "❌")
+        strategy_lines.append(
+            f"  {flag} {strat:<35} {sum(calls)}/{len(calls)} correct ({strat_acc*100:.0f}%)"
+        )
+    if strategy_lines:
+        lines.append("\nBy strategy (≥3 trades):")
+        lines.extend(strategy_lines)
+
+    return "\n".join(lines)
 
 
 def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
@@ -114,10 +195,12 @@ def _ev_accuracy_section(outcomes: list[dict]) -> tuple[str, dict]:
     lines.append(f"  Avg actual P&L:    ${avg_pnl:+.2f}")
     if ratio is not None:
         lines.append(f"  EV accuracy ratio: {ratio:.2f}×")
-        if   ratio >= 0.85:  lines.append("  → Model well-calibrated — trust Kelly sizing")
-        elif ratio >= 0.50:  lines.append("  → Model overestimates edge moderately — monitor")
-        elif ratio >= 0.20:  lines.append("  → Model significantly overestimates — scale down bets")
-        else:                lines.append("  → Model severely miscalibrated — review AI prompts")
+        if ev_count < MIN_SAMPLES_GLOBAL:
+            lines.append(f"  ⚠️  {ev_count} EV trades < {MIN_SAMPLES_GLOBAL} min — reference only, not used for Kelly adjustment")
+        elif ratio >= 0.85:  lines.append("  → Well-calibrated — trust Kelly sizing")
+        elif ratio >= 0.50:  lines.append("  → Overestimates edge moderately — monitor")
+        elif ratio >= 0.20:  lines.append("  → Significantly overestimates — consider scaling down")
+        else:                lines.append("  → Severely miscalibrated — review AI prompts")
     else:
         lines.append(f"  EV accuracy ratio: N/A (near-zero EV)")
 
@@ -217,11 +300,16 @@ def generate_report(days: int = 7, telegram: bool = False) -> str:
     """
     Generate the full weekly EV report. Returns formatted text.
 
+    Only uses post_ev_fix era rows (where EV pipeline was working correctly).
+    Pre-era rows are counted and noted but excluded from all accuracy calculations.
+
     Args:
         days:     How many days back to look (None = all time)
         telegram: If True, also write to telegram_weekly_ev.txt
     """
-    outcomes = _fetch_outcomes(days=days)
+    outcomes     = _fetch_outcomes(days=days, era="post_ev_fix")
+    all_outcomes = _fetch_outcomes(days=days, era=None)
+    pre_era_count = len(all_outcomes) - len(outcomes)
     period   = f"last {days} days" if days else "all time"
 
     sep = "=" * 55
@@ -232,16 +320,24 @@ def generate_report(days: int = 7, telegram: bool = False) -> str:
         sep,
     ]
 
+    if pre_era_count > 0:
+        lines.append(f"\n(Excluded {pre_era_count} pre-EV-fix row(s) from calculations)")
+
     if not outcomes:
         if not os.path.exists(DB_PATH):
             lines.append("\nbet_outcomes DB not found yet.")
             lines.append("Markets need to resolve before this report has data.")
         else:
-            lines.append(f"\nNo resolved trades in the {period}.")
+            lines.append(f"\nNo post-EV-fix resolved trades in the {period}.")
             lines.append("Markets are still open — check back after they resolve.")
         report = "\n".join(lines)
         print(report)
         return report
+
+    # Direction accuracy (no EV needed — works on all resolved trades)
+    lines.append("\nDIRECTION ACCURACY")
+    lines.append("─" * 40)
+    lines.append(_direction_accuracy_section(outcomes))
 
     # Overall EV accuracy
     lines.append("\nOVERALL EV ACCURACY")

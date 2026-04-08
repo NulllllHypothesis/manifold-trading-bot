@@ -5,6 +5,7 @@ Generates a comprehensive report and sends it to Telegram.
 """
 
 import json
+import sqlite3
 import sys
 import os
 from datetime import datetime, timedelta, timezone
@@ -19,9 +20,74 @@ from manifold_bot.config import INITIAL_BALANCE
 from automation.send_telegram import send_message as _tg_send
 
 try:
-    from scripts.weekly_ev_report import generate_report as _ev_report
+    from scripts.weekly_ev_report import generate_report as _ev_report, _fetch_outcomes as _fetch_bet_outcomes
 except Exception:
     _ev_report = None
+    _fetch_bet_outcomes = None
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DB_PATH = os.path.join(_ROOT, "data", "calibration.db")
+_CAL_TABLE = os.path.join(_ROOT, "data", "calibration_table.json")
+
+
+def _calibration_health() -> str:
+    """
+    Return a compact 5-line calibration health summary for the daily report.
+
+    Covers:
+      - bet_outcomes row counts (total / post-era / with-EV)
+      - EV coverage rate
+      - Days since last calibration harvest
+    """
+    lines = []
+
+    # ── bet_outcomes health ────────────────────────────────────────────────────
+    if not os.path.exists(_DB_PATH):
+        lines.append("_Calibration DB not found — harvest not yet run_")
+        return "\n".join(lines)
+
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        total = conn.execute("SELECT COUNT(*) FROM bet_outcomes").fetchone()[0]
+        post_era = conn.execute(
+            "SELECT COUNT(*) FROM bet_outcomes WHERE era = 'post_ev_fix'"
+        ).fetchone()[0]
+        with_ev = conn.execute(
+            "SELECT COUNT(*) FROM bet_outcomes WHERE era = 'post_ev_fix' AND estimated_ev IS NOT NULL"
+        ).fetchone()[0]
+        conn.close()
+    except Exception:
+        lines.append("_bet_outcomes table not readable_")
+        return "\n".join(lines)
+
+    ev_pct = f"{with_ev/post_era*100:.0f}%" if post_era > 0 else "n/a"
+    lines.append(f"Resolved trades: {total} total | {post_era} post-fix | {with_ev} with EV ({ev_pct} coverage)")
+
+    # ── calibration_table.json freshness ──────────────────────────────────────
+    if os.path.exists(_CAL_TABLE):
+        try:
+            ct = json.load(open(_CAL_TABLE))
+            gen_at = ct.get("generated_at", "")
+            if gen_at:
+                gen_dt = datetime.fromisoformat(gen_at.replace("Z", "+00:00"))
+                days_old = (datetime.now(timezone.utc) - gen_dt).days
+                freshness = "✅ fresh" if days_old <= 7 else f"⚠️ {days_old}d old"
+                lines.append(f"Crowd calibration table: {freshness} ({ct.get('buckets', [{}])[0].get('sample_size', 0) if ct.get('buckets') else '?'} in worst bucket)")
+        except Exception:
+            lines.append("Crowd calibration table: unreadable")
+    else:
+        lines.append("Crowd calibration table: not found")
+
+    # ── learning gate status ───────────────────────────────────────────────────
+    from scripts.weekly_ev_report import MIN_SAMPLES_GLOBAL
+    if post_era == 0:
+        lines.append(f"Learning gate: waiting for first post-fix resolution (need {MIN_SAMPLES_GLOBAL} for Kelly adjustment)")
+    elif post_era < MIN_SAMPLES_GLOBAL:
+        lines.append(f"Learning gate: {post_era}/{MIN_SAMPLES_GLOBAL} — accumulating (no adaptation yet)")
+    else:
+        lines.append(f"Learning gate: ✅ {post_era} trades — adaptation enabled")
+
+    return "\n".join(lines)
 
 class DailySummary:
     """Generate daily trading summary"""
@@ -206,6 +272,15 @@ class DailySummary:
             summary += f"Avg Opportunities: {metrics['avg_opportunities_per_research']:.1f}\n"
 
         summary += f"Auto Trades (24h): {metrics['auto_trades_24h']}\n"
+
+        summary += "\n"
+
+        # Calibration health (every day — small, always useful)
+        summary += "🔬 *CALIBRATION HEALTH*\n"
+        try:
+            summary += _calibration_health() + "\n"
+        except Exception as e:
+            summary += f"_(calibration health unavailable: {e})_\n"
 
         summary += "\n"
 

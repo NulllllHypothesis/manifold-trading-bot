@@ -272,6 +272,7 @@ class AutoTrader:
             probability=current_prob,
             estimated_ev=estimated_ev,
             ai_confidence=recommendation.get('ai_confidence', confidence),
+            ai_estimated_probability=ai_prob,
             strategies=recommendation.get('strategies', []),
         )
 

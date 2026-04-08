@@ -36,31 +36,57 @@ def _notify_resolution(market_id: str, question: str, outcome: str, our_bet: str
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DB_PATH = _PROJECT_ROOT / "data" / "calibration.db"
 
+# Trades placed on/after this date have ai_estimated_probability and estimated_ev
+# stored correctly.  Rows before this date are excluded from EV-accuracy learning.
+_POST_EV_FIX_DATE = "2026-04-07"
+
 
 def _init_bet_outcomes_db() -> None:
-    """Create bet_outcomes table if it doesn't exist yet."""
+    """Create bet_outcomes table if it doesn't exist, and run schema migrations."""
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bet_outcomes (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_id          TEXT NOT NULL,
-            our_recommendation TEXT,    -- YES or NO (what we bet)
-            amount             REAL,    -- stake
-            probability        REAL,    -- market prob when we placed the bet
-            estimated_ev       REAL,    -- EV predicted at trade time (NULL = no AI estimate)
-            ai_confidence      REAL,    -- AI confidence score (NULL = no AI)
-            strategies         TEXT,    -- JSON list of strategy names that triggered
-            market_resolution  TEXT,    -- YES or NO (actual outcome)
-            actual_pnl         REAL,    -- realized profit/loss
-            ev_error           REAL,    -- estimated_ev - actual_pnl; NULL when estimated_ev is NULL
-            resolved_at        TEXT     -- ISO timestamp
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id                TEXT NOT NULL,
+            our_recommendation       TEXT,    -- YES or NO (what we bet)
+            amount                   REAL,    -- stake
+            probability              REAL,    -- market prob when we placed the bet
+            estimated_ev             REAL,    -- EV predicted at trade time (NULL = no AI estimate)
+            ai_confidence            REAL,    -- AI confidence score (NULL = no AI)
+            ai_estimated_probability REAL,    -- AI's true-prob estimate at trade time (NULL = no AI)
+            strategies               TEXT,    -- JSON list of strategy names that triggered
+            market_resolution        TEXT,    -- YES or NO (actual outcome)
+            actual_pnl               REAL,    -- realized profit/loss
+            ev_error                 REAL,    -- estimated_ev - actual_pnl; NULL when estimated_ev is NULL
+            era                      TEXT,    -- 'post_ev_fix' or 'pre_ev_fix' (learning gate)
+            resolved_at              TEXT     -- ISO timestamp
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_bet_outcomes_market
         ON bet_outcomes(market_id)
     """)
+
+    # Schema migrations — add columns that didn't exist in earlier versions.
+    # ALTER TABLE ADD COLUMN raises OperationalError if the column already exists;
+    # we catch and ignore so this function is safe to call repeatedly.
+    for migration in [
+        "ALTER TABLE bet_outcomes ADD COLUMN ai_estimated_probability REAL",
+        "ALTER TABLE bet_outcomes ADD COLUMN era TEXT",
+    ]:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # column already exists — no-op
+
+    # Backfill era for rows that pre-date the EV-pipeline fix (identified by
+    # NULL estimated_ev — all pre-fix trades lack both EV and AI probability).
+    conn.execute("""
+        UPDATE bet_outcomes SET era = 'pre_ev_fix'
+        WHERE era IS NULL AND estimated_ev IS NULL
+    """)
+
     conn.commit()
     conn.close()
 
@@ -71,28 +97,30 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
 
     Called by resolve_market() for every position that closes.
     The trade dict is the record originally written by place_paper_bet(),
-    so it already carries estimated_ev, ai_confidence, and strategies if
-    auto_trader passed them in.
+    so it already carries estimated_ev, ai_confidence, ai_estimated_probability,
+    and strategies if auto_trader passed them in.
 
     ev_error = estimated_ev - actual_pnl
       > 0 means AI overestimated the edge (predicted more profit than occurred)
       < 0 means AI underestimated (we made more than predicted)
       NULL when there was no AI estimate (confidence-scaled fallback)
+
+    era: 'post_ev_fix' for all new inserts (EV pipeline is deployed).
+         Existing pre-fix rows are backfilled to 'pre_ev_fix' in _init_bet_outcomes_db().
     """
     try:
-        estimated_ev = trade.get("estimated_ev")
-        ev_error = (estimated_ev - actual_pnl) if estimated_ev is not None else None
-
-        strategies = trade.get("strategies") or []
-        strategies_json = json.dumps(strategies)
+        estimated_ev   = trade.get("estimated_ev")
+        ai_est_prob    = trade.get("ai_estimated_probability")
+        ev_error       = (estimated_ev - actual_pnl) if estimated_ev is not None else None
+        strategies_json = json.dumps(trade.get("strategies") or [])
 
         conn = sqlite3.connect(_DB_PATH)
         conn.execute("""
             INSERT INTO bet_outcomes
             (market_id, our_recommendation, amount, probability,
-             estimated_ev, ai_confidence, strategies,
-             market_resolution, actual_pnl, ev_error, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             estimated_ev, ai_confidence, ai_estimated_probability, strategies,
+             market_resolution, actual_pnl, ev_error, era, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("market_id"),
             trade.get("outcome"),
@@ -100,10 +128,12 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
             trade.get("probability"),
             estimated_ev,
             trade.get("ai_confidence"),
+            ai_est_prob,
             strategies_json,
             market_resolution,
             actual_pnl,
             ev_error,
+            "post_ev_fix",
             datetime.now().isoformat(),
         ))
         conn.commit()
@@ -154,18 +184,23 @@ class PaperTrader:
                        amount: float, probability: float,
                        estimated_ev: Optional[float] = None,
                        ai_confidence: Optional[float] = None,
+                       ai_estimated_probability: Optional[float] = None,
                        strategies: Optional[List[str]] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
         Args:
-            market_id:     Manifold market ID
-            outcome:       "YES" or "NO"
-            amount:        Bet amount in dollars
-            probability:   Current market probability (0–1)
-            estimated_ev:  AI-estimated expected value at trade time (stored for calibration)
-            ai_confidence: AI confidence score (stored for calibration)
-            strategies:    List of strategy names that triggered this trade
+            market_id:               Manifold market ID
+            outcome:                 "YES" or "NO"
+            amount:                  Bet amount in dollars
+            probability:             Current market probability (0–1)
+            estimated_ev:            AI-estimated expected value at trade time (stored for calibration)
+            ai_confidence:           AI confidence score (stored for calibration)
+            ai_estimated_probability: AI's estimated true probability at trade time.
+                                     Distinct from ai_confidence (certainty) — this is
+                                     the probability estimate itself. Stored in bet_outcomes
+                                     to enable AI calibration curve analysis.
+            strategies:              List of strategy names that triggered this trade
 
         Returns:
             bool: True if trade successful
@@ -215,6 +250,7 @@ class PaperTrader:
             # Calibration fields — stored at trade time, read back at resolution time
             'estimated_ev': estimated_ev,
             'ai_confidence': ai_confidence,
+            'ai_estimated_probability': ai_estimated_probability,
             'strategies': strategies,
         }
         
