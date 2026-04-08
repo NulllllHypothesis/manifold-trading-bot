@@ -103,12 +103,13 @@ Note: Position swap check (`f426953c`) was a separate `:40` cron — **disabled*
 ## Current Trading State (as of 2026-04-08)
 
 - **Paper balance:** ~$139.59
-- **Open positions:** 10/10 (bot blocked — waiting for markets to resolve on Manifold)
+- **Open positions:** 8/10 (2 duplicate AsUEPpRNc5 positions closed; 2 slots available)
 - **Auto-trader confidence threshold:** 65%
 - **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`)
 - **Active branch:** `main`
 - **Agent auto-reviewer:** DISABLED — caused file truncation bugs on 3/4 PRs. Human review only.
-- **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan` via `automation/telegram_bot.py`. Address bot directly in group: `@hackathon_26_bot /portfolio`
+- **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan`, `/autotrader on/off` via `automation/telegram_bot.py`. Address bot directly in group: `@hackathon_26_bot /portfolio`
+- **Ollama:** `deepseek-r1:14b` on server; runner process restartable via `kill $(pgrep -f "ollama runner") && ollama serve` if it gets stuck in a spin loop (seen 2026-04-08: 784% CPU, no output)
 
 ---
 
@@ -283,27 +284,29 @@ Mon 07:00    Weekly EV Report
 No external library needed — uses plain HTTP to the Telegram Bot API.
 
 - [x] `automation/send_telegram.py` — real Bot API sender; 3 retries with backoff; falls back to plain text on Markdown parse errors; truncates at 4096 chars; `send_telegram_message()` kept for backward compat
-- [x] `automation/telegram_bot.py` — three command handlers:
+- [x] `automation/telegram_bot.py` — five command handlers:
   - `portfolio` — balance, P&L, win rate, open slot count
-  - `positions` — all 10 open trades with direction, amount, entry probability
+  - `positions` — all open trades with direction, amount, entry probability
   - `scan` — top 5 opportunities from latest research with AI score + EV
+  - `autotrader-on` — removes `autotrader_disabled.flag`, resumes trading next cycle
+  - `autotrader-off` — creates `autotrader_disabled.flag`, trading paused until re-enabled
   - Prints to stdout (OpenClaw capture) AND sends directly via Bot API
-  - Run: `python3 automation/telegram_bot.py portfolio|positions|scan`
+  - Run: `python3 automation/telegram_bot.py portfolio|positions|scan|autotrader-on|autotrader-off`
 - [x] `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_GROUP_ID` read from `.env`
 - [x] `automation/daily_summary.py` — `send_to_telegram()` now calls real Bot API instead of placeholder
-- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/` — all `✓ ready`
+- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/`, `skills/autotrader-on/`, `skills/autotrader-off/` — all `✓ ready`
+- [x] `manifold_bot/paper_trader.py` — `_notify_resolution()` sends Telegram when a position closes; `resolve_market()` accepts optional `question` param and calls it. Never raises — Telegram down cannot block resolution.
+- [x] `automation/auto_trader.py` — checks for `autotrader_disabled.flag` at startup; exits cleanly with a message if present (cron log shows clear status, no noise)
 
 **How to use in Telegram:**
 ```
-@hackathon_26_bot /portfolio    ← balance + P&L
-@hackathon_26_bot /positions    ← all open trades
-@hackathon_26_bot /scan         ← top opportunities
+@hackathon_26_bot /portfolio       ← balance + P&L
+@hackathon_26_bot /positions       ← all open trades
+@hackathon_26_bot /scan            ← top opportunities
+@hackathon_26_bot /autotrader off  ← pause trading
+@hackathon_26_bot /autotrader on   ← resume trading
 ```
 Address the bot directly with `@hackathon_26_bot` in the group, or DM it directly.
-
-**Remaining Telegram work (next iteration):**
-- [ ] Auto-notify the group when a market resolves
-- [ ] `/autotrader on` and `/autotrader off` commands
 
 ---
 
@@ -464,7 +467,10 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
 | Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 173 tests total |
-| Telegram bot commands | ✅ Done | `send_telegram.py` real Bot API; `telegram_bot.py` with /portfolio /positions /scan; OpenClaw skills registered |
+| Telegram bot commands | ✅ Done | `send_telegram.py` real Bot API; `telegram_bot.py` with /portfolio /positions /scan /autotrader on/off; OpenClaw skills registered |
+| Auto-notify on resolution | ✅ Done | `_notify_resolution()` in `paper_trader.py`; fires on every `resolve_market()` call; never blocks resolution |
+| /autotrader on/off | ✅ Done | flag file mechanism in `auto_trader.py`; `telegram_bot.py` handlers; two OpenClaw skills |
+| Sandbox reproducibility | ✅ Fixed | `auto_research_fast.py` was live; restored to `automation/auto_research.py`; experiment files cleaned; duplicate trading job removed |
 | Category exposure caps | ❌ Not started | |
 | Weighted scoring + adaptive learning | ❌ Not started | strategy weights → dynamic sizing → category accuracy → self-performance prompt note |
 | News fetcher | ❌ Not started | |

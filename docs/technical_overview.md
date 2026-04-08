@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-08 (real Telegram bot, swap-check moved into research)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
+*Last updated: 2026-04-08 (auto-notify on resolution, /autotrader on/off, sandbox health fixes)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
 
 ---
 
@@ -304,7 +304,8 @@ Raw responses, full prompts, and chain-of-thought are intentionally NOT logged �
 
 Key methods:
 - `place_paper_bet(market_id, outcome, amount, probability, estimated_ev, ai_confidence, strategies)` — deducts from balance, saves to state. Stores `entry_probability` and `entry_confidence` alongside each trade record for later drift tracking.
-- `resolve_market(market_id, outcome)` — settles a bet, updates balance, and **writes a row to the `bet_outcomes` SQLite table** (`data/calibration.db`) with `estimated_ev`, `ai_confidence`, `actual_pnl`, and `ev_error = estimated_ev − actual_pnl`
+- `resolve_market(market_id, outcome, question="")` — settles a bet, updates balance, writes a row to `bet_outcomes`, and calls `_notify_resolution()` to send a Telegram message (✅/❌ emoji, P&L, new balance). Never raises — Telegram being down cannot prevent resolution.
+- `_notify_resolution(market_id, question, outcome, our_bet, total_pnl, new_balance)` — module-level function, wraps all Telegram calls in `try/except`. Sends: win/loss emoji, question (truncated to 80 chars), what resolved vs what we bet, P&L, current balance.
 - `close_position_early(market_id, current_prob)` — simulates selling a position before resolution at the current market probability. Used by `execute_swap.py`. P&L formula: `YES: amount * current_prob / entry_prob − amount`, `NO: amount * (1−current_prob) / (1−entry_prob) − amount`. Writes a `CLOSED_EARLY` row to `bet_outcomes`.
 - `auto_resolve_markets()` — checks Manifold API for any markets that have resolved, settles them automatically
 - `get_performance_metrics()` — calculates win rate, P&L, profit factor, etc.
@@ -397,6 +398,8 @@ position_size = base_size * multiplier
 
 So with $684 balance and 65% confidence: `$68.4 * 1.0 = $68.4`, rounded to nearest $5 = `$70`.
 
+**Autotrader kill switch:** At startup, `auto_trader.py` checks for `autotrader_disabled.flag` in the workspace root. If found, it exits immediately with a clear message — no trades placed, no noise. Create the flag via `@hackathon_26_bot /autotrader off` or delete it via `/autotrader on`. The flag file approach is safe across cron runs: any in-flight run finishes normally; only the next scheduled run is suppressed.
+
 **Why trades aren't executing:** If all 10 position slots are full, `should_trade_market()` rejects everything at the max positions check. Use the smart-swap mechanism to replace underperforming positions.
 
 ---
@@ -418,7 +421,7 @@ Formats a Telegram-ready message. The message gets saved to `telegram_daily_summ
 ---
 
 #### `scripts/position_swap_checker.py`
-**What it does:** Runs at `:40` every hour. Proposes swapping a losing position for a better opportunity when all slots are full.
+**What it does:** Called at the end of every `auto_research.py` run (not a separate cron). Proposes swapping a losing position for a better opportunity when all slots are full.
 
 Logic:
 1. If `open_positions < MAX_POSITIONS` → exits immediately (slots free, normal trading will handle it)
@@ -547,15 +550,27 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
 
 - ✅ **Real Telegram bot** (2026-04-08):
   - `automation/send_telegram.py` — real Bot API HTTP calls; retries 3×; Markdown fallback; no library needed
-  - `automation/telegram_bot.py` — `/portfolio`, `/positions`, `/scan` command handlers; prints stdout + sends via API
+  - `automation/telegram_bot.py` — `/portfolio`, `/positions`, `/scan`, `/autotrader on`, `/autotrader off` command handlers; prints stdout + sends via API
   - `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` + `TELEGRAM_GROUP_ID` from `.env`
-  - `skills/portfolio/`, `skills/positions/`, `skills/scan/` — OpenClaw workspace skills; all `✓ ready`
+  - `skills/portfolio/`, `skills/positions/`, `skills/scan/`, `skills/autotrader-on/`, `skills/autotrader-off/` — OpenClaw workspace skills; all `✓ ready`
   - Usage: `@hackathon_26_bot /portfolio` in group, or DM the bot directly
   - `automation/daily_summary.py` — now sends directly to Telegram instead of writing to file
+
+- ✅ **Auto-notify on resolution + /autotrader on/off** (2026-04-08):
+  - `manifold_bot/paper_trader.py` — `_notify_resolution()` fires on every `resolve_market()` call; ✅/❌ emoji, P&L, new balance; never raises
+  - `automation/auto_trader.py` — `autotrader_disabled.flag` check at startup; exits cleanly if present
+  - Two new OpenClaw skills: `skills/autotrader-on/` and `skills/autotrader-off/`
 
 - ✅ **Swap check moved into research** (2026-04-08):
   - Removed standalone `:40` cron job (`f426953c` disabled on server)
   - `run_swap_check()` called at end of `auto_research.py` main() — fires only when fresh data exists
+
+- ✅ **Sandbox reproducibility restored** (2026-04-08):
+  - Research cron was calling untracked `auto_research_fast.py` (skips AI); restored to `automation/auto_research.py`
+  - Removed experiment files: `auto_research_fast.py`, `market_research_fast.json`, `run_research.sh`, `test_research.py`, `automation/auto_research_backup.py`
+  - Removed dead disabled trading job (`57ce0ebc`); removed stale `logs/trading.log` + `logs/research.log`
+  - Closed 2 duplicate `AsUEPpRNc5` positions (trade\_ids 12, 14) — now 8/10 slots used
+  - Restarted stuck Ollama runner (was consuming 784% CPU, producing no output); AI analysis confirmed working
 
 - ✅ **Signal family architecture + code quality** (2026-04-07):
   - `strategies.py` — `SIGNAL_FAMILIES` dict; `volume_spike_priority` returns float 0.0–1.0; `probability_bias` category-conditional; `mean_reversion` close-time guard; `probability_direction` volume guard
@@ -566,19 +581,17 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
 
 **Next steps, in priority order:**
 
-**1. Real Telegram Bot** — `send_telegram.py` is a placeholder that prints to console. Replace with real `python-telegram-bot` integration so swap proposals and confirmations actually reach Telegram.
+**1. Category exposure caps** — add `max_positions_per_category` (suggest: 3/10) to prevent over-concentration in one topic during volatile periods.
 
-**2. Category exposure caps** — add `max_positions_per_category` (suggest: 3/10) to prevent over-concentration in one topic during volatile periods.
+**2. Weighted scoring + adaptive learning** — replace flat confidence with `direction_sign × strength × reliability_weight`. Phase A: strategy reliability weights from `bet_outcomes`. Phase B: dynamic Kelly scaling. Phase C: category accuracy → adaptive caps. Phase D: self-performance note in AI prompt.
 
-**3. Weighted scoring function** — replace flat confidence with `direction_sign × strength × reliability_weight`. Reliability weights start equal and update from `bet_outcomes` table over time.
+**3. News fetcher** — structured news API integration as a `fundamental` family signal. Use keywords extracted from the market question.
 
-**4. News fetcher** — structured news API integration as a `fundamental` family signal. Use keywords extracted from the market question.
+**4. Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; build bettor-accuracy cache in SQLite.
 
-**5. Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; build bettor-accuracy cache in SQLite.
+**5. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
 
-**6. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
-
-**7. SQLite storage** — Replace flat JSON state files with a proper database.
+**6. SQLite storage** — Replace flat JSON state files with a proper database.
 
 ---
 
@@ -599,7 +612,7 @@ Docker Container (Linux)
             ├── Telegram bot (@hackathon_26_bot)
             │       └── sends results to group -5240775171
             └── Git workspace (~/.openclaw/workspace/)
-                    ├── This repo (feature/calibration branch)
+                    ├── This repo (main branch)
                     └── data/calibration.db (SQLite, gitignored)
                         ├── resolved_markets (1,121+ rows)
                         └── bet_outcomes (written on each resolution)
@@ -607,7 +620,9 @@ Docker Container (Linux)
 
 The scripts run inside the container's shell. OpenClaw executes them as shell commands (via its `coding` tools profile), reads stdout, and forwards summaries to Telegram.
 
-**Environment variables** are set in `/etc/profile.d/hackathon.sh`. Note: the OpenClaw gateway process is started at container boot by `runuser` and does NOT source this file. Cron sessions inherit the gateway's environment, so `MANIFOLD_API_KEY` is technically unavailable — but this only causes a warning; paper trading doesn't need it (PaperTrader works offline). To fix properly: add the key to `openclaw.json` or prefix cron commands with `source /etc/profile.d/hackathon.sh &&`.
+**Environment variables:** `MANIFOLD_API_KEY` is set in both `/etc/profile.d/hackathon.sh` (sourced by login shells) and in `openclaw.json` (injected into cron session environments). `config.py` also loads from the workspace `.env` file via `load_dotenv`. Key priority: OS environment (from `openclaw.json`) wins over `.env` since `load_dotenv` does not override existing vars.
+
+**Ollama:** `deepseek-r1:14b` (8.5 GB) runs as a persistent `ollama serve` + runner process pair. The runner spawns on first generation request and stays alive. If it gets stuck in a spin loop (symptom: 700%+ CPU, no output), restart with `kill $(pgrep -f "ollama serve") && nohup ollama serve > /tmp/ollama.log 2>&1 &` — the model reloads on next call (~87s cold, ~21s warm).
 
 ---
 
