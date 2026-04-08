@@ -1,10 +1,13 @@
 {
-  "generated_at": "2026-04-08T16:04:13.102978Z",
+  "generated_at": "2026-04-08T16:18:38.295187Z",
   "sample_count": 0,
   "min_samples_threshold": 10,
   "weights": {
     "probability_direction": 1.0,
     "mean_reversion": 1.0,
-    "volume_spike": 1.0
+    "volume_spike": 1.0,
+    "probability_bias": 1.0,
+    "creator_disagreement": 1.0,
+    "ai_analysis": 1.0
   }
 }

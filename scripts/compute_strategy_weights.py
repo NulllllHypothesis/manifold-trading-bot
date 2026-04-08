@@ -33,23 +33,52 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
 
 # Known strategies — always emitted so consumers can rely on all keys being present.
-_KNOWN_STRATEGIES = ["probability_direction", "mean_reversion", "volume_spike"]
+# Must match every strategy name that auto_research.py can write into the strategies list.
+# thin_market is excluded: it's a confirmation-only filter that is never the sole trigger,
+# and it is never stored as a standalone entry in bet_outcomes strategies lists.
+_KNOWN_STRATEGIES = [
+    "probability_direction",
+    "mean_reversion",
+    "volume_spike",
+    "probability_bias",
+    "creator_disagreement",
+    "ai_analysis",
+]
 
 # Default weight used when a strategy has insufficient data or is unseen.
 _DEFAULT_WEIGHT = 1.0
+
+
+def _parse_strategies(raw) -> list[str]:
+    """
+    Parse the strategies field from bet_outcomes.
+
+    paper_trader.py stores strategies as a JSON array string via json.dumps(),
+    e.g. '["probability_direction", "mean_reversion"]'. Handle both that format
+    and a plain comma-separated string for backwards compatibility.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [s.strip() for s in raw if s.strip()]
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [s.strip() for s in parsed if s.strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _compute_weights(outcomes: list[dict]) -> dict:
     """
     Returns {strategy_name: weight} for all known strategies.
     """
-    # Aggregate direction-correct counts per strategy.
-    # A trade can list multiple strategies (comma-separated string).
     per_strategy: dict[str, dict] = {}  # {name: {total, correct}}
 
     for o in outcomes:
-        strats_raw = o.get("strategies") or ""
-        strat_list = [s.strip() for s in strats_raw.split(",") if s.strip()]
+        strat_list = _parse_strategies(o.get("strategies"))
         if not strat_list:
             continue
 
@@ -95,11 +124,10 @@ def main(dry_run: bool = False) -> None:
 
     print(f"\nStrategy weights ({len(outcomes)} post-fix resolved trades):")
     for strat, w in weights.items():
-        stats = {}
+        stats: dict = {}
         for o in outcomes:
-            strats_raw = o.get("strategies") or ""
-            if strat in [s.strip() for s in strats_raw.split(",")]:
-                if "total" not in stats:
+            if strat in _parse_strategies(o.get("strategies")):
+                if not stats:
                     stats = {"total": 0, "correct": 0}
                 stats["total"] += 1
                 if o.get("our_recommendation") == o.get("market_resolution"):

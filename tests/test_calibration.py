@@ -377,7 +377,8 @@ class TestEvAccuracySection(unittest.TestCase):
         self.assertAlmostEqual(stats["ev_accuracy_ratio"], 0.5, places=2)
 
     def test_well_calibrated_label_when_ratio_at_least_085(self):
-        outcomes = [_make_outcome(actual_pnl=9.0, estimated_ev=10.0) for _ in range(3)]
+        # Need >= MIN_SAMPLES_GLOBAL (20) to pass the gate and show the calibration label.
+        outcomes = [_make_outcome(actual_pnl=9.0, estimated_ev=10.0) for _ in range(20)]
         text, _ = _ev_accuracy_section(outcomes)
         self.assertIn("well-calibrated", text.lower())
 
