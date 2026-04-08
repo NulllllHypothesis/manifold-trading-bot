@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-08 (auto-notify on resolution, /autotrader on/off, sandbox health fixes)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
+*Last updated: 2026-04-08 (category caps, weighted scoring Phase A+D, telegram fixes, strategy weight parser bug fixed)* — 197 tests total.
 
 ---
 
@@ -181,9 +181,11 @@ MANIFOLD_API_BASE = "https://api.manifold.markets"
 INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
 MAX_BET_AMOUNT = 100
+MIN_CONFIDENCE = 0.65
+MAX_POSITIONS_PER_CATEGORY = 3
 ```
 
-The API key is read from an environment variable (not hardcoded). `INITIAL_BALANCE = 1000` is the fake starting money. The min/max bet amounts cap how much we can put on any single trade.
+The API key is read from an environment variable (not hardcoded). `INITIAL_BALANCE = 1000` is the fake starting money. `MAX_POSITIONS_PER_CATEGORY = 3` caps how many open bets can share a topic category (crypto/politics/sports/etc) — prevents the bot going all-in on one topic during a volatile week.
 
 ---
 
@@ -242,7 +244,7 @@ Composite score: `confidence + priority_boost × 0.15`. Top 3 by composite score
 **What it does:** Sends a market question to a local AI model and asks whether it's mispriced. Also logs every LLM call to `logs/llm_calls.jsonl` for future distillation/training.
 
 Two backends, tried in order:
-1. **Ollama** at `localhost:11434` — runs `deepseek-r1:14b` locally on the server. Free, no API cost, ~60 seconds per market on CPU.
+1. **Ollama** at `localhost:11434` — runs `deepseek-r1:14b` locally on the server. Free, no API cost, ~70–80 seconds per market on CPU.
 2. **DeepSeek API** — fallback only if Ollama is unreachable. Uses `DEEPSEEK_API_KEY` already on the server.
 
 What it sends to the AI (simplified):
@@ -262,8 +264,17 @@ Crowd calibration (measured over 1,000+ resolved Manifold markets):
 Use these corrections: if a market is at 65%, history says treat it
 as ~47% YES. Adjust your estimated_true_probability accordingly.
 
+Strategy reliability (from N resolved trades):
+  probability_direction: weight=1.00  (≈ average accuracy)
+  mean_reversion: weight=1.00  (≈ average accuracy)
+  ...
+Higher-weight strategies have historically called direction correctly
+more often. Give their signal more weight when they agree.
+
 Is this mispriced? Should we bet YES, NO, or skip?
 ```
+
+The strategy performance note (`_build_performance_note()`) is injected alongside the calibration table. It is gated — returns empty string until `MIN_SAMPLES_PER_STRATEGY = 10` resolved trades exist per strategy, so the prompt stays clean while the system is accumulating data.
 
 What it gets back:
 ```json
@@ -377,12 +388,14 @@ Output file structure (`market_research.json`):
 ```
 If `schema_version < 2` (i.e. AI pass was skipped or aborted), prints a Telegram-visible halt message and returns None.
 
-**Risk management rules (the filter gauntlet):**
+**Risk management rules (the filter gauntlet, checked in order):**
 
 | Rule | Value | Meaning |
 |------|-------|---------|
+| AI veto | SKIP | If AI returned SKIP, blocked regardless of confidence — checked first |
 | Min confidence | 65% | Only trade if the strategy signal is strong enough |
 | Max positions | 10 | Never hold more than 10 open bets at once |
+| Max per category | 3 | No more than 3 open bets in the same topic (crypto/politics/sports/etc) |
 | Max position size | 10% of balance | Don't bet more than 10% of total cash on one trade |
 | Min liquidity | $200 | Don't trade illiquid markets (hard to exit) |
 | No re-entry | — | Blocks any new bet on a market with an existing OPEN position (live check, not research flag) |
@@ -579,13 +592,21 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
   - `test_strategies.py` — 48 tests including regression for duplicate-bet (2czul2Rync) bug
   - **173 tests total across all suites**
 
+**Completed this session (2026-04-08):**
+
+- ✅ **Category exposure caps** — `MAX_POSITIONS_PER_CATEGORY=3` in `config.py`; enforced in `should_trade_market()`; `category` stored on every trade record; `🗂 BY CATEGORY` breakdown in daily summary
+- ✅ **Weighted scoring Phase A** — `compute_strategy_weights.py` reads `bet_outcomes` (post_ev_fix era), computes direction accuracy per strategy, writes `data/strategy_weights.json`; weights (0.5–1.2) applied to raw signal confidence before family dedup in `auto_research.py`. Bug fixed: strategies stored as JSON array — now parsed correctly with `_parse_strategies()`. All 6 active strategies covered.
+- ✅ **Weighted scoring Phase D** — `_build_performance_note()` in `ai_analyzer.py`; injected into `ANALYSIS_PROMPT` alongside calibration table; gated until ≥10 samples per strategy
+- ✅ **Telegram dedup fix** — `telegram_bot.py:main()` no longer prints to stdout (OpenClaw was also forwarding stdout, causing every reply to arrive twice)
+- ✅ **Positions show real titles** — `/positions` does 3-tier lookup: stored `question` field → research data → Manifold API fetch for old trades
+
 **Next steps, in priority order:**
 
-**1. Category exposure caps** — add `max_positions_per_category` (suggest: 3/10) to prevent over-concentration in one topic during volatile periods.
+**1. Weighted scoring Phase B** — Kelly fraction scales with strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. A strategy at weight 0.6 gets 30% Kelly instead of 50%. Only kicks in once the strategy clears the min-sample gate.
 
-**2. Weighted scoring + adaptive learning** — replace flat confidence with `direction_sign × strength × reliability_weight`. Phase A: strategy reliability weights from `bet_outcomes`. Phase B: dynamic Kelly scaling. Phase C: category accuracy → adaptive caps. Phase D: self-performance note in AI prompt.
+**2. Weighted scoring Phase C** — extend `compute_strategy_weights.py` to also compute per-category direction accuracy; write `data/category_accuracy.json`; `auto_trader.py` uses it to dynamically tighten category caps (accuracy < 50% → cap drops from 3 to 1).
 
-**3. News fetcher** — structured news API integration as a `fundamental` family signal. Use keywords extracted from the market question.
+**3. News fetcher** — structured news API integration as a `fundamental` family signal.
 
 **4. Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; build bettor-accuracy cache in SQLite.
 
@@ -626,4 +647,4 @@ The scripts run inside the container's shell. OpenClaw executes them as shell co
 
 ---
 
-*Last updated: 2026-04-07 (smart-swap)*
+*Last updated: 2026-04-08 (category caps, weighted scoring Phase A+D, telegram fixes, strategy weight parser)*

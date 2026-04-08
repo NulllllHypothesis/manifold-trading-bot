@@ -102,14 +102,16 @@ Note: Position swap check (`f426953c`) was a separate `:40` cron — **disabled*
 
 ## Current Trading State (as of 2026-04-08)
 
-- **Paper balance:** ~$139.59
-- **Open positions:** 8/10 (2 duplicate AsUEPpRNc5 positions closed; 2 slots available)
+- **Paper balance:** ~$275
+- **Open positions:** 8/10
 - **Auto-trader confidence threshold:** 65%
-- **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`)
+- **Max positions per category:** 3 (enforced in `should_trade_market()`)
+- **Strategy weights:** all 1.0 (no post-fix resolved trades yet — accumulating; weights update automatically once ≥10 trades per strategy resolve)
+- **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`, `category`, `question`)
 - **Active branch:** `main`
 - **Agent auto-reviewer:** DISABLED — caused file truncation bugs on 3/4 PRs. Human review only.
-- **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan`, `/autotrader on/off` via `automation/telegram_bot.py`. Address bot directly in group: `@hackathon_26_bot /portfolio`
-- **Ollama:** `deepseek-r1:14b` on server; runner process restartable via `kill $(pgrep -f "ollama runner") && ollama serve` if it gets stuck in a spin loop (seen 2026-04-08: 784% CPU, no output)
+- **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan`, `/autotrader on/off`. Address bot: `@hackathon_26_bot /portfolio`
+- **Ollama:** `deepseek-r1:14b` on server; if stuck (700%+ CPU): `kill $(pgrep -f "ollama serve") && nohup ollama serve > /tmp/ollama.log 2>&1 &`
 
 ---
 
@@ -283,86 +285,71 @@ Mon 07:00    Weekly EV Report
 
 No external library needed — uses plain HTTP to the Telegram Bot API.
 
-- [x] `automation/send_telegram.py` — real Bot API sender; 3 retries with backoff; falls back to plain text on Markdown parse errors; truncates at 4096 chars; `send_telegram_message()` kept for backward compat
-- [x] `automation/telegram_bot.py` — five command handlers:
-  - `portfolio` — balance, P&L, win rate, open slot count
-  - `positions` — all open trades with direction, amount, entry probability
-  - `scan` — top 5 opportunities from latest research with AI score + EV
-  - `autotrader-on` — removes `autotrader_disabled.flag`, resumes trading next cycle
-  - `autotrader-off` — creates `autotrader_disabled.flag`, trading paused until re-enabled
-  - Prints to stdout (OpenClaw capture) AND sends directly via Bot API
+- [x] `automation/send_telegram.py` — real Bot API sender; 3 retries with backoff; falls back to plain text on Markdown parse errors; truncates at 4096 chars
+- [x] `automation/telegram_bot.py` — five command handlers: `portfolio`, `positions`, `scan`, `autotrader-on`, `autotrader-off`
+  - `main()` calls `send_message()` only — no `print(response)`. OpenClaw skill runner also captures stdout, so printing caused every reply to send twice. Fixed.
+  - `/positions` shows real market titles: 3-tier fallback — stored `question` field → research data lookup → Manifold API fetch for old trades that predate the field
   - Run: `python3 automation/telegram_bot.py portfolio|positions|scan|autotrader-on|autotrader-off`
 - [x] `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_GROUP_ID` read from `.env`
-- [x] `automation/daily_summary.py` — `send_to_telegram()` now calls real Bot API instead of placeholder
-- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/`, `skills/autotrader-on/`, `skills/autotrader-off/` — all `✓ ready`
-- [x] `manifold_bot/paper_trader.py` — `_notify_resolution()` sends Telegram when a position closes; `resolve_market()` accepts optional `question` param and calls it. Never raises — Telegram down cannot block resolution.
-- [x] `automation/auto_trader.py` — checks for `autotrader_disabled.flag` at startup; exits cleanly with a message if present (cron log shows clear status, no noise)
+- [x] `automation/daily_summary.py` — sends directly to Telegram via Bot API
+- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/`, `skills/autotrader-on/`, `skills/autotrader-off/`
+- [x] `manifold_bot/paper_trader.py` — `_notify_resolution()` sends Telegram on every resolution; never raises
+- [x] `automation/auto_trader.py` — checks `autotrader_disabled.flag` at startup; exits cleanly if present
 
 **How to use in Telegram:**
 ```
 @hackathon_26_bot /portfolio       ← balance + P&L
-@hackathon_26_bot /positions       ← all open trades
+@hackathon_26_bot /positions       ← all open trades with real titles
 @hackathon_26_bot /scan            ← top opportunities
 @hackathon_26_bot /autotrader off  ← pause trading
 @hackathon_26_bot /autotrader on   ← resume trading
 ```
-Address the bot directly with `@hackathon_26_bot` in the group, or DM it directly.
 
 ---
 
-### 🟡 Next — Category Exposure Caps
+### ✅ Category Exposure Caps — DONE (2026-04-08)
 
-Each market `category` (crypto/politics/ai_tech/sports/economics/science/other) is inferred by keyword at research time. Currently there is no limit on how many open positions can belong to the same category — the bot could go 8/10 slots into crypto during a volatile week.
-
-- [ ] Add `max_positions_per_category` config (suggested: 3 out of 10 total)
-- [ ] In `auto_trader.py` `should_trade_market()`: count open positions per category, block if at cap
-- [ ] Surface category breakdown in `daily_summary.py`
+- [x] `manifold_bot/config.py` — `MAX_POSITIONS_PER_CATEGORY = 3`
+- [x] `automation/auto_research.py` — `_infer_market_category()` called per recommendation; `category` stored in rec dict
+- [x] `manifold_bot/paper_trader.py` — `place_paper_bet()` accepts `category` and `question`; stored in trade record
+- [x] `automation/auto_trader.py` — `should_trade_market()` counts open positions per category, rejects if at cap; passes `category`/`question` through to `place_paper_bet()`
+- [x] `automation/daily_summary.py` — `calculate_daily_metrics()` builds `category_breakdown` dict; displayed as `🗂 BY CATEGORY` bar chart in daily report
 
 ---
 
-### 🟡 Next — Weighted Scoring + Adaptive Learning
+### ✅ Weighted Scoring Phase A + D — DONE (2026-04-08)
 
-The model weights in Ollama/DeepSeek do not update after a trade — the model itself is frozen. What *can* learn is the **policy layer**: which strategies to trust, how much to size, and what context to give the AI. The goal is to turn `bet_outcomes` data into automated behavior changes, not just reports you have to read manually.
+**Phase A — Strategy reliability weights**
 
-**Phase A — Strategy reliability weights** (prerequisite for weighted scoring)
-
-- [ ] `scripts/compute_strategy_weights.py` — queries `bet_outcomes`, computes per-strategy EV accuracy ratio (realized EV / estimated EV) over last 90 days; writes `data/strategy_weights.json`
-- [ ] `data/strategy_weights.json` — committed to git; updated weekly by cron; initial value 1.0 for all strategies
-- [ ] `strategies.py` — each strategy returns `{"direction", "strength", "reliability_weight", "family"}`; `reliability_weight` loaded from `strategy_weights.json` at import
-- [ ] `auto_research.py` — composite score: `direction_sign × strength × reliability_weight`; replaces flat confidence as primary ranking key
-- [ ] Keep `confidence` field in output for backward compatibility (map score → 0.0–1.0)
-
-**Phase B — Dynamic risk scaling from EV accuracy**
-
-- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; if a strategy's EV ratio < 0.5 (overestimating edge by 2×): raise min confidence threshold for that strategy by 5pp; if EV ratio < 0.3: skip that strategy entirely for this cycle
-- [ ] `auto_trader.py` — Kelly fraction scales with EV ratio: `kelly_fraction = 0.5 × min(ev_ratio, 1.0)`; a strategy at EV ratio 0.6 gets half-Kelly × 0.6 instead of full half-Kelly
-- [ ] Add `ev_ratio_at_trade_time` to each trade record in `auto_trades.json` for audit trail
-
-**Phase C — Category-level learning from own trade history**
-
-- [ ] `scripts/compute_strategy_weights.py` — extend to also compute per-category EV accuracy (politics/crypto/sports/etc) from `bet_outcomes`; write to `data/category_accuracy.json`
-- [ ] `auto_trader.py` — category accuracy feeds the category exposure caps: if a category's EV ratio < 0.5, reduce its cap from 3 to 1 automatically
-- [ ] This complements the static calibration table — the public crowd bias corrects probability estimates, our own trade history corrects position sizing and exposure
+- [x] `scripts/compute_strategy_weights.py` — reads `bet_outcomes` (post_ev_fix era); computes direction accuracy per strategy; weights range 0.5–1.2; min-sample gate (10 per strategy); writes `data/strategy_weights.json`
+  - **Bug fixed (2026-04-08):** strategies stored as JSON array by `paper_trader.py` (`json.dumps`); script was splitting on comma giving malformed tokens. Fixed with `_parse_strategies()` — JSON-first, CSV fallback.
+  - **Coverage fixed (2026-04-08):** `_KNOWN_STRATEGIES` now covers all 6 active strategies (`probability_direction`, `mean_reversion`, `volume_spike`, `probability_bias`, `creator_disagreement`, `ai_analysis`). `thin_market` excluded intentionally — confirmation-only, never sole trigger in a `bet_outcomes` row.
+- [x] `data/strategy_weights.json` — committed; all 1.0 right now (0 post-fix resolutions yet); auto-updates once trades accumulate
+- [x] `automation/auto_research.py` — loads weights once per run; applies to each raw signal's base confidence before family dedup; clamped to [0.0, 1.0]
 
 **Phase D — Self-performance note in AI prompt**
 
-- [ ] `ai_analyzer.py` — load `data/strategy_weights.json` at module import; build a compact 3-5 line note injected alongside the calibration table:
-  ```
-  Recent strategy performance (last 90 resolved trades):
-    creator_disagreement: EV ratio 1.2 (strong — trust this signal)
-    mean_reversion: EV ratio 0.4 (weak — apply extra skepticism)
-    momentum: EV ratio 0.8 (solid)
-  ```
-- [ ] This makes the AI reason with our actual system history, not just public crowd bias
-- [ ] Degrades gracefully: if `strategy_weights.json` absent, note is empty string
+- [x] `manifold_bot/ai_analyzer.py` — `_build_performance_note()` reads `strategy_weights.json`; formats compact prompt block; injected into `ANALYSIS_PROMPT` alongside calibration table
+  - Gated: returns empty string if sample count < `MIN_SAMPLES_PER_STRATEGY` (no noise while accumulating)
+  - Degrades gracefully if file absent
 
-**What this is NOT:**
-- Not fine-tuning the model weights — that's a much later step requiring clean labeled data and a stable signal stack
-- Not immediate per-trade learning — weights update weekly from resolved outcomes
-- The "intelligence" increase is: better context in prompts + better policy (sizing + thresholds) driven by actual P&L, not just confidence scores
+> Cron to add: `weekly-strategy-weights` — Sundays 03:00 UTC (after harvest). Runs `compute_strategy_weights.py` to refresh weights from newly resolved trades.
 
-> Suggested cron addition: `weekly-strategy-weights` — Sundays 03:00 UTC (after harvest, before EV report)
-> Runs `compute_strategy_weights.py`, commits updated `data/strategy_weights.json` to main
+---
+
+### 🟡 Next — Weighted Scoring Phase B + C
+
+**Phase B — Dynamic Kelly scaling from EV accuracy**
+
+- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; Kelly fraction scales with strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. A strategy at weight 0.6 gets 30% Kelly instead of 50%.
+- [ ] Add `strategy_weight_at_trade_time` to each trade record in `auto_trades.json` for audit trail
+- [ ] Guard: only applies when strategy has cleared `MIN_SAMPLES_PER_STRATEGY` gate — below threshold, use standard 0.5 Kelly
+
+**Phase C — Category-level accuracy from own trade history**
+
+- [ ] `scripts/compute_strategy_weights.py` — extend to also compute per-category direction accuracy from `bet_outcomes`; write to `data/category_accuracy.json`
+- [ ] `auto_trader.py` — if a category's accuracy < 50% (and ≥ `MIN_SAMPLES_PER_CATEGORY=8`), reduce its cap from 3 to 1 automatically
+- [ ] Complements the static calibration table: crowd bias corrects probability estimates; our own trade history corrects exposure per topic
 
 ---
 
@@ -467,12 +454,13 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
 | Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 173 tests total |
-| Telegram bot commands | ✅ Done | `send_telegram.py` real Bot API; `telegram_bot.py` with /portfolio /positions /scan /autotrader on/off; OpenClaw skills registered |
-| Auto-notify on resolution | ✅ Done | `_notify_resolution()` in `paper_trader.py`; fires on every `resolve_market()` call; never blocks resolution |
-| /autotrader on/off | ✅ Done | flag file mechanism in `auto_trader.py`; `telegram_bot.py` handlers; two OpenClaw skills |
-| Sandbox reproducibility | ✅ Fixed | `auto_research_fast.py` was live; restored to `automation/auto_research.py`; experiment files cleaned; duplicate trading job removed |
-| Category exposure caps | ❌ Not started | |
-| Weighted scoring + adaptive learning | ❌ Not started | strategy weights → dynamic sizing → category accuracy → self-performance prompt note |
+| Telegram bot commands | ✅ Done | real Bot API; /portfolio /positions /scan /autotrader on/off; no duplicate sends; positions show real titles |
+| Auto-notify on resolution | ✅ Done | `_notify_resolution()` in `paper_trader.py`; fires on every resolution; never blocks |
+| /autotrader on/off | ✅ Done | flag file in `auto_trader.py`; telegram handlers; two OpenClaw skills |
+| Sandbox reproducibility | ✅ Fixed | `auto_research_fast.py` removed; experiment files cleaned; duplicate trading job removed |
+| Category exposure caps | ✅ Done | `MAX_POSITIONS_PER_CATEGORY=3`; enforced in `should_trade_market()`; category stored on trade record; breakdown in daily summary |
+| Weighted scoring Phase A + D | ✅ Done | `compute_strategy_weights.py` (JSON parse fixed, all 6 strategies); weights applied to signals in `auto_research.py`; performance note in AI prompt |
+| Weighted scoring Phase B + C | 🟡 Next | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps |
 | News fetcher | ❌ Not started | |
 | Whale tracking | ❌ Not started | |
 | Web dashboard | ❌ Not started | |
