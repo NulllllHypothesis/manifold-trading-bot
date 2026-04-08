@@ -60,6 +60,13 @@ This file contains distilled learnings and significant events from daily logs. U
 - Bot immediately executed 2 new trades after adjustment (now at 10/10 max positions)
 - Current balance: $379.59 with $500 in open positions (57% exposure)
 
+## 2026-04-08: Market Research Timeouts Resolved
+
+- Market Research cron job (hourly) previously experiencing timeout errors (5min) resolved.
+- Research completed successfully at 11:05 UTC with swap check (no swaps).
+- All cron jobs currently healthy: research, resolution, trading, daily summary.
+- Note: exec session terminated with SIGTERM after completion, likely benign.
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch

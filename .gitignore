@@ -47,6 +47,17 @@ data/*.db
 /resolve_*.py
 /trading_cycle_status.py
 /market_mapping.json
+/test_*.py
+/run_*.sh
 
 # ClawHub-installed skills (installed by `openclaw skills install`, not part of our source)
 skills/healthcheck/
+
+# Generated fast research data
+market_research_fast.json
+
+# OpenClaw hub runtime directory
+.clawhub/
+
+# Fast research script (optional duplicate)
+/auto_research_fast.py
