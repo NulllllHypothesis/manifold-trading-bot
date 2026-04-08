@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-07 (signal-families + code-quality)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
+*Last updated: 2026-04-08 (real Telegram bot, swap-check moved into research)* — Signal family architecture: strategies organised into momentum/contrarian/fundamental/filter families with deduplication; `volume_spike_priority` returns float priority boost (not a directional signal); `probability_bias` category-conditional; duplicate-bet guard fixed; 173 tests total.
 
 ---
 
@@ -59,6 +59,8 @@ Every hour at :00 UTC
 │  - Blends stat + AI confidence  │
 │  - Saves market_research.json   │
 │    schema_version=2             │
+│  - Calls run_swap_check() ────► position_swap_checker.py
+│    (only fires if full+losing)  │  no separate :40 cron needed
 └─────────────────────────────────┘
         │
         │  (:10 every hour)
@@ -94,7 +96,7 @@ Every hour at :00 UTC
 │  - Updates paper_trading_state  │
 └─────────────────────────────────┘
         │
-        │  (:40 every hour)
+        │  (called by auto_research.py after each run — not a separate cron)
         ▼
 ┌─────────────────────────────────┐
 │  position_swap_checker.py runs  │
@@ -543,6 +545,18 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
   - New `:40` cron `position-swap-check` in `setup_cron_jobs.py`
   - 61 tests in `tests/test_swap.py`
 
+- ✅ **Real Telegram bot** (2026-04-08):
+  - `automation/send_telegram.py` — real Bot API HTTP calls; retries 3×; Markdown fallback; no library needed
+  - `automation/telegram_bot.py` — `/portfolio`, `/positions`, `/scan` command handlers; prints stdout + sends via API
+  - `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` + `TELEGRAM_GROUP_ID` from `.env`
+  - `skills/portfolio/`, `skills/positions/`, `skills/scan/` — OpenClaw workspace skills; all `✓ ready`
+  - Usage: `@hackathon_26_bot /portfolio` in group, or DM the bot directly
+  - `automation/daily_summary.py` — now sends directly to Telegram instead of writing to file
+
+- ✅ **Swap check moved into research** (2026-04-08):
+  - Removed standalone `:40` cron job (`f426953c` disabled on server)
+  - `run_swap_check()` called at end of `auto_research.py` main() — fires only when fresh data exists
+
 - ✅ **Signal family architecture + code quality** (2026-04-07):
   - `strategies.py` — `SIGNAL_FAMILIES` dict; `volume_spike_priority` returns float 0.0–1.0; `probability_bias` category-conditional; `mean_reversion` close-time guard; `probability_direction` volume guard
   - `auto_research.py` — family deduplication, composite ranking, `_AI_CANDIDATE_COUNT = 3`, research always runs
@@ -576,10 +590,9 @@ The bot doesn't run on your laptop. It runs on a server (Aleksi's homelab) insid
 Docker Container (Linux)
     └── OpenClaw (Node.js AI agent gateway)
             ├── Cron scheduler (built-in, not OS cron)
-            │       ├── hourly   :00 UTC  → runs auto_research.py
+            │       ├── hourly   :00 UTC  → runs auto_research.py (swap check inside)
             │       ├── hourly   :10 UTC  → runs resolve_positions.py
             │       ├── hourly   :20 UTC  → runs auto_trader.py
-            │       ├── hourly   :40 UTC  → runs position_swap_checker.py
             │       ├── daily 19:00 UTC   → runs daily_summary.py
             │       ├── Sundays  02:00    → runs harvest_resolved.py + analyze_calibration.py
             │       └── Mondays  07:00    → runs weekly_ev_report.py

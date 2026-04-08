@@ -88,24 +88,26 @@ Full rules in `AGENTS.md`.
 
 | ID | Name | Schedule |
 |---|---|---|
-| `359e61eb-...` | Manifold Market Research | `0 * * * *` UTC (hourly :00) |
-| *(position-resolution)* | Position Resolution | `10 * * * *` UTC (hourly :10) |
+| `359e61eb-...` | Manifold Market Research | `0 * * * *` UTC (hourly :00) — swap check runs inside this |
+| `8d2a66ec-...` | Position Resolution | `10 * * * *` UTC (hourly :10) |
 | `00695c33-...` | Manifold Auto Trading | `20 * * * *` UTC (hourly :20) |
-| *(position-swap-check)* | Position Swap Check | `40 * * * *` UTC (hourly :40) |
 | `0a77ecb9-...` | Daily Trading Summary | `0 19 * * *` UTC |
 | `e9a54afc-...` | Weekly Calibration Harvest | `0 2 * * 0` UTC (Sundays) |
 | `d5a01246-...` | Weekly EV Accuracy Report | `0 7 * * 1` UTC (Mondays) |
 
+Note: Position swap check (`f426953c`) was a separate `:40` cron — **disabled**. `run_swap_check()` is now called directly by `auto_research.py` after each research run so it only fires when fresh opportunity data exists.
+
 ---
 
-## Current Trading State (as of 2026-04-07)
+## Current Trading State (as of 2026-04-08)
 
-- **Paper balance:** ~$275
+- **Paper balance:** ~$139.59
 - **Open positions:** 10/10 (bot blocked — waiting for markets to resolve on Manifold)
 - **Auto-trader confidence threshold:** 65%
 - **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`)
-- **Active branch:** `main` (feature/calibration merged — PR #8, 76 tests passing)
+- **Active branch:** `main`
 - **Agent auto-reviewer:** DISABLED — caused file truncation bugs on 3/4 PRs. Human review only.
+- **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan` via `automation/telegram_bot.py`. Address bot directly in group: `@hackathon_26_bot /portfolio`
 
 ---
 
@@ -451,7 +453,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
 | Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 173 tests total |
-| Telegram bot commands | ❌ Not started | Placeholder only right now |
+| Telegram bot commands | ✅ Done | `send_telegram.py` real Bot API; `telegram_bot.py` with /portfolio /positions /scan; OpenClaw skills registered |
 | Category exposure caps | ❌ Not started | |
 | Weighted scoring + adaptive learning | ❌ Not started | strategy weights → dynamic sizing → category accuracy → self-performance prompt note |
 | News fetcher | ❌ Not started | |
