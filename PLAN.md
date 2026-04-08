@@ -61,10 +61,11 @@ Full rules in `AGENTS.md`.
 
 | File | What it does | Schedule |
 |------|-------------|----------|
-| `automation/auto_research.py` | Scans 100+ markets/hour, scores by strategy confidence, saves to `market_research.json` | Every hour :00 UTC |
-| `automation/auto_trader.py` | Reads research, applies risk rules, executes paper trades, logs to `auto_trades.json` | Every hour :15 UTC |
-| `automation/daily_summary.py` | Calculates daily P&L metrics, formats Telegram message | Daily 19:00 UTC |
-| `automation/send_telegram.py` | Telegram sender (currently placeholder — prints to console) | Called by daily_summary |
+| `automation/auto_research.py` | Scans 100+ markets/hour, family deduplication, AI on top 3, saves to `market_research.json`; calls swap check at end | Every hour :00 UTC |
+| `automation/auto_trader.py` | Reads research, applies risk rules, Kelly sizing, executes paper trades | Every hour :20 UTC |
+| `automation/daily_summary.py` | Calculates daily P&L metrics, sends to Telegram via Bot API | Daily 19:00 UTC |
+| `automation/send_telegram.py` | Telegram Bot API sender — retries, Markdown fallback, no library needed | Called by all scripts |
+| `automation/telegram_bot.py` | `/portfolio`, `/positions`, `/scan` command handlers | Called by OpenClaw skills / manually |
 | `automation/setup_cron_jobs.py` | Utility to recreate OpenClaw cron jobs if needed | Manual |
 
 ### Calibration (`scripts/`)
@@ -262,15 +263,14 @@ When all positions are full the bot was frozen. This feature turns `max_position
 - [x] `manifold_bot/paper_trader.py` — added `entry_probability`, `entry_confidence` to every trade record; added `close_position_early(market_id, current_prob)` method
 - [x] `scripts/position_swap_checker.py` — finds all weak positions, pairs each with unique opportunity, writes `pending_swaps.json`, sends Telegram per proposal
 - [x] `scripts/execute_swap.py` — `--id N` approves, `--id N --dismiss` dismisses; sends confirmation to Telegram
-- [x] `automation/setup_cron_jobs.py` — added `position-swap-check` cron at `:40 * * * *` (exec, no LLM)
+- [x] `automation/setup_cron_jobs.py` — swap check is NOT a separate cron; `run_swap_check()` is called at the end of `auto_research.py` after every research run
 - [x] `tests/test_swap.py` — 61 tests covering all paths (maths, filtering, flag-file logic, integration, zero-Kelly pre-validation, EV pipeline regression)
 
-**Cron schedule (updated):**
+**Cron schedule (current):**
 ```
-:00  Market Research
+:00  Market Research  (swap check runs inside this at end)
 :10  Position Resolution
 :20  Auto Trading
-:40  Position Swap Check   ← new
 19:00 daily  Daily Summary
 Sun 02:00    Weekly Harvest
 Mon 07:00    Weekly EV Report
@@ -278,21 +278,32 @@ Mon 07:00    Weekly EV Report
 
 ---
 
-### 🟡 Next — Real Telegram Bot
+### ✅ Real Telegram Bot — DONE (2026-04-08)
 
-`automation/send_telegram.py` is currently a placeholder — it just prints to console.
+No external library needed — uses plain HTTP to the Telegram Bot API.
 
-- [ ] Replace with real `python-telegram-bot` integration
-- [ ] Add `telegram_bot.py` with interactive commands:
-  - `/portfolio` — current balance + P&L
-  - `/scan` — top 5 trading opportunities right now
-  - `/trade <market_id> YES 50` — place a paper trade
-  - `/positions` — list open positions
+- [x] `automation/send_telegram.py` — real Bot API sender; 3 retries with backoff; falls back to plain text on Markdown parse errors; truncates at 4096 chars; `send_telegram_message()` kept for backward compat
+- [x] `automation/telegram_bot.py` — three command handlers:
+  - `portfolio` — balance, P&L, win rate, open slot count
+  - `positions` — all 10 open trades with direction, amount, entry probability
+  - `scan` — top 5 opportunities from latest research with AI score + EV
+  - Prints to stdout (OpenClaw capture) AND sends directly via Bot API
+  - Run: `python3 automation/telegram_bot.py portfolio|positions|scan`
+- [x] `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_GROUP_ID` read from `.env`
+- [x] `automation/daily_summary.py` — `send_to_telegram()` now calls real Bot API instead of placeholder
+- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/` — all `✓ ready`
+
+**How to use in Telegram:**
+```
+@hackathon_26_bot /portfolio    ← balance + P&L
+@hackathon_26_bot /positions    ← all open trades
+@hackathon_26_bot /scan         ← top opportunities
+```
+Address the bot directly with `@hackathon_26_bot` in the group, or DM it directly.
+
+**Remaining Telegram work (next iteration):**
 - [ ] Auto-notify the group when a market resolves
 - [ ] `/autotrader on` and `/autotrader off` commands
-
-> Bot token: in OpenClaw config on server (`~/.openclaw/openclaw.json`)
-> Group ID: `-5240775171`
 
 ---
 
