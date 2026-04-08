@@ -120,6 +120,11 @@ class AutoTrader:
             for pos_list in self.trader.positions.values()
             for pos in pos_list
             if pos.get('status') == 'OPEN'
+            # Skip positions with no category AND no question — they predate this
+            # feature and we cannot determine their category. Counting them as
+            # 'other' (the _infer_market_category('') fallback) would incorrectly
+            # fill the cap and block all new 'other' trades.
+            and (pos.get('category') or pos.get('question'))
             and (pos.get('category') or _infer_market_category(pos.get('question', ''))) == rec_category
         )
         if open_in_category >= MAX_POSITIONS_PER_CATEGORY:
