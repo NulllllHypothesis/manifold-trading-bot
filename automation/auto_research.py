@@ -24,6 +24,20 @@ from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE
 from scripts.position_swap_checker import run_swap_check
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_STRATEGY_WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
+_DEFAULT_STRATEGY_WEIGHT = 1.0
+
+
+def _load_strategy_weights() -> dict:
+    """Load strategy weights from data/strategy_weights.json; return defaults on any error."""
+    try:
+        with open(_STRATEGY_WEIGHTS_PATH) as f:
+            data = json.load(f)
+        return data.get("weights", {})
+    except Exception:
+        return {}
+
 # Single source of truth for the trading threshold — imported from config.py.
 # auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
 _WEAK_STAT_CAP = MIN_CONFIDENCE - 0.01   # cap for low-stat markets (stat < floor): 0.64
@@ -91,6 +105,9 @@ class MarketResearcher:
             # multiplier may need revisiting.
             print(f"  Median 24h volume across batch: {median_volume24h:.2f} "
                   f"(spike threshold: >{VOLUME_SPIKE_MULTIPLIER}x = {VOLUME_SPIKE_MULTIPLIER * median_volume24h:.2f})")
+
+            # Load strategy reliability weights once per run.
+            strategy_weights = _load_strategy_weights()
 
             recommendations = []
 
@@ -162,6 +179,14 @@ class MarketResearcher:
 
                 thin_rec = TradingStrategies.thin_market_strategy(market)
                 # thin_market is tracked separately — added only as confirmation
+
+                # ── Apply strategy reliability weights ────────────────────────
+                # Scale each signal's base confidence by its historical weight.
+                # Weights are 0.5–1.2; clamped to [0.0, 1.0] so they can't push
+                # a signal above 100% confidence before blending.
+                for sig in raw_signals:
+                    w = strategy_weights.get(sig['strategy'], _DEFAULT_STRATEGY_WEIGHT)
+                    sig['confidence'] = round(min(1.0, sig['confidence'] * w), 4)
 
                 # ── Family deduplication ──────────────────────────────────────
                 # From each family take the single highest-confidence signal.
