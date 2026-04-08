@@ -60,6 +60,12 @@ This file contains distilled learnings and significant events from daily logs. U
 - Bot immediately executed 2 new trades after adjustment (now at 10/10 max positions)
 - Current balance: $379.59 with $500 in open positions (57% exposure)
 
+## 2026-04-06: Market Research Cron Job Monitoring
+
+- Heartbeat monitoring detected persistent timeout errors in Market Research cron job (5-minute timeout) across multiple cycles
+- Issue resolved by 2026-04-07 20:00 UTC run (status returned to healthy)
+- Lesson: Timeout errors can be transient; heartbeat monitoring provides early detection and confirmation of resolution
+
 ## Rules & Conventions
 
 - Never push directly to `main` branch

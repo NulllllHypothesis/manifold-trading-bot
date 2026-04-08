@@ -47,6 +47,8 @@ data/*.db
 /resolve_*.py
 /trading_cycle_status.py
 /market_mapping.json
+/test_*.py
 
 # ClawHub-installed skills (installed by `openclaw skills install`, not part of our source)
 skills/healthcheck/
+.clawhub/
