@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.config import INITIAL_BALANCE
+from manifold_bot.manifold_api import api_client
 from automation.send_telegram import send_message
 
 # ── File paths ─────────────────────────────────────────────────────────────────
@@ -101,6 +102,29 @@ def cmd_positions() -> str:
         return "No trading state found yet."
 
     positions = state.get("positions", {})
+
+    # Build a market_id → question title lookup.
+    # 1. Seed from latest research (fast, no API call needed for recent markets).
+    research = _load_research()
+    latest = research.get("latest", research)
+    _title_lookup = {
+        r.get("market_id"): r.get("question", "")
+        for r in latest.get("recommendations", [])
+        if r.get("market_id")
+    }
+    # 2. For positions that still lack a title, fetch from Manifold API.
+    missing_ids = [
+        mid for mid, trades in positions.items()
+        if any(t.get("status") == "OPEN" for t in trades)
+        and not _title_lookup.get(mid)
+        and not any(t.get("question") for t in trades if t.get("status") == "OPEN")
+    ]
+    for mid in missing_ids:
+        try:
+            market = api_client.get_market(mid)
+            _title_lookup[mid] = market.get("question", mid)
+        except Exception:
+            pass
     open_trades = []
     for market_id, trades in positions.items():
         for t in trades:
@@ -115,13 +139,14 @@ def cmd_positions() -> str:
         direction = t.get("outcome", "?")
         amount    = t.get("amount", 0)
         entry_p   = t.get("entry_probability") or t.get("probability", 0)
-        question  = t.get("question", market_id)[:55]
         conf      = t.get("entry_confidence") or t.get("confidence", 0)
 
-        # Rough unrealised P&L estimate using entry probability as proxy
-        # (current probability not available without live API call)
+        # Prefer stored question, fall back to research lookup, then market ID
+        raw_title = t.get("question") or _title_lookup.get(market_id) or market_id
+        question  = raw_title[:60]
+
         direction_symbol = "🟢" if direction == "YES" else "🔴"
-        msg += f"{i}. {direction_symbol} *{direction}* — {question}...\n"
+        msg += f"{i}. {direction_symbol} *{direction}* — {question}\n"
         msg += f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%\n"
 
     msg += f"\n_Updated {datetime.now().strftime('%H:%M UTC')}_"
@@ -217,10 +242,8 @@ def main():
     cmd = sys.argv[1]
     response = _COMMANDS[cmd]()
 
-    # Print for OpenClaw / stdout capture
-    print(response)
-
-    # Also send directly via Bot API (works for exec cron jobs)
+    # Send directly via Bot API — the skill runner also captures stdout and
+    # would forward it, causing a duplicate. Suppress stdout here.
     send_message(response)
     return 0
 
