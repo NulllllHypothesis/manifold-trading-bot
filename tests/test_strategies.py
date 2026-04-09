@@ -253,13 +253,13 @@ class TestSignalFamilies(unittest.TestCase):
             'thin_market':           'contrarian',
             'probability_bias':      'contrarian',
             'creator_disagreement':  'fundamental',
-            'volume_spike':          'filter',
+            'volume_spike_priority': 'filter',
         }
         self.assertEqual(TradingStrategies.SIGNAL_FAMILIES, expected)
 
     def test_volume_spike_is_filter_not_directional(self):
-        """volume_spike must be in 'filter' family — it cannot be momentum or contrarian."""
-        self.assertEqual(TradingStrategies.SIGNAL_FAMILIES['volume_spike'], 'filter')
+        """volume_spike_priority must be in 'filter' family — it cannot be momentum or contrarian."""
+        self.assertEqual(TradingStrategies.SIGNAL_FAMILIES['volume_spike_priority'], 'filter')
 
     def test_probability_bias_is_contrarian(self):
         self.assertEqual(TradingStrategies.SIGNAL_FAMILIES['probability_bias'], 'contrarian')

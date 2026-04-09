@@ -141,6 +141,31 @@
         "bestEffort": true
       },
       "enabled": true
+    },
+    "weekly-strategy-weights": {
+      "name": "Weekly Strategy Weight Update",
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 7 * * 1",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && git pull origin main --quiet && python3 scripts/compute_strategy_weights.py && git add data/strategy_weights.json && git diff --cached --quiet || git commit -m 'chore: update strategy weights [skip ci]'"
+        ],
+        "timeoutSeconds": 120
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "none",
+        "channel": "telegram",
+        "to": "-5240775171",
+        "bestEffort": true
+      },
+      "enabled": true
     }
   }
 }
