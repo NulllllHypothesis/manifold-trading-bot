@@ -310,8 +310,8 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
     meta: optional dict; if provided, sets meta['timed_out']=True on timeout
     so the caller can distinguish a stuck runner from other failures.
     """
-    FIRST_TOKEN_TIMEOUT = 20   # seconds to wait for first token — catches stuck runners fast
-    PER_CHUNK_TIMEOUT   = 60   # reduced from 120s — llama3.2:3b finishes in ~35s
+    FIRST_TOKEN_TIMEOUT = 40   # seconds — cold model load for 3b takes ~15-20s; warm is <2s
+    PER_CHUNK_TIMEOUT   = 60   # seconds per subsequent chunk — 3b finishes in ~35s at 9 tok/s
     try:
         import requests
         response = requests.post(
@@ -320,6 +320,7 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
                 "model": OLLAMA_MODEL,
                 "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
                 "stream": True,
+                "keep_alive": "2h",  # keep model resident between hourly cron runs
                 "options": {"temperature": 0.3}
             },
             timeout=(5, FIRST_TOKEN_TIMEOUT),  # connect=5s, first-byte=20s
