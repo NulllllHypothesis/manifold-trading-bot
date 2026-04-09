@@ -304,13 +304,13 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
     never does. Once the first token arrives we read the rest with a generous
     per-chunk timeout since generation can legitimately take 80-90s on CPU.
 
-    With llama3.2:3b at ~9 tok/s, first token arrives in <2s and a full
-    300-token response completes in ~35s — well within both timeout bounds.
+    With llama3.2:3b at ~9 tok/s, first token arrives in <2s warm or ~40s cold
+    (model load from disk). FIRST_TOKEN_TIMEOUT must exceed the cold-load time.
 
     meta: optional dict; if provided, sets meta['timed_out']=True on timeout
     so the caller can distinguish a stuck runner from other failures.
     """
-    FIRST_TOKEN_TIMEOUT = 40   # seconds — cold model load for 3b takes ~15-20s; warm is <2s
+    FIRST_TOKEN_TIMEOUT = 90   # seconds — cold model load on this hardware takes ~40s; warm is <2s
     PER_CHUNK_TIMEOUT   = 60   # seconds per subsequent chunk — 3b finishes in ~35s at 9 tok/s
     try:
         import requests
@@ -320,10 +320,10 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
                 "model": OLLAMA_MODEL,
                 "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
                 "stream": True,
-                "keep_alive": "2h",  # keep model resident between hourly cron runs
+                "keep_alive": "4h",  # keep model resident; 4h covers gaps between hourly cron runs
                 "options": {"temperature": 0.3}
             },
-            timeout=(5, FIRST_TOKEN_TIMEOUT),  # connect=5s, first-byte=20s
+            timeout=(5, FIRST_TOKEN_TIMEOUT),  # connect=5s, first-byte=90s
             stream=True,
         )
         if response.status_code != 200:
