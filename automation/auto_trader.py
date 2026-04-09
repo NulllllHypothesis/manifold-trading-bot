@@ -10,7 +10,6 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-import random
 
 # Add project root to path so manifold_bot package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,19 +17,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS_PER_CATEGORY
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY
 from manifold_bot.strategies import _infer_market_category
 
 class AutoTrader:
     """Automated trading with risk management"""
 
     def __init__(self):
-        self.research_file = "market_research.json"
-        self.trade_log_file = "auto_trades.json"
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.research_file = os.path.join(_root, "market_research.json")
+        self.trade_log_file = os.path.join(_root, "auto_trades.json")
         self.trader = PaperTrader()  # Will auto-load state from __init__
 
         # Risk management parameters
-        self.max_positions = 10  # Increased from 5 to allow more diversification (currently 8 open)
+        self.max_positions = MAX_POSITIONS
         self.max_position_size = 0.1  # 10% of balance per trade
         self.min_confidence = MIN_CONFIDENCE
 

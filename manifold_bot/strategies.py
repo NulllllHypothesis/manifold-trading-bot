@@ -56,10 +56,10 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
                   'cancer', 'physics', 'biology', 'crispr', 'fusion'],
 }
 
-# Category-level bias from data/calibration_table.json by_category.
-# Categories with very low overall bias are well-calibrated — the bucket-level
-# bias signal doesn't generalise there, so probability_bias should not fire.
-_CATEGORY_BIAS: Dict[str, float] = {
+# Category-level bias loaded from data/calibration_table.json at import time.
+# Falls back to the values recorded at the last manual calibration run so the
+# strategy still works on a fresh checkout before calibration data is generated.
+_CATEGORY_BIAS_FALLBACK: Dict[str, float] = {
     'other':     0.0439,
     'sports':    0.0348,
     'economics': 0.0151,
@@ -68,6 +68,23 @@ _CATEGORY_BIAS: Dict[str, float] = {
     'crypto':    0.0534,
     'science':   0.0543,
 }
+
+
+def _load_category_bias() -> Dict[str, float]:
+    """Return category→bias mapping from calibration_table.json, or fallback dict."""
+    try:
+        _cal = Path(__file__).resolve().parent.parent / "data" / "calibration_table.json"
+        data = json.loads(_cal.read_text())
+        loaded = {row['category']: row['bias'] for row in data.get('by_category', [])}
+        if loaded:
+            return loaded
+    except Exception:
+        pass
+    return _CATEGORY_BIAS_FALLBACK.copy()
+
+
+_CATEGORY_BIAS: Dict[str, float] = _load_category_bias()
+
 # Minimum category-level bias required for probability_bias to fire.
 # ai_tech (0.19pp) and economics (1.51pp) are below this and will be skipped.
 _MIN_BIAS_TO_TRADE = 0.04
@@ -93,7 +110,7 @@ class TradingStrategies:
         'thin_market':           'contrarian',   # confirmation-only within family
         'probability_bias':      'contrarian',
         'creator_disagreement':  'fundamental',
-        'volume_spike':          'filter',       # priority boost, not a directional vote
+        'volume_spike_priority': 'filter',       # priority boost, not a directional vote
     }
 
     # ------------------------------------------------------------------ #
@@ -438,44 +455,6 @@ class TradingStrategies:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def find_arbitrage_opportunities(markets: List[Dict]) -> List[Dict]:
-        """
-        Find arbitrage opportunities between related markets.
-        Groups markets by common keyword and flags outliers.
-        """
-        opportunities = []
-        market_groups: Dict[str, List[Dict]] = {}
-
-        for market in markets:
-            question = market.get('question', '').lower()
-            keywords = ['bitcoin', 'ethereum', 'trump', 'biden', 'tesla', 'apple']
-            for keyword in keywords:
-                if keyword in question:
-                    market_groups.setdefault(keyword, []).append(market)
-
-        for keyword, group_markets in market_groups.items():
-            if len(group_markets) < 2:
-                continue
-
-            probs = [m.get('probability', 0.5) for m in group_markets]
-            avg_prob = sum(probs) / len(probs)
-
-            for market in group_markets:
-                prob = market.get('probability', 0.5)
-                diff = abs(prob - avg_prob)
-                if diff > 0.1:
-                    opportunities.append({
-                        'market_id': market.get('id'),
-                        'question': market.get('question'),
-                        'probability': prob,
-                        'group_avg': avg_prob,
-                        'difference': diff,
-                        'suggested_bet': 'YES' if prob < avg_prob else 'NO',
-                    })
-
-        return opportunities
-
-    @staticmethod
     def calculate_kelly_criterion(probability: float, payout_ratio: float) -> float:
         """
         Calculate Kelly Criterion bet size fraction.
@@ -532,10 +511,8 @@ def analyze_market_for_trading(market: Dict) -> Dict:
     if rec:
         signals['mean_reversion'] = rec
 
-    # volume_spike needs the batch median — pass 0 here so it never fires solo
-    rec = TradingStrategies.volume_spike_strategy(market, avg_volume=0)
-    if rec:
-        signals['volume_spike'] = rec
+    # volume_spike_priority needs the batch median — pass 0 here so it never fires solo
+    TradingStrategies.volume_spike_priority(market, avg_volume=0)
 
     rec = TradingStrategies.creator_disagreement_strategy(market)
     if rec:

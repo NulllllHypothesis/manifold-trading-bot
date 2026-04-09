@@ -6,7 +6,6 @@ Runs hourly to analyze markets and identify trading opportunities.
 
 import json
 import sys
-import time
 import statistics as _stats
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -14,8 +13,6 @@ import os
 
 # Add project root to path so manifold_bot package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import time as _time
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies, _infer_market_category
@@ -66,7 +63,7 @@ class MarketResearcher:
     """Automated market research and analysis"""
 
     def __init__(self):
-        self.research_file = "market_research.json"
+        self.research_file = os.path.join(_ROOT, "market_research.json")
         self.trader = PaperTrader()  # Will auto-load state from __init__
 
     def analyze_markets(self, limit: int = 50) -> List[Dict]:
@@ -105,6 +102,12 @@ class MarketResearcher:
             # multiplier may need revisiting.
             print(f"  Median 24h volume across batch: {median_volume24h:.2f} "
                   f"(spike threshold: >{VOLUME_SPIKE_MULTIPLIER}x = {VOLUME_SPIKE_MULTIPLIER * median_volume24h:.2f})")
+
+            # Check whether creator_disagreement's API field is present.
+            # This strategy has the highest weight (0.75) but fires only when
+            # resolutionProbability is set — which is rare. Log once per run so
+            # we know if the field is always absent (meaning the strategy never fires).
+            TradingStrategies.log_creator_disagreement_field_presence(markets)
 
             # Load strategy reliability weights once per run.
             strategy_weights = _load_strategy_weights()
@@ -201,18 +204,19 @@ class MarketResearcher:
                         best = max(family_sigs, key=lambda s: s['confidence'])
                         active_signals.append(best)
 
-                # thin_market: add only if another signal agrees (confirmation-only)
+                # thin_market: confirmation-only — when it agrees with the selected
+                # contrarian/fundamental signal, give that signal a small confidence
+                # boost (+0.03) rather than appending an independent vote.
+                # Appending would break the family-dedup guarantee (two contrarian
+                # signals) AND would reduce confidence by pulling the average down
+                # (thin_market's 0.65 is below mean_reversion's 0.68).
+                thin_market_fired = False
                 if thin_rec:
-                    other_agreeing = any(
-                        s['recommendation'] == thin_rec
-                        for s in active_signals
-                        if s['family'] in ('contrarian', 'fundamental')
-                    )
-                    if other_agreeing:
-                        active_signals.append({'strategy': 'thin_market',
-                                               'recommendation': thin_rec,
-                                               'confidence': 0.65,
-                                               'family': 'contrarian'})
+                    for _sig in active_signals:
+                        if _sig['family'] in ('contrarian', 'fundamental') and _sig['recommendation'] == thin_rec:
+                            _sig['confidence'] = round(min(1.0, _sig['confidence'] + 0.03), 4)
+                            thin_market_fired = True
+                            break
 
                 if not active_signals:
                     continue
@@ -232,8 +236,11 @@ class MarketResearcher:
                 else:
                     continue  # tied — no clear edge
 
-                # Check if we already have a position
-                existing_position = market_id in self.trader.positions
+                # Check if we already have an OPEN position (closed/resolved don't count)
+                existing_position = any(
+                    p.get('status') == 'OPEN'
+                    for p in self.trader.positions.get(market_id, [])
+                )
 
                 recommendation = {
                     'market_id': market_id,
@@ -247,7 +254,7 @@ class MarketResearcher:
                     'last_bet_time_ms': market.get('lastBetTime'),
                     'recommendation': overall_rec,
                     'confidence': round(confidence, 2),
-                    'strategies': [s['strategy'] for s in active_signals],
+                    'strategies': [s['strategy'] for s in active_signals] + (['thin_market'] if thin_market_fired else []),
                     'priority_boost': round(priority_boost, 3),
                     'existing_position': existing_position,
                     'analyzed_at': datetime.now().isoformat()

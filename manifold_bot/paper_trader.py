@@ -6,7 +6,6 @@ Simulates trading without using real play money.
 import json
 import os
 import sqlite3
-import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -457,68 +456,66 @@ class PaperTrader:
         """Calculate performance metrics"""
         if not self.trade_history:
             return {}
-        
-        df = pd.DataFrame(self.trade_history)
-        
-        # Filter resolved trades
-        resolved_trades = df[df['status'].isin(['WIN', 'LOSE'])]
-        
-        if len(resolved_trades) == 0:
+
+        open_trades   = [t for t in self.trade_history if t.get('status') == 'OPEN']
+        win_trades    = [t for t in self.trade_history if t.get('status') == 'WIN']
+        lose_trades   = [t for t in self.trade_history if t.get('status') == 'LOSE']
+        resolved_trades = win_trades + lose_trades
+
+        if not resolved_trades:
             return {
-                'total_trades': len(df),
-                'open_trades': len(df[df['status'] == 'OPEN']),
+                'total_trades': len(self.trade_history),
+                'open_trades': len(open_trades),
                 'current_balance': self.balance,
                 'total_pnl': 0,
-                'win_rate': 0
+                'win_rate': 0,
             }
-        
-        # Calculate metrics
-        win_trades = resolved_trades[resolved_trades['status'] == 'WIN']
-        lose_trades = resolved_trades[resolved_trades['status'] == 'LOSE']
-        
-        total_pnl = resolved_trades['profit'].sum()
-        win_rate = len(win_trades) / len(resolved_trades) if len(resolved_trades) > 0 else 0
-        
-        avg_win = win_trades['profit'].mean() if len(win_trades) > 0 else 0
-        avg_loss = lose_trades['profit'].mean() if len(lose_trades) > 0 else 0
-        profit_factor = abs(win_trades['profit'].sum() / lose_trades['profit'].sum()) if len(lose_trades) > 0 and lose_trades['profit'].sum() != 0 else float('inf')
-        
-        # Calculate money in open trades
-        open_trades = df[df['status'] == 'OPEN']
-        money_in_open = open_trades['amount'].sum() if len(open_trades) > 0 else 0
-        
-        # Calculate potential P&L for open trades (simplified)
-        potential_pnl = 0
-        for _, trade in open_trades.iterrows():
-            if trade['outcome'] == 'YES':
-                potential_payout = trade['amount'] / trade['probability'] if trade['probability'] > 0 else 0
-                potential_profit = potential_payout - trade['amount']
+
+        total_pnl  = sum(t.get('profit', 0) for t in resolved_trades)
+        win_rate   = len(win_trades) / len(resolved_trades)
+
+        win_profits  = [t.get('profit', 0) for t in win_trades]
+        lose_profits = [t.get('profit', 0) for t in lose_trades]
+
+        avg_win  = sum(win_profits)  / len(win_profits)  if win_profits  else 0
+        avg_loss = sum(lose_profits) / len(lose_profits) if lose_profits else 0
+
+        lose_sum = sum(lose_profits)
+        profit_factor = abs(sum(win_profits) / lose_sum) if lose_sum != 0 else float('inf')
+
+        money_in_open = sum(t.get('amount', 0) for t in open_trades)
+
+        potential_pnl = 0.0
+        for trade in open_trades:
+            prob = trade.get('probability', 0.5)
+            amt  = trade.get('amount', 0)
+            if trade.get('outcome') == 'YES':
+                payout = amt / prob if prob > 0 else 0
             else:
-                potential_payout = trade['amount'] / (1 - trade['probability']) if trade['probability'] < 1 else 0
-                potential_profit = potential_payout - trade['amount']
-            potential_pnl += potential_profit
-        
+                payout = amt / (1 - prob) if prob < 1 else 0
+            potential_pnl += payout - amt
+
         self.performance_metrics = {
-            'total_trades': len(df),
-            'resolved_trades': len(resolved_trades),
-            'open_trades': len(open_trades),
-            'win_trades': len(win_trades),
-            'lose_trades': len(lose_trades),
-            'win_rate': win_rate,
-            'realized_pnl': total_pnl,  # Renamed for clarity
-            'current_balance': self.balance,
-            'initial_balance': self.initial_balance,
-            'net_return_pct': ((self.balance - self.initial_balance) / self.initial_balance * 100),
+            'total_trades':       len(self.trade_history),
+            'resolved_trades':    len(resolved_trades),
+            'open_trades':        len(open_trades),
+            'win_trades':         len(win_trades),
+            'lose_trades':        len(lose_trades),
+            'win_rate':           win_rate,
+            'realized_pnl':       total_pnl,
+            'current_balance':    self.balance,
+            'initial_balance':    self.initial_balance,
+            'net_return_pct':     (self.balance - self.initial_balance) / self.initial_balance * 100,
             'money_in_open_trades': money_in_open,
             'potential_pnl_open': potential_pnl,
-            'total_exposure': money_in_open + abs(total_pnl),
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor,
-            'largest_win': win_trades['profit'].max() if len(win_trades) > 0 else 0,
-            'largest_loss': lose_trades['profit'].min() if len(lose_trades) > 0 else 0
+            'total_exposure':     money_in_open + abs(total_pnl),
+            'avg_win':            avg_win,
+            'avg_loss':           avg_loss,
+            'profit_factor':      profit_factor,
+            'largest_win':        max(win_profits,  default=0),
+            'largest_loss':       min(lose_profits, default=0),
         }
-        
+
         return self.performance_metrics
     
     def print_portfolio_summary(self):
