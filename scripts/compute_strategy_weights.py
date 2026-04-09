@@ -72,9 +72,15 @@ def _parse_strategies(raw) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-def _compute_weights(outcomes: list[dict]) -> dict:
+def _compute_weights(outcomes: list[dict]) -> tuple[dict, dict]:
     """
-    Returns {strategy_name: weight} for all known strategies.
+    Returns (weights, per_strategy_samples) for all known strategies.
+
+    weights:               {strategy_name: weight_scalar}
+    per_strategy_samples:  {strategy_name: sample_count}  — written to
+                           strategy_weights.json so merge_weights() in
+                           backtest_from_snapshots.py can correctly prefer
+                           live data once it clears MIN_SAMPLES_PER_STRATEGY.
     """
     per_strategy: dict[str, dict] = {}  # {name: {total, correct}}
 
@@ -92,13 +98,16 @@ def _compute_weights(outcomes: list[dict]) -> dict:
                 per_strategy[s]["correct"] += 1
 
     weights = {}
+    per_strategy_samples = {}
     for strat in _KNOWN_STRATEGIES:
         stats = per_strategy.get(strat)
-        if stats is None or stats["total"] < MIN_SAMPLES_PER_STRATEGY:
+        n = stats["total"] if stats else 0
+        per_strategy_samples[strat] = n
+        if stats is None or n < MIN_SAMPLES_PER_STRATEGY:
             weights[strat] = _DEFAULT_WEIGHT
             continue
 
-        acc = stats["correct"] / stats["total"]
+        acc = stats["correct"] / n
         if acc >= 0.60:
             w = 1.0 + (acc - 0.50) * 2   # 1.0 → 1.20 as acc goes 0.50 → 0.60+
             w = min(w, 1.20)
@@ -109,7 +118,7 @@ def _compute_weights(outcomes: list[dict]) -> dict:
 
         weights[strat] = round(w, 4)
 
-    return weights
+    return weights, per_strategy_samples
 
 
 def _compute_category_accuracy(outcomes: list[dict]) -> dict:
@@ -140,7 +149,7 @@ def _compute_category_accuracy(outcomes: list[dict]) -> dict:
 
 def main(dry_run: bool = False) -> None:
     outcomes = _fetch_outcomes(era="post_ev_fix")
-    weights = _compute_weights(outcomes)
+    weights, per_strategy_samples = _compute_weights(outcomes)
     cat_accuracy = _compute_category_accuracy(outcomes)
 
     result = {
@@ -148,21 +157,20 @@ def main(dry_run: bool = False) -> None:
         "sample_count": len(outcomes),
         "min_samples_threshold": MIN_SAMPLES_PER_STRATEGY,
         "weights": weights,
+        "per_strategy_samples": per_strategy_samples,
     }
 
     print(f"\nStrategy weights ({len(outcomes)} post-fix resolved trades):")
     for strat, w in weights.items():
-        stats: dict = {}
-        for o in outcomes:
-            if strat in _parse_strategies(o.get("strategies")):
-                if not stats:
-                    stats = {"total": 0, "correct": 0}
-                stats["total"] += 1
-                if o.get("our_recommendation") == o.get("market_resolution"):
-                    stats["correct"] += 1
-        if stats:
-            acc = stats["correct"] / stats["total"]
-            note = f"{stats['correct']}/{stats['total']} correct ({acc*100:.0f}%)"
+        n = per_strategy_samples.get(strat, 0)
+        if n >= MIN_SAMPLES_PER_STRATEGY:
+            # Recompute accuracy for display (not stored separately)
+            correct = sum(
+                1 for o in outcomes
+                if strat in _parse_strategies(o.get("strategies"))
+                and o.get("our_recommendation") == o.get("market_resolution")
+            )
+            note = f"{correct}/{n} correct ({correct/n*100:.0f}%)"
         else:
             note = f"<{MIN_SAMPLES_PER_STRATEGY} samples — default"
         print(f"  {strat:<28} weight={w:.4f}  [{note}]")

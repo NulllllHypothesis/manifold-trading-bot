@@ -1535,5 +1535,122 @@ class TestApiErrorVsNoBets(unittest.TestCase):
             os.unlink(db_path)
 
 
+# ── compute_strategy_weights: per_strategy_samples emitted ───────────────────
+
+class TestComputeStrategyWeightsPerStrategySamples(unittest.TestCase):
+    """
+    _compute_weights() must return per-strategy sample counts alongside weights.
+    strategy_weights.json must include per_strategy_samples so
+    backtest_from_snapshots.merge_weights() can correctly prefer live data once
+    enough live trades accumulate.
+    """
+
+    def _make_outcome(self, strategy: str, correct: bool) -> dict:
+        import json
+        return {
+            "our_recommendation": "YES",
+            "market_resolution": "YES" if correct else "NO",
+            "strategies": json.dumps([strategy]),
+            "actual_pnl": 1.0 if correct else -1.0,
+            "estimated_ev": None,
+            "ai_confidence": None,
+            "category": "science",
+        }
+
+    def test_returns_tuple(self):
+        from scripts.compute_strategy_weights import _compute_weights
+        result = _compute_weights([])
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+    def test_per_strategy_samples_zero_when_no_outcomes(self):
+        from scripts.compute_strategy_weights import _compute_weights, _KNOWN_STRATEGIES
+        _, samples = _compute_weights([])
+        for strat in _KNOWN_STRATEGIES:
+            self.assertEqual(samples[strat], 0)
+
+    def test_per_strategy_samples_counts_correctly(self):
+        from scripts.compute_strategy_weights import _compute_weights
+        outcomes = [
+            self._make_outcome("mean_reversion", True),
+            self._make_outcome("mean_reversion", True),
+            self._make_outcome("probability_bias", False),
+        ]
+        _, samples = _compute_weights(outcomes)
+        self.assertEqual(samples["mean_reversion"], 2)
+        self.assertEqual(samples["probability_bias"], 1)
+
+    def test_per_strategy_samples_included_in_json_output(self):
+        """main(dry_run=True) must not crash; result dict must have per_strategy_samples."""
+        from scripts.compute_strategy_weights import _compute_weights, _KNOWN_STRATEGIES
+        outcomes = []
+        weights, samples = _compute_weights(outcomes)
+        # Simulate the result dict that main() builds
+        result = {
+            "weights": weights,
+            "per_strategy_samples": samples,
+        }
+        self.assertIn("per_strategy_samples", result)
+        self.assertIsInstance(result["per_strategy_samples"], dict)
+        for strat in _KNOWN_STRATEGIES:
+            self.assertIn(strat, result["per_strategy_samples"])
+
+    def test_merge_weights_uses_live_when_samples_present(self):
+        """
+        End-to-end: if strategy_weights.json is written with per_strategy_samples,
+        merge_weights() must use the live weight (not backtest) for that strategy.
+        """
+        import json
+        import tempfile
+        from scripts.backtest_from_snapshots import merge_weights
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            live_data = {
+                "generated_at": "2026-04-09T00:00:00Z",
+                "sample_count": 50,
+                "weights": {"mean_reversion": 0.75},
+                "per_strategy_samples": {"mean_reversion": MIN_SAMPLES_PER_STRATEGY + 10},
+            }
+            with open(path, "w") as f:
+                json.dump(live_data, f)
+
+            merged, _ = merge_weights({"mean_reversion": 1.10}, live_weights_path=path)
+            self.assertEqual(merged["mean_reversion"]["source"], "live",
+                             "live weight must win when per_strategy_samples clears the gate")
+            self.assertAlmostEqual(merged["mean_reversion"]["weight"], 0.75, places=4)
+        finally:
+            os.unlink(path)
+
+    def test_merge_weights_backtest_wins_without_per_strategy_samples(self):
+        """
+        If strategy_weights.json has no per_strategy_samples (old format),
+        merge_weights() must fall back to backtest weight (live_n defaults to 0).
+        """
+        import json
+        import tempfile
+        from scripts.backtest_from_snapshots import merge_weights
+
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            # Old format: no per_strategy_samples key
+            live_data = {
+                "generated_at": "2026-04-09T00:00:00Z",
+                "sample_count": 50,
+                "weights": {"mean_reversion": 0.75},
+            }
+            with open(path, "w") as f:
+                json.dump(live_data, f)
+
+            merged, _ = merge_weights({"mean_reversion": 1.10}, live_weights_path=path)
+            self.assertEqual(merged["mean_reversion"]["source"], "backtest",
+                             "backtest must fill gap when per_strategy_samples is absent")
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
