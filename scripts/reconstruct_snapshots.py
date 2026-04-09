@@ -140,6 +140,11 @@ def fetch_bets_for_market(api: ManifoldAPI, market_id: str) -> list[dict]:
       createdTime  — Unix ms timestamp
       probAfter    — market probability immediately after this bet
       probBefore   — market probability before this bet
+
+    Raises:
+        Exception — re-raised from the HTTP layer so the caller can distinguish
+                    genuine API/network failures from markets that simply have
+                    no bet history.  Do NOT swallow here.
     """
     all_bets: list[dict] = []
     before_id = None
@@ -149,11 +154,9 @@ def fetch_bets_for_market(api: ManifoldAPI, market_id: str) -> list[dict]:
         if before_id:
             params["before"] = before_id
 
-        try:
-            page = api._make_request("GET", "/v0/bets", params=params)
-        except Exception as e:
-            print(f"    API error fetching bets for {market_id}: {e}")
-            break
+        # Let exceptions propagate — the caller classifies them as api_error,
+        # not no_bets, so operational failures are visible in the summary.
+        page = api._make_request("GET", "/v0/bets", params=params)
 
         if not page:
             break
@@ -231,7 +234,15 @@ def reconstruct_market(
         return {"market_id": market_id, "windows_written": 0,
                 "windows_skipped": len(windows), "reason": "already_done"}
 
-    bets = fetch_bets_for_market(api, market_id)
+    try:
+        bets = fetch_bets_for_market(api, market_id)
+    except Exception as e:
+        # Separate API/network failures from markets that genuinely have no bets.
+        # api_error shows up in the summary so operational problems are visible.
+        return {"market_id": market_id, "windows_written": 0,
+                "windows_skipped": len(windows), "reason": "api_error",
+                "error": str(e)}
+
     time.sleep(API_DELAY)
 
     if not bets:
@@ -374,7 +385,8 @@ def reconstruct(
     total_skipped  = 0
     already_done   = 0
     no_bets        = 0
-    errors         = 0
+    api_errors     = 0
+    errors         = 0  # unexpected exceptions in reconstruct_market itself
 
     print(f"\n{'='*65}")
     print(f"M3 SNAPSHOT RECONSTRUCTION")
@@ -398,6 +410,8 @@ def reconstruct(
             already_done += 1
         elif reason == "no_bets":
             no_bets += 1
+        elif reason == "api_error":
+            api_errors += 1
 
         total_written += result["windows_written"]
         total_skipped += result["windows_skipped"]
@@ -422,6 +436,7 @@ def reconstruct(
         "windows_skipped":     total_skipped,
         "already_done":        already_done,
         "no_bets":             no_bets,
+        "api_errors":          api_errors,
         "errors":              errors,
         "dry_run":             dry_run,
     }
@@ -429,18 +444,22 @@ def reconstruct(
     print(f"\n{'='*65}")
     print(f"RECONSTRUCTION COMPLETE")
     print(f"{'─'*65}")
-    print(f"  Markets processed:   {len(markets)}")
+    print(f"  Markets processed:     {len(markets)}")
     print(f"  Snapshot rows written: {total_written}")
-    print(f"  Windows skipped:     {total_skipped}  (market hadn't started by window)")
-    print(f"  Already done:        {already_done}  (skipped re-run)")
-    print(f"  No bets found:       {no_bets}")
-    print(f"  Errors:              {errors}")
-    print(f"  DB:                  {snapshots_db}")
+    print(f"  Windows skipped:       {total_skipped}  (market hadn't started by window)")
+    print(f"  Already done:          {already_done}  (skipped re-run)")
+    print(f"  No bets found:         {no_bets}  (market had no bet history)")
+    if api_errors:
+        print(f"  API errors:            {api_errors}  ← check connectivity / rate limits")
+    else:
+        print(f"  API errors:            0")
+    print(f"  Other errors:          {errors}")
+    print(f"  DB:                    {snapshots_db}")
     print(f"{'='*65}\n")
 
     if not dry_run and total_written > 0:
         print("Next steps:")
-        print("  1. Run scripts/compute_strategy_weights.py to pick up new signal")
+        print("  1. Run scripts/backtest_from_snapshots.py to compute weights from reconstructed data")
         print("  2. Check if strategy weights diverge from 1.0")
         print("  3. If yes → restore MAX_BET_AMOUNT in manifold_bot/config.py")
 

@@ -37,6 +37,30 @@ MIN_SAMPLES_PER_STRATEGY = 10   # per-strategy reliability weight — below this
 MIN_SAMPLES_PER_CATEGORY  = 8   # per-category accuracy — below this, keep default cap
 
 
+def _ensure_bet_outcomes_schema(conn: sqlite3.Connection) -> None:
+    """
+    Run schema migrations on bet_outcomes so that weekly report / weight scripts
+    never crash on an older DB that predates a column.
+
+    This is intentionally separate from paper_trader._init_bet_outcomes_db()
+    because the report / weight scripts may run on a DB that paper_trader never
+    touched in the current process (e.g. cron Monday job reading sandbox DB that
+    paper_trader last wrote weeks ago).
+
+    Safe to call repeatedly — ALTER TABLE is silently ignored if column exists.
+    """
+    for migration in [
+        "ALTER TABLE bet_outcomes ADD COLUMN ai_estimated_probability REAL",
+        "ALTER TABLE bet_outcomes ADD COLUMN era TEXT",
+        "ALTER TABLE bet_outcomes ADD COLUMN category TEXT",
+    ]:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+
+
 def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
     """
     Load bet_outcomes rows, filtered by era and optionally by recency.
@@ -56,6 +80,8 @@ def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
     if not exists:
         conn.close()
         return []
+
+    _ensure_bet_outcomes_schema(conn)
 
     conditions = []
     params: list = []

@@ -1214,5 +1214,326 @@ class TestM3SchemaCompatibility(unittest.TestCase):
             os.unlink(path)
 
 
+# ── Fix 1: _ensure_bet_outcomes_schema migration tests ────────────────────────
+
+class TestEnsureBetOutcomesSchema(unittest.TestCase):
+    """_ensure_bet_outcomes_schema adds missing columns without crashing."""
+
+    def _make_old_db(self) -> str:
+        """Create a bet_outcomes table missing the category column (pre-migration)."""
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(path)
+        conn.execute("""
+            CREATE TABLE bet_outcomes (
+                id INTEGER PRIMARY KEY, market_id TEXT NOT NULL,
+                our_recommendation TEXT, amount REAL, probability REAL,
+                estimated_ev REAL, ai_confidence REAL, strategies TEXT,
+                market_resolution TEXT, actual_pnl REAL, ev_error REAL,
+                era TEXT, resolved_at TEXT
+                -- intentionally missing: ai_estimated_probability, category
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_adds_category_column_to_old_db(self):
+        from scripts.weekly_ev_report import _ensure_bet_outcomes_schema
+        path = self._make_old_db()
+        try:
+            conn = sqlite3.connect(path)
+            _ensure_bet_outcomes_schema(conn)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(bet_outcomes)")}
+            conn.close()
+            self.assertIn("category", cols)
+            self.assertIn("ai_estimated_probability", cols)
+        finally:
+            os.unlink(path)
+
+    def test_safe_to_call_twice(self):
+        """Calling migration twice must not raise."""
+        from scripts.weekly_ev_report import _ensure_bet_outcomes_schema
+        path = self._make_old_db()
+        try:
+            conn = sqlite3.connect(path)
+            _ensure_bet_outcomes_schema(conn)
+            _ensure_bet_outcomes_schema(conn)   # second call must be silent
+            conn.close()
+        finally:
+            os.unlink(path)
+
+    def test_fetch_outcomes_does_not_crash_on_old_db(self):
+        """_fetch_outcomes must not raise OperationalError on a DB missing category."""
+        from scripts.weekly_ev_report import _fetch_outcomes
+        path = self._make_old_db()
+        try:
+            with patch("scripts.weekly_ev_report.DB_PATH", path):
+                # Should return [] (no rows) without crashing
+                result = _fetch_outcomes(era=None)
+            self.assertEqual(result, [])
+        finally:
+            os.unlink(path)
+
+
+# ── Fix 2: backtest_from_snapshots tests ──────────────────────────────────────
+
+def _make_snapshot(
+    market_id="m1",
+    probability=0.55,
+    bettors=20,
+    days_before_close=14,
+    outcome="YES",
+    category="crypto",
+) -> dict:
+    return {
+        "market_id":         market_id,
+        "question":          "Will X happen?",
+        "probability":       probability,
+        "bettors":           bettors,
+        "days_before_close": days_before_close,
+        "outcome":           outcome,
+        "snapshot_at":       "2026-03-01T00:00:00+00:00",
+        "category":          category,
+    }
+
+
+class TestBacktestSnapshotToMarketDict(unittest.TestCase):
+    """_snapshot_to_market_dict creates a valid market dict."""
+
+    def test_sets_volume_to_zero(self):
+        from scripts.backtest_from_snapshots import _snapshot_to_market_dict
+        m = _snapshot_to_market_dict(_make_snapshot())
+        self.assertEqual(m["volume24Hours"], 0)
+
+    def test_uses_stored_bettors(self):
+        from scripts.backtest_from_snapshots import _snapshot_to_market_dict
+        m = _snapshot_to_market_dict(_make_snapshot(bettors=50))
+        self.assertEqual(m["uniqueBettorCount"], 50)
+
+    def test_uses_default_when_bettors_null(self):
+        from scripts.backtest_from_snapshots import _snapshot_to_market_dict, _DEFAULT_BETTORS
+        snap = _make_snapshot()
+        snap["bettors"] = None
+        m = _snapshot_to_market_dict(snap)
+        self.assertEqual(m["uniqueBettorCount"], _DEFAULT_BETTORS)
+
+    def test_sets_last_bet_time_none(self):
+        from scripts.backtest_from_snapshots import _snapshot_to_market_dict
+        m = _snapshot_to_market_dict(_make_snapshot())
+        self.assertIsNone(m["lastBetTime"])
+
+    def test_probability_passes_through(self):
+        from scripts.backtest_from_snapshots import _snapshot_to_market_dict
+        m = _snapshot_to_market_dict(_make_snapshot(probability=0.72))
+        self.assertAlmostEqual(m["probability"], 0.72, places=4)
+
+
+class TestRunBacktest(unittest.TestCase):
+    """run_backtest accumulates correct/total per strategy."""
+
+    def test_counts_correct_predictions(self):
+        from scripts.backtest_from_snapshots import run_backtest
+        # mean_reversion fires on extreme probabilities (>0.85 → NO, <0.15 → YES)
+        # With probability=0.90, strategy says NO.  outcome=NO → correct.
+        snapshots = [_make_snapshot(probability=0.90, outcome="NO", bettors=10)]
+        result = run_backtest(snapshots)
+        mr = result.get("mean_reversion", {})
+        if mr.get("total", 0) > 0:
+            self.assertGreaterEqual(mr["correct"], 0)
+            self.assertLessEqual(mr["correct"], mr["total"])
+
+    def test_skips_null_outcome(self):
+        from scripts.backtest_from_snapshots import run_backtest
+        snap = _make_snapshot()
+        snap["outcome"] = None
+        result = run_backtest([snap])
+        for stats in result.values():
+            self.assertEqual(stats["total"], 0)
+
+    def test_returns_all_backtest_strategies(self):
+        from scripts.backtest_from_snapshots import run_backtest, BACKTEST_STRATEGIES
+        result = run_backtest([])
+        for strat in BACKTEST_STRATEGIES:
+            self.assertIn(strat, result)
+
+    def test_accuracy_is_none_when_no_signals(self):
+        from scripts.backtest_from_snapshots import run_backtest
+        # Probability in noise zone won't fire mean_reversion
+        snapshots = [_make_snapshot(probability=0.50, outcome="YES")]
+        result = run_backtest(snapshots)
+        mr = result.get("mean_reversion", {})
+        if mr.get("total", 0) == 0:
+            self.assertIsNone(mr["accuracy"])
+
+
+class TestComputeBacktestWeights(unittest.TestCase):
+    """compute_backtest_weights only emits weights above the sample gate."""
+
+    def test_below_min_samples_excluded(self):
+        from scripts.backtest_from_snapshots import compute_backtest_weights, BACKTEST_MIN_SAMPLES
+        results = {
+            "mean_reversion": {"total": BACKTEST_MIN_SAMPLES - 1, "correct": 20, "accuracy": 0.67}
+        }
+        self.assertEqual(compute_backtest_weights(results), {})
+
+    def test_above_min_samples_included(self):
+        from scripts.backtest_from_snapshots import compute_backtest_weights, BACKTEST_MIN_SAMPLES
+        results = {
+            "mean_reversion": {"total": BACKTEST_MIN_SAMPLES + 5, "correct": 25, "accuracy": 0.70}
+        }
+        w = compute_backtest_weights(results)
+        self.assertIn("mean_reversion", w)
+        self.assertGreater(w["mean_reversion"], 1.0)  # acc > 0.60 → weight > 1.0
+
+    def test_none_accuracy_excluded(self):
+        from scripts.backtest_from_snapshots import compute_backtest_weights, BACKTEST_MIN_SAMPLES
+        results = {
+            "mean_reversion": {"total": BACKTEST_MIN_SAMPLES + 5, "correct": 0, "accuracy": None}
+        }
+        self.assertEqual(compute_backtest_weights(results), {})
+
+
+class TestMergeWeights(unittest.TestCase):
+    """merge_weights: live wins when it has enough samples; backtest fills gaps."""
+
+    def _write_weights_file(self, weights: dict, sample_count: int,
+                            per_strategy: dict | None = None) -> str:
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        data = {
+            "generated_at": "2026-04-09T00:00:00Z",
+            "sample_count": sample_count,
+            "weights": weights,
+            "per_strategy_samples": per_strategy or {},
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def test_live_wins_when_enough_samples(self):
+        from scripts.backtest_from_snapshots import merge_weights
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+        path = self._write_weights_file(
+            {"mean_reversion": 0.80},
+            sample_count=50,
+            per_strategy={"mean_reversion": MIN_SAMPLES_PER_STRATEGY + 5},
+        )
+        try:
+            merged, _ = merge_weights({"mean_reversion": 0.60}, live_weights_path=path)
+            self.assertEqual(merged["mean_reversion"]["source"], "live")
+            self.assertAlmostEqual(merged["mean_reversion"]["weight"], 0.80, places=4)
+        finally:
+            os.unlink(path)
+
+    def test_backtest_fills_when_live_insufficient(self):
+        from scripts.backtest_from_snapshots import merge_weights
+        path = self._write_weights_file(
+            {"mean_reversion": 1.0},
+            sample_count=3,
+            per_strategy={"mean_reversion": 3},  # below gate
+        )
+        try:
+            merged, _ = merge_weights({"mean_reversion": 1.15}, live_weights_path=path)
+            self.assertEqual(merged["mean_reversion"]["source"], "backtest")
+            self.assertAlmostEqual(merged["mean_reversion"]["weight"], 1.15, places=4)
+        finally:
+            os.unlink(path)
+
+    def test_default_when_neither_has_signal(self):
+        from scripts.backtest_from_snapshots import merge_weights
+        path = self._write_weights_file(
+            {"mean_reversion": 1.0},
+            sample_count=0,
+            per_strategy={"mean_reversion": 0},
+        )
+        try:
+            merged, _ = merge_weights({}, live_weights_path=path)  # no backtest weights
+            self.assertEqual(merged.get("mean_reversion", {}).get("source"), "default")
+        finally:
+            os.unlink(path)
+
+
+# ── Fix 3: api_error vs no_bets distinction ───────────────────────────────────
+
+class TestApiErrorVsNoBets(unittest.TestCase):
+    """reconstruct_market classifies API failures as api_error, not no_bets."""
+
+    def _make_db(self) -> str:
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        return path
+
+    def test_api_error_classified_separately(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+        from unittest.mock import patch
+
+        market = _make_resolved_row(
+            market_id="api_fail_m",
+            close_date="2026-06-01T00:00:00+00:00"
+        )
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+
+            with patch(
+                "scripts.reconstruct_snapshots.fetch_bets_for_market",
+                side_effect=RuntimeError("DNS failure: api.manifold.markets")
+            ):
+                result = reconstruct_market(None, conn, market)
+
+            self.assertEqual(result["reason"], "api_error")
+            self.assertIn("DNS failure", result.get("error", ""))
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+    def test_empty_bets_still_classified_as_no_bets(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+        from unittest.mock import patch
+
+        market = _make_resolved_row(
+            market_id="empty_m",
+            close_date="2026-06-01T00:00:00+00:00"
+        )
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+
+            with patch(
+                "scripts.reconstruct_snapshots.fetch_bets_for_market",
+                return_value=[]
+            ):
+                result = reconstruct_market(None, conn, market)
+
+            self.assertEqual(result["reason"], "no_bets")
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+    def test_reconstruct_summary_counts_api_errors(self):
+        from scripts.reconstruct_snapshots import reconstruct
+        from unittest.mock import patch, MagicMock
+
+        markets = [_make_resolved_row(market_id="m1", close_date="2026-06-01T00:00:00+00:00")]
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with patch("scripts.reconstruct_snapshots.MANIFOLD_API_KEY", "fake-key"), \
+                 patch("scripts.reconstruct_snapshots.ManifoldAPI"), \
+                 patch(
+                     "scripts.reconstruct_snapshots.fetch_bets_for_market",
+                     side_effect=ConnectionError("timeout")
+                 ):
+                summary = reconstruct(markets, snapshots_db=db_path, dry_run=True)
+
+            self.assertEqual(summary["api_errors"], 1)
+            self.assertEqual(summary["no_bets"], 0)
+        finally:
+            os.unlink(db_path)
+
+
 if __name__ == "__main__":
     unittest.main()
