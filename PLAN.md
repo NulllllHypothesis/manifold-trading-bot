@@ -345,26 +345,27 @@ Two parallel tracks. Neither blocks the other.
 
 ### Track 1 — Trading Quality (improves the live bot)
 
-#### 🔴 P1 — Weighted Scoring Phase B + C (next code task)
+#### ✅ P1 — Weighted Scoring Phase B + C — DONE (2026-04-09)
 
 Phase A is live. Phase B+C closes the Kelly sizing loop using data already in `bet_outcomes`.
 
 **Phase B — Dynamic Kelly scaling from strategy weights**
 
-- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; scale Kelly fraction by strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. Weight 0.6 → 30% Kelly, weight 1.2 → 60% Kelly.
-- [ ] Add `strategy_weight_at_trade_time` to each trade record for audit trail
-- [ ] Guard: only applies when strategy has cleared `MIN_SAMPLES_PER_STRATEGY` — below threshold, use standard 0.5 Kelly
+- [x] `auto_trader.py` — reads `data/strategy_weights.json` at startup; scales Kelly fraction: `kelly_fraction = 0.5 × weight`. Weight 0.5 → 25% Kelly, weight 1.0 → 50%, weight 1.2 → 60%.
+- [x] `_get_strategy_weight()` — takes max weight across all strategies in a rec (best signal drives size)
+- [x] `strategy_weight_at_trade_time` added to trade log in `auto_trades.json`
+- [x] Guard implicit: strategies below min-sample threshold are stored as weight=1.0 → standard half-Kelly
 
 **Phase C — Category-level accuracy → adaptive caps**
 
-- [ ] `scripts/compute_strategy_weights.py` — extend to compute per-category direction accuracy from `bet_outcomes`; write `data/category_accuracy.json`
-- [ ] `auto_trader.py` — if category accuracy < 50% (and ≥ `MIN_SAMPLES_PER_CATEGORY=8`), reduce cap from 3 → 1 automatically
-- [ ] Complements the static calibration table: crowd bias corrects probability estimates; own trade history corrects exposure per topic
+- [x] `bet_outcomes` schema migration: `ADD COLUMN category TEXT`; `_write_bet_outcome` stores category from trade record
+- [x] `scripts/compute_strategy_weights.py` — `_compute_category_accuracy()` added; writes `data/category_accuracy.json`
+- [x] `auto_trader.py` — `_effective_category_cap()` reduces cap 3 → 1 when category accuracy < 50% with ≥8 samples
+- [x] Complements the static calibration table: crowd bias corrects probability estimates; own trade history corrects exposure per topic
 
-#### 🔴 P2 — Register weekly-strategy-weights cron (5 min task)
+#### ✅ P2 — Register weekly-strategy-weights cron — DONE (2026-04-09)
 
-`compute_strategy_weights.py` exists and works but no cron runs it. Weights will never update until this is registered.
-- [ ] `openclaw cron add` — Sundays 03:00 UTC, after weekly harvest
+- [x] OS crontab: Mondays 07:30 UTC — runs `compute_strategy_weights.py`, commits `data/strategy_weights.json` + `data/category_accuracy.json`
 
 #### 🟡 P3 — News Fetcher
 
@@ -401,12 +402,14 @@ Strong signal when it fires. High-accuracy large bettors on Manifold have asymme
 Goal: train a local model that estimates true market probability better than the crowd or generic LLM prompts.
 Constraint: CPU-only server (i5-1340P, 62 GB RAM). Max viable model: ~7B params. Fine-tuning viable with LoRA.
 
-#### 🔴 M1 — Hourly snapshot logger (start this week)
+#### ✅ M1 — Hourly snapshot logger — DONE (2026-04-09)
 
 The single highest-leverage infrastructure investment. Without it, any training dataset will only have near-close snapshots — teaching the model late-stage market behavior instead of decision-time behavior.
 
-- [ ] Add snapshot writer to `auto_research.py` — after fetching markets, write `(market_id, question, probability, volume24h, bettors, liquidity, timestamp)` for every non-resolved market to `data/market_snapshots.db` (SQLite)
-- [ ] One row per market per hour — extremely cheap, ~100 rows/run
+- [x] `_write_market_snapshots()` added to `auto_research.py` — called after every hourly market fetch
+- [x] Writes `(market_id, question, probability, volume24h, bettors, liquidity, snapshot_at)` to `data/market_snapshots.db` (SQLite)
+- [x] One row per market per hour — ~100 rows/run; indexed by `market_id` and `snapshot_at`
+- [x] After 2–3 months: join against `resolved_markets` for ML training pairs
 - [ ] After 2–3 months: join against `resolved_markets` to get `(snapshot_at_T, actual_resolution)` pairs for training
 
 #### 🟡 M2 — Audit the 1121 resolved_markets rows
