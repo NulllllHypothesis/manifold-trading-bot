@@ -23,7 +23,7 @@ from typing import Dict, Optional
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 LLM_LOG_DIR = Path(os.environ.get('LLM_LOG_DIR', Path(__file__).resolve().parent.parent / 'logs'))
 OLLAMA_BASE = "http://localhost:11434"
-OLLAMA_MODEL = "deepseek-r1:14b"
+OLLAMA_MODEL = "llama3.2:3b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
 
@@ -233,6 +233,9 @@ def _log_llm_call(
     system_prompt_hash: str,
     market_id: str,
     parsed_output: Optional[Dict] = None,
+    source: str = "unknown",
+    latency_ms: Optional[float] = None,
+    ollama_timed_out: bool = False,
 ) -> None:
     """Append a JSONL record for every LLM call (for future distillation).
 
@@ -264,6 +267,9 @@ def _log_llm_call(
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": model,
+            "source": source,                        # "ollama" or "deepseek_api"
+            "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
+            "ollama_timed_out": ollama_timed_out,    # True = stuck runner detected
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
             # raw_response and chain_of_thought are intentionally excluded
@@ -281,7 +287,7 @@ def _log_llm_call(
         logger.warning('[llm_log] warning: %s', e)
 
 
-def _call_ollama(prompt: str) -> Optional[str]:
+def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
     """
     Call local Ollama instance using streaming.
 
@@ -298,12 +304,14 @@ def _call_ollama(prompt: str) -> Optional[str]:
     never does. Once the first token arrives we read the rest with a generous
     per-chunk timeout since generation can legitimately take 80-90s on CPU.
 
-    The full response text is accumulated from the 'response' field of each
-    streamed JSON line and returned as a single string, matching the stream=False
-    interface that the rest of the code expects.
+    With llama3.2:3b at ~9 tok/s, first token arrives in <2s and a full
+    300-token response completes in ~35s — well within both timeout bounds.
+
+    meta: optional dict; if provided, sets meta['timed_out']=True on timeout
+    so the caller can distinguish a stuck runner from other failures.
     """
     FIRST_TOKEN_TIMEOUT = 20   # seconds to wait for first token — catches stuck runners fast
-    PER_CHUNK_TIMEOUT   = 120  # seconds per subsequent chunk — generous for slow CPU inference
+    PER_CHUNK_TIMEOUT   = 60   # reduced from 120s — llama3.2:3b finishes in ~35s
     try:
         import requests
         response = requests.post(
@@ -340,8 +348,11 @@ def _call_ollama(prompt: str) -> Optional[str]:
 
         return "".join(full_text) if full_text else None
 
-    except Exception:
-        pass
+    except Exception as e:
+        import requests as _req
+        if isinstance(e, (_req.exceptions.Timeout, _req.exceptions.ReadTimeout)):
+            if meta is not None:
+                meta['timed_out'] = True
     return None
 
 
@@ -468,12 +479,19 @@ def analyze_market(market: Dict) -> Optional[Dict]:
         performance_note=_PERFORMANCE_NOTE,
     )
 
-    # Try Ollama first (free), then DeepSeek API
-    raw = _call_ollama(prompt)
+    # Try Ollama first (free), then DeepSeek API.
+    # Track latency and whether Ollama timed out (stuck runner vs just down).
+    ollama_meta: dict = {}
+    t0 = time.monotonic()
+    raw = _call_ollama(prompt, meta=ollama_meta)
     source = "ollama"
+    ollama_timed_out = ollama_meta.get('timed_out', False)
+
     if raw is None:
         raw = _call_deepseek_api(prompt)
         source = "deepseek_api"
+
+    latency_ms = (time.monotonic() - t0) * 1000
 
     if raw is None:
         return None
@@ -484,7 +502,13 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     # raw_response is intentionally not forwarded to _log_llm_call — see
     # that function's docstring for the compliance rationale.
     model = OLLAMA_MODEL if source == "ollama" else DEEPSEEK_MODEL
-    _log_llm_call(model, SYSTEM_PROMPT_SHA256, market_id, parsed_output=result)
+    _log_llm_call(
+        model, SYSTEM_PROMPT_SHA256, market_id,
+        parsed_output=result,
+        source=source,
+        latency_ms=latency_ms,
+        ollama_timed_out=ollama_timed_out,
+    )
 
     if result:
         result["source"] = source
