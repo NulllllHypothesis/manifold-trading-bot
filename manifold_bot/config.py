@@ -37,7 +37,10 @@ ENDPOINTS = {
 
 INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
-MAX_BET_AMOUNT = 100
+# Throttled to $5 on 2026-04-09 while M2/M3 (backtesting + feedback loop repair) are underway.
+# The bot keeps running so M1 snapshots accumulate, but can't blow the remaining balance.
+# Restore to $25 once compute_strategy_weights.py has real signal (weights diverge from 1.0).
+MAX_BET_AMOUNT = 5
 # Trading confidence threshold — single source of truth.
 # Dependents (all coupled — update together if this changes):
 #   auto_trader.py:   AutoTrader.min_confidence = MIN_CONFIDENCE

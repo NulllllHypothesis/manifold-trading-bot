@@ -656,5 +656,563 @@ class TestComputeCategoryAccuracy(unittest.TestCase):
         self.assertEqual(rows[0]["category"], "crypto")
 
 
+# ── M2 Audit tests ────────────────────────────────────────────────────────────
+
+def _make_resolved_row(
+    market_id="m1",
+    question="Will X happen?",
+    probability_close=0.55,
+    outcome="YES",
+    close_date="2026-03-01T00:00:00+00:00",
+    unique_bettors=20,
+    category="crypto",
+) -> dict:
+    return {
+        "market_id": market_id,
+        "question": question,
+        "probability_close": probability_close,
+        "outcome": outcome,
+        "close_date": close_date,
+        "unique_bettors": unique_bettors,
+        "category": category,
+    }
+
+
+class TestM2CategoryDistribution(unittest.TestCase):
+    """audit_resolved_markets.category_distribution correct counts and percentages."""
+
+    def test_counts_by_category(self):
+        from scripts.audit_resolved_markets import category_distribution
+        markets = [
+            _make_resolved_row(category="crypto"),
+            _make_resolved_row(category="crypto"),
+            _make_resolved_row(category="politics"),
+        ]
+        result = category_distribution(markets)
+        self.assertEqual(result["crypto"]["count"], 2)
+        self.assertEqual(result["politics"]["count"], 1)
+        self.assertAlmostEqual(result["crypto"]["pct"], 2 / 3, places=3)
+
+    def test_none_category_falls_back_to_other(self):
+        from scripts.audit_resolved_markets import category_distribution
+        markets = [_make_resolved_row(category=None)]
+        result = category_distribution(markets)
+        self.assertIn("other", result)
+
+    def test_empty_markets_returns_empty(self):
+        from scripts.audit_resolved_markets import category_distribution
+        self.assertEqual(category_distribution([]), {})
+
+
+class TestM2NearCloseStats(unittest.TestCase):
+    """near_close_stats correctly classifies decision-zone vs near-close markets."""
+
+    def test_near_close_high(self):
+        from scripts.audit_resolved_markets import near_close_stats
+        markets = [_make_resolved_row(probability_close=0.92)]
+        result = near_close_stats(markets, high=0.85, low=0.15)
+        self.assertEqual(result["near_close_count"], 1)
+        self.assertEqual(result["decision_zone_count"], 0)
+
+    def test_near_close_low(self):
+        from scripts.audit_resolved_markets import near_close_stats
+        markets = [_make_resolved_row(probability_close=0.08)]
+        result = near_close_stats(markets, high=0.85, low=0.15)
+        self.assertEqual(result["near_close_count"], 1)
+
+    def test_decision_zone(self):
+        from scripts.audit_resolved_markets import near_close_stats
+        markets = [_make_resolved_row(probability_close=0.50)]
+        result = near_close_stats(markets, high=0.85, low=0.15)
+        self.assertEqual(result["decision_zone_count"], 1)
+        self.assertEqual(result["near_close_count"], 0)
+
+    def test_mixed(self):
+        from scripts.audit_resolved_markets import near_close_stats
+        markets = [
+            _make_resolved_row(probability_close=0.90),  # near-close
+            _make_resolved_row(probability_close=0.55),  # decision zone
+            _make_resolved_row(probability_close=0.10),  # near-close
+        ]
+        result = near_close_stats(markets, high=0.85, low=0.15)
+        self.assertEqual(result["near_close_count"], 2)
+        self.assertEqual(result["decision_zone_count"], 1)
+
+    def test_empty_markets(self):
+        from scripts.audit_resolved_markets import near_close_stats
+        result = near_close_stats([])
+        self.assertEqual(result["near_close_count"], 0)
+        self.assertEqual(result["decision_zone_count"], 0)
+
+
+class TestM2BettorStats(unittest.TestCase):
+    """bettor_stats summarises unique_bettors distribution correctly."""
+
+    def test_thin_market_count(self):
+        from scripts.audit_resolved_markets import bettor_stats
+        markets = [
+            _make_resolved_row(unique_bettors=5),   # thin
+            _make_resolved_row(unique_bettors=15),  # ok
+            _make_resolved_row(unique_bettors=20),  # ok
+        ]
+        result = bettor_stats(markets, min_bettors=10)
+        self.assertEqual(result["thin_count"], 1)
+        self.assertAlmostEqual(result["thin_pct"], 1 / 3, places=3)
+
+    def test_median(self):
+        from scripts.audit_resolved_markets import bettor_stats
+        markets = [
+            _make_resolved_row(unique_bettors=10),
+            _make_resolved_row(unique_bettors=20),
+            _make_resolved_row(unique_bettors=30),
+        ]
+        result = bettor_stats(markets)
+        self.assertEqual(result["median"], 20)
+
+    def test_empty_markets(self):
+        from scripts.audit_resolved_markets import bettor_stats
+        result = bettor_stats([])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["thin_count"], 0)
+
+
+class TestM2UsableMarketIds(unittest.TestCase):
+    """usable_market_ids applies all three quality filters."""
+
+    def test_passes_all_filters(self):
+        from scripts.audit_resolved_markets import usable_market_ids
+        markets = [_make_resolved_row(
+            market_id="good", probability_close=0.55, unique_bettors=20
+        )]
+        result = usable_market_ids(markets)
+        self.assertIn("good", result)
+
+    def test_filtered_near_close(self):
+        from scripts.audit_resolved_markets import usable_market_ids
+        markets = [_make_resolved_row(
+            market_id="bad_nc", probability_close=0.92, unique_bettors=20
+        )]
+        self.assertEqual(usable_market_ids(markets), [])
+
+    def test_filtered_thin(self):
+        from scripts.audit_resolved_markets import usable_market_ids
+        markets = [_make_resolved_row(
+            market_id="bad_thin", probability_close=0.55, unique_bettors=3
+        )]
+        self.assertEqual(usable_market_ids(markets, min_bettors=10), [])
+
+    def test_filtered_null_probability(self):
+        from scripts.audit_resolved_markets import usable_market_ids
+        markets = [_make_resolved_row(market_id="bad_null", probability_close=None)]
+        self.assertEqual(usable_market_ids(markets), [])
+
+    def test_mixed_batch(self):
+        from scripts.audit_resolved_markets import usable_market_ids
+        markets = [
+            _make_resolved_row(market_id="ok",       probability_close=0.55, unique_bettors=15),
+            _make_resolved_row(market_id="nc",       probability_close=0.95, unique_bettors=15),
+            _make_resolved_row(market_id="thin",     probability_close=0.55, unique_bettors=2),
+            _make_resolved_row(market_id="no_prob",  probability_close=None, unique_bettors=15),
+        ]
+        result = usable_market_ids(markets, min_bettors=10)
+        self.assertEqual(result, ["ok"])
+
+
+class TestM2DecisionGate(unittest.TestCase):
+    """_decision_gate returns correct GREEN/YELLOW/RED status."""
+
+    def test_green_when_enough_usable_no_flags(self):
+        from scripts.audit_resolved_markets import _decision_gate
+        result = _decision_gate(
+            usable_count=300, near_close_pct=0.20,
+            thin_pct=0.10, other_pct=0.30
+        )
+        self.assertEqual(result["status"], "GREEN")
+        self.assertEqual(result["flags"], [])
+
+    def test_red_when_too_few_usable(self):
+        from scripts.audit_resolved_markets import _decision_gate
+        result = _decision_gate(
+            usable_count=50, near_close_pct=0.10,
+            thin_pct=0.10, other_pct=0.30
+        )
+        self.assertEqual(result["status"], "RED")
+
+    def test_yellow_with_flags(self):
+        from scripts.audit_resolved_markets import _decision_gate
+        result = _decision_gate(
+            usable_count=300, near_close_pct=0.70,  # high contamination flag
+            thin_pct=0.10, other_pct=0.30
+        )
+        self.assertEqual(result["status"], "YELLOW")
+        self.assertTrue(len(result["flags"]) > 0)
+
+    def test_load_markets_raises_on_missing_db(self):
+        from scripts.audit_resolved_markets import load_markets
+        with self.assertRaises(FileNotFoundError):
+            load_markets("/nonexistent/path/calibration.db")
+
+
+# ── M3 Reconstruction tests ───────────────────────────────────────────────────
+
+def _make_bet(created_time_ms: int, prob_after: float, bet_id: str = "b1") -> dict:
+    return {
+        "id": bet_id,
+        "createdTime": created_time_ms,
+        "probBefore": max(0.0, prob_after - 0.02),
+        "probAfter": prob_after,
+    }
+
+
+class TestM3ProbAtTime(unittest.TestCase):
+    """prob_at_time correctly reconstructs probability from bet history."""
+
+    def _ts(self, days_ago: int) -> int:
+        """Return a Unix ms timestamp N days before an arbitrary reference point."""
+        base_ms = 1_800_000_000_000  # ~2027
+        return base_ms - days_ago * 86_400_000
+
+    def test_returns_last_prob_before_target(self):
+        from scripts.reconstruct_snapshots import prob_at_time
+        bets = [
+            _make_bet(self._ts(30), 0.40, "b1"),
+            _make_bet(self._ts(20), 0.55, "b2"),
+            _make_bet(self._ts(10), 0.70, "b3"),
+        ]
+        # Target is 25 days ago — should get b1's probAfter (0.40)
+        result = prob_at_time(bets, self._ts(25))
+        self.assertAlmostEqual(result, 0.40, places=4)
+
+    def test_returns_closest_bet_just_before_target(self):
+        from scripts.reconstruct_snapshots import prob_at_time
+        bets = [
+            _make_bet(self._ts(15), 0.60, "b1"),
+            _make_bet(self._ts(5),  0.80, "b2"),
+        ]
+        result = prob_at_time(bets, self._ts(7))
+        self.assertAlmostEqual(result, 0.60, places=4)
+
+    def test_returns_none_when_no_bets_before_target(self):
+        from scripts.reconstruct_snapshots import prob_at_time
+        bets = [
+            _make_bet(self._ts(5), 0.70, "b1"),
+        ]
+        # Target is 30 days ago — all bets are newer
+        result = prob_at_time(bets, self._ts(30))
+        self.assertIsNone(result)
+
+    def test_returns_none_on_empty_bets(self):
+        from scripts.reconstruct_snapshots import prob_at_time
+        self.assertIsNone(prob_at_time([], 1_800_000_000_000))
+
+    def test_exact_timestamp_match_is_included(self):
+        from scripts.reconstruct_snapshots import prob_at_time
+        ts = self._ts(14)
+        bets = [_make_bet(ts, 0.55, "b1")]
+        result = prob_at_time(bets, ts)
+        self.assertAlmostEqual(result, 0.55, places=4)
+
+
+class TestM3ParseCloseDate(unittest.TestCase):
+    """parse_close_date handles ISO strings and None gracefully."""
+
+    def test_parses_utc_offset(self):
+        from scripts.reconstruct_snapshots import parse_close_date
+        result = parse_close_date("2026-06-01T00:00:00+00:00")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.year, 2026)
+        self.assertEqual(result.month, 6)
+
+    def test_parses_z_suffix(self):
+        from scripts.reconstruct_snapshots import parse_close_date
+        result = parse_close_date("2026-06-01T00:00:00Z")
+        self.assertIsNotNone(result)
+
+    def test_returns_none_on_empty(self):
+        from scripts.reconstruct_snapshots import parse_close_date
+        self.assertIsNone(parse_close_date(""))
+        self.assertIsNone(parse_close_date(None))
+
+
+class TestM3InitSnapshotsDb(unittest.TestCase):
+    """init_snapshots_db creates the table with M3 columns and migrates old tables."""
+
+    def test_creates_table_with_m3_columns(self):
+        from scripts.reconstruct_snapshots import init_snapshots_db
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            init_snapshots_db(conn)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)")}
+            conn.close()
+            for expected in ("source", "days_before_close", "outcome"):
+                self.assertIn(expected, cols, f"Missing column: {expected}")
+        finally:
+            os.unlink(path)
+
+    def test_migrates_old_table_missing_m3_columns(self):
+        from scripts.reconstruct_snapshots import init_snapshots_db
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            # Create old schema without M3 columns
+            conn.execute("""
+                CREATE TABLE market_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    market_id TEXT, question TEXT,
+                    probability REAL, volume24h REAL,
+                    bettors INTEGER, liquidity REAL,
+                    snapshot_at TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+            init_snapshots_db(conn)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)")}
+            conn.close()
+            for expected in ("source", "days_before_close", "outcome"):
+                self.assertIn(expected, cols, f"Migration missed column: {expected}")
+        finally:
+            os.unlink(path)
+
+
+class TestM3AlreadyReconstructed(unittest.TestCase):
+    """already_reconstructed detects existing rows correctly."""
+
+    def test_returns_false_when_no_rows(self):
+        from scripts.reconstruct_snapshots import init_snapshots_db, already_reconstructed
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            init_snapshots_db(conn)
+            self.assertFalse(already_reconstructed(conn, "market_abc"))
+            conn.close()
+        finally:
+            os.unlink(path)
+
+    def test_returns_true_when_reconstructed_row_exists(self):
+        from scripts.reconstruct_snapshots import init_snapshots_db, already_reconstructed
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            init_snapshots_db(conn)
+            conn.execute("""
+                INSERT INTO market_snapshots
+                (market_id, question, probability, snapshot_at, source, days_before_close, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, ("market_abc", "Q?", 0.55, "2026-03-01T00:00:00+00:00",
+                  "reconstructed", 14, "YES"))
+            conn.commit()
+            self.assertTrue(already_reconstructed(conn, "market_abc"))
+            conn.close()
+        finally:
+            os.unlink(path)
+
+    def test_live_rows_do_not_count_as_reconstructed(self):
+        from scripts.reconstruct_snapshots import init_snapshots_db, already_reconstructed
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(path)
+            init_snapshots_db(conn)
+            conn.execute("""
+                INSERT INTO market_snapshots
+                (market_id, question, probability, snapshot_at, source)
+                VALUES (?, ?, ?, ?, ?)
+            """, ("market_abc", "Q?", 0.55, "2026-03-01T00:00:00+00:00", "live"))
+            conn.commit()
+            self.assertFalse(already_reconstructed(conn, "market_abc"))
+            conn.close()
+        finally:
+            os.unlink(path)
+
+
+class TestM3ReconstructMarket(unittest.TestCase):
+    """reconstruct_market writes correct rows and handles edge cases."""
+
+    def _make_db(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        return path
+
+    def test_writes_rows_for_each_window(self):
+        from scripts.reconstruct_snapshots import (
+            reconstruct_market, init_snapshots_db, RECONSTRUCTION_WINDOWS
+        )
+        from unittest.mock import patch
+
+        # Bets span all three windows (7, 14, 30 days before close)
+        close_date = "2026-06-01T00:00:00+00:00"
+        close_dt_ms = 1_780_272_000_000  # 2026-06-01 00:00:00 UTC in ms
+
+        bets_oldest_first = [
+            _make_bet(close_dt_ms - 35 * 86_400_000, 0.30, "b1"),  # 35 days before
+            _make_bet(close_dt_ms - 20 * 86_400_000, 0.50, "b2"),  # 20 days before
+            _make_bet(close_dt_ms - 5  * 86_400_000, 0.70, "b3"),  # 5 days before
+        ]
+
+        market = _make_resolved_row(
+            market_id="test_m", close_date=close_date,
+            outcome="YES", probability_close=0.70
+        )
+
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+
+            with patch("scripts.reconstruct_snapshots.fetch_bets_for_market",
+                       return_value=bets_oldest_first):
+                result = reconstruct_market(None, conn, market, windows=RECONSTRUCTION_WINDOWS)
+
+            self.assertEqual(result["windows_written"], 3)
+            self.assertEqual(result["windows_skipped"], 0)
+
+            rows = conn.execute(
+                "SELECT days_before_close, probability, outcome, source "
+                "FROM market_snapshots WHERE market_id='test_m' ORDER BY days_before_close DESC"
+            ).fetchall()
+            conn.close()
+
+            self.assertEqual(len(rows), 3)
+            days_written = {r[0] for r in rows}
+            self.assertEqual(days_written, {7, 14, 30})
+            for row in rows:
+                self.assertEqual(row[2], "YES")     # outcome stored
+                self.assertEqual(row[3], "reconstructed")  # source tag
+
+        finally:
+            os.unlink(db_path)
+
+    def test_skips_window_when_no_bets_before_target(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+        from unittest.mock import patch
+
+        # close_dt_ms must match close_date string exactly.
+        # 2026-06-01 00:00:00 UTC = 1780272000 seconds = 1_780_272_000_000 ms
+        close_date = "2026-06-01T00:00:00+00:00"
+        close_dt_ms = 1_780_272_000_000
+
+        # Bet placed only 5 days before close — ALL windows (T-7, T-14, T-30)
+        # target timestamps are earlier (further from close) than this bet,
+        # so prob_at_time returns None for every window.
+        bets = [_make_bet(close_dt_ms - 5 * 86_400_000, 0.70, "b1")]
+
+        market = _make_resolved_row(market_id="sparse_m", close_date=close_date)
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+
+            with patch("scripts.reconstruct_snapshots.fetch_bets_for_market",
+                       return_value=bets):
+                result = reconstruct_market(None, conn, market, windows=[7, 14, 30])
+
+            self.assertEqual(result["windows_written"], 0)   # no window has data
+            self.assertEqual(result["windows_skipped"], 3)
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+    def test_skips_market_with_no_close_date(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+
+        market = _make_resolved_row(market_id="no_date", close_date=None)
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+            result = reconstruct_market(None, conn, market)
+            self.assertEqual(result["windows_written"], 0)
+            self.assertEqual(result["reason"], "no_close_date")
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+    def test_skips_market_already_done(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+
+        market = _make_resolved_row(market_id="done_m")
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+            # Pre-insert a reconstructed row
+            conn.execute("""
+                INSERT INTO market_snapshots
+                (market_id, question, probability, snapshot_at, source, days_before_close, outcome)
+                VALUES (?,?,?,?,?,?,?)
+            """, ("done_m", "Q?", 0.5, "2026-03-01T00:00:00+00:00", "reconstructed", 14, "YES"))
+            conn.commit()
+
+            result = reconstruct_market(None, conn, market)
+            self.assertEqual(result["reason"], "already_done")
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+    def test_dry_run_writes_nothing(self):
+        from scripts.reconstruct_snapshots import reconstruct_market, init_snapshots_db
+        from unittest.mock import patch
+
+        close_date = "2026-06-01T00:00:00+00:00"
+        close_dt_ms = 1_780_272_000_000  # 2026-06-01 00:00:00 UTC in ms
+        bets = [_make_bet(close_dt_ms - 35 * 86_400_000, 0.30, "b1")]
+
+        market = _make_resolved_row(market_id="dry_m", close_date=close_date)
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            init_snapshots_db(conn)
+
+            with patch("scripts.reconstruct_snapshots.fetch_bets_for_market",
+                       return_value=bets):
+                result = reconstruct_market(None, conn, market, windows=[30], dry_run=True)
+
+            self.assertEqual(result["windows_written"], 1)  # counted but not committed
+            row_count = conn.execute(
+                "SELECT COUNT(*) FROM market_snapshots WHERE market_id='dry_m'"
+            ).fetchone()[0]
+            self.assertEqual(row_count, 0)  # nothing actually written
+            conn.close()
+        finally:
+            os.unlink(db_path)
+
+
+class TestM3SchemaCompatibility(unittest.TestCase):
+    """_write_market_snapshots in auto_research.py writes source='live' after M3 migration."""
+
+    def test_live_snapshots_have_source_live(self):
+        from automation.auto_research import _write_market_snapshots
+
+        markets = [{
+            "id": "mkt1", "question": "Test?", "probability": 0.60,
+            "volume24Hours": 100.0, "uniqueBettorCount": 15,
+            "totalLiquidity": 500.0, "isResolved": False,
+        }]
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with patch("automation.auto_research._SNAPSHOTS_DB_PATH", path):
+                _write_market_snapshots(markets)
+
+            conn = sqlite3.connect(path)
+            row = conn.execute(
+                "SELECT source, days_before_close, outcome FROM market_snapshots WHERE market_id='mkt1'"
+            ).fetchone()
+            conn.close()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "live")
+            self.assertIsNone(row[1])   # days_before_close is NULL for live
+            self.assertIsNone(row[2])   # outcome is NULL for live (not resolved yet)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

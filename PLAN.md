@@ -337,6 +337,34 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
 
 ---
 
+## Execution Plan — Next 2–3 Sessions (decided 2026-04-09)
+
+**Context:** Live infra is strong. The adaptation pieces (strategy weights, category accuracy) are scaffolding fed by sparse data — no resolved live trades yet. The bot is losing because the feedback loop is too weak to tell us what actually works. Expanding live complexity before fixing the measurement system is the wrong move.
+
+### Session 1 (current): Risk throttle + M2 audit + M3 reconstruction
+
+1. **Risk throttle** — `MAX_BET_AMOUNT` $100 → $5. Bot keeps running (M1 snapshots keep accumulating), but can't blow remaining balance while M2/M3 are in progress. One-line change.
+
+2. **M2 audit** (`scripts/audit_resolved_markets.py`) — query the 1,121 resolved markets already in `calibration.db` and answer:
+   - Category distribution — is it balanced or 80% "other"?
+   - Near-close contamination — what % have `probability_close > 0.85` or `< 0.15`? (These are useless for training — the outcome was already obvious.)
+   - Bettor-count distribution — how many markets are too thin (< 10 bettors) to trust?
+   - Usable market count — markets that pass all three filters
+   - Decision gate: if < 200 usable markets, reconsider M3 scope before building it
+
+3. **M3 reconstruction** (`scripts/reconstruct_snapshots.py`) — for each usable resolved market, fetch bet history from Manifold API (`/v0/bets?contractId=<id>`) and reconstruct probability at T-7d, T-14d, T-30d before close. Write synthetic snapshots into `data/market_snapshots.db` alongside live ones, tagged `source='reconstructed'`.
+
+   This gives ~3× more training examples than live snapshots alone and, crucially, examples at **decision-time** (30 days before close) rather than near-close.
+
+### Session 2: Decision gate after M2 runs
+
+- If strategy weights shift meaningfully from defaults after running `compute_strategy_weights.py` on reconstructed data → restore `MAX_BET_AMOUNT` to $25 and continue live with real signal.
+- If weights stay ≈ 1.0 → investigate why before P3.
+
+### Session 3: P3 (news fetcher) or M4 (dataset formatter) depending on gate outcome
+
+---
+
 ## Roadmap — Priority Order
 
 Two parallel tracks. Neither blocks the other.
@@ -525,13 +553,14 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Local model switch (llama3.2:3b) | ✅ Done | 9.3 tok/s vs 0.7 tok/s; keep_alive 2h; cold-start timeout 40s |
 | AI call tracking | ✅ Done | source, latency_ms, ollama_timed_out in llm_calls.jsonl |
 | Code quality (13 issues) | ✅ Done | crash fix, dead code removed, pandas removed, paths absolute, imports cleaned |
-| Weighted scoring Phase B + C | 🔴 P1 | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps |
-| Register weekly-strategy-weights cron | 🔴 P2 | 5-min task; weights never update until this is done |
+| Weighted scoring Phase B + C | ✅ Done | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps (2026-04-09) |
+| Register weekly-strategy-weights cron | ✅ Done | OS crontab Mondays 07:30 UTC (2026-04-09) |
+| Hourly snapshot logger | ✅ Done | `_write_market_snapshots()` in auto_research.py → market_snapshots.db (2026-04-09) |
+| Local model switch (llama3.2:3b) | ✅ Done | FIRST_TOKEN_TIMEOUT 40→90s; keep_alive 2h→4h (2026-04-09) |
 | News fetcher | 🟡 P3 | NewsAPI.org free tier; fundamental family signal |
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
 | Web dashboard | 🟢 P5 | convenience only |
 | SQLite storage | 🟢 P6 | housekeeping |
-| Hourly snapshot logger | 🔴 M1 | highest-leverage ML infrastructure; start this week |
 | Audit 1121 resolved_markets | 🟡 M2 | category skew, snapshot timing check |
 | Reconstruct earlier snapshots | 🟡 M3 | bet history API; training data at decision-time not close-time |
 | Dataset formatter | 🟡 M4 | probability estimation format, not YES/NO classification |

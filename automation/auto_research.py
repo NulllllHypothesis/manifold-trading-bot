@@ -32,9 +32,11 @@ def _write_market_snapshots(markets: list) -> None:
 
     Called after every hourly market fetch (~100 rows/run).  After 2–3 months,
     these rows can be joined against resolved_markets to produce training data
-    for the ML pipeline (M1 in PLAN.md).
+    for the ML pipeline (M1 in PLAN.md).  M3 adds reconstructed rows to the
+    same table tagged source='reconstructed'.
 
-    Schema: market_id, question, probability, volume24h, bettors, liquidity, snapshot_at
+    Schema: market_id, question, probability, volume24h, bettors, liquidity,
+            snapshot_at, source, days_before_close, outcome
     """
     os.makedirs(os.path.dirname(_SNAPSHOTS_DB_PATH), exist_ok=True)
     snapshot_at = datetime.now(timezone.utc).isoformat()
@@ -42,16 +44,29 @@ def _write_market_snapshots(markets: list) -> None:
     conn = sqlite3.connect(_SNAPSHOTS_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS market_snapshots (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_id   TEXT NOT NULL,
-            question    TEXT,
-            probability REAL,
-            volume24h   REAL,
-            bettors     INTEGER,
-            liquidity   REAL,
-            snapshot_at TEXT NOT NULL
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id         TEXT NOT NULL,
+            question          TEXT,
+            probability       REAL,
+            volume24h         REAL,
+            bettors           INTEGER,
+            liquidity         REAL,
+            snapshot_at       TEXT NOT NULL,
+            source            TEXT DEFAULT 'live',
+            days_before_close INTEGER,
+            outcome           TEXT
         )
     """)
+    # Migrate tables created before M3 columns were added
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)")}
+    for col, defn in [
+        ("source",            "TEXT DEFAULT 'live'"),
+        ("days_before_close", "INTEGER"),
+        ("outcome",           "TEXT"),
+    ]:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {defn}")
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_snapshots_market
         ON market_snapshots(market_id)
@@ -59,6 +74,10 @@ def _write_market_snapshots(markets: list) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_snapshots_time
         ON market_snapshots(snapshot_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_snapshots_source
+        ON market_snapshots(source)
     """)
 
     rows = [
@@ -70,6 +89,9 @@ def _write_market_snapshots(markets: list) -> None:
             m.get("uniqueBettorCount") or 0,
             m.get("totalLiquidity") or 0.0,
             snapshot_at,
+            "live",
+            None,   # days_before_close — N/A for live snapshots
+            None,   # outcome — not resolved yet
         )
         for m in markets
         if m.get("id") and not m.get("isResolved")
@@ -77,8 +99,9 @@ def _write_market_snapshots(markets: list) -> None:
 
     conn.executemany("""
         INSERT INTO market_snapshots
-        (market_id, question, probability, volume24h, bettors, liquidity, snapshot_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (market_id, question, probability, volume24h, bettors, liquidity,
+         snapshot_at, source, days_before_close, outcome)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, rows)
 
     conn.commit()
