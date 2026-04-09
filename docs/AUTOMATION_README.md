@@ -1,30 +1,40 @@
-# Automated Trading System - Setup Complete
+# Automated Trading System
 
-## 🎯 What We've Built
+## What We've Built
 
-A complete automated trading system for Manifold Markets with:
+A fully automated paper trading system for Manifold Markets running on a Linux server. All scheduling uses the OS-level cron daemon — no LLM agent in the trading loop.
 
-### 1. **Hourly Market Research** (`automation/auto_research.py`)
-- Analyzes 100+ markets every hour
-- Applies momentum and mean reversion strategies
-- Saves recommendations to `market_research.json`
-- Confidence scoring for each opportunity
+### 1. Hourly Market Research (`automation/auto_research.py`)
+- Scans 100+ markets every hour, applies six statistical strategies across four signal families
+- Top candidates sent to local AI (`llama3.2:3b` via Ollama, DeepSeek API fallback) for probability estimation
+- Writes `market_research.json` with ranked recommendations
+- Writes hourly snapshots to `data/market_snapshots.db` (training data for future ML pipeline)
 
-### 2. **Hourly Auto Trading** (`automation/auto_trader.py`)
-- Executes trades based on research
-- Risk management: max 10 positions, 10% per trade, open-position guard prevents re-entry
+### 2. Hourly Auto Trading (`automation/auto_trader.py`)
+- Executes paper trades based on research output
+- Risk management: max 10 positions, max 3 per category, 10% per trade, 65% min confidence, AI veto respected
+- **Phase B** — Kelly fraction scales with strategy reliability weight (`kelly_fraction = 0.5 × weight`)
+- **Phase C** — Category exposure cap tightens to 1 when per-category direction accuracy < 50% (≥8 samples)
 - Selects trades by estimated EV (highest edge first); confidence is a hard gate (≥65%)
 - Logs all auto-trades to `auto_trades.json`
 
-### 3. **Daily Summary Report** (`automation/daily_summary.py`)
-- Generates comprehensive daily report
-- Calculates performance metrics
-- Formats message for Telegram
-- Ready for automated delivery
+### 3. Hourly Position Resolution (`scripts/resolve_positions.py`)
+- Polls Manifold API for market resolutions
+- Closes out resolved positions, records actual P&L to `data/calibration.db`
+- Frees position slots for new trades
 
-### 4. **Scheduling (OS crontab)**
+### 4. Daily Summary Report (`automation/daily_summary.py`)
+- Generates comprehensive daily report with P&L and open positions
+- Sends to Telegram group at 19:00 UTC
 
-All jobs run via the OS-level cron daemon — scripts execute directly, no LLM agent in the loop.
+### 5. Weekly Calibration Pipeline (Sundays → Mondays)
+- **Sunday 02:00** — harvest 2000+ resolved markets into `data/calibration.db`
+- **Monday 07:00** — EV accuracy report (per-strategy, per-confidence-band) sent to Telegram
+- **Monday 07:30** — recompute strategy reliability weights (`data/strategy_weights.json`) and category accuracy (`data/category_accuracy.json`)
+
+## Scheduling (OS crontab)
+
+All jobs run via the OS-level cron daemon. To view: `crontab -l` on the server. To edit: `crontab -e`.
 
 | Job | Schedule | Script |
 |---|---|---|
@@ -36,84 +46,91 @@ All jobs run via the OS-level cron daemon — scripts execute directly, no LLM a
 | EV accuracy report | Mondays 07:00 UTC | `scripts/weekly_ev_report.py --telegram` |
 | Strategy weight update | Mondays 07:30 UTC | `scripts/compute_strategy_weights.py` |
 
-To view: `crontab -l` on the server. To edit: `crontab -e`. Logs: `/tmp/research.log`, `/tmp/trader.log`, `/tmp/resolution.log`, etc.
+Logs: `/tmp/research.log`, `/tmp/trader.log`, `/tmp/resolution.log`, etc.
 
 Telegram notifications are sent directly by scripts via Bot API — not via OpenClaw. Notifications fire only when something happens: trade placed, market resolved, daily summary, weekly EV report.
 
-## 📊 Current Trading Status
-- **Balance**: $1,129.00 (starting from $1,000)
-- **Profit**: +$129.00 (+12.9%)
-- **Win Rate**: 100% (4/4 closed trades)
-- **Open Positions**: 3 markets
+## Current Trading Status
 
-## 🚀 Quick Start
+Check `manifold_bot/paper_trading_state.json` for live balance and open positions.
+
+```bash
+cat manifold_bot/paper_trading_state.json | python3 -c "import sys,json; s=json.load(sys.stdin); print(f'Balance: \${s[\"balance\"]:.2f}  Positions: {len(s[\"positions\"])}')"
+```
+
+## Quick Start
 
 ### 1. Test the System
+
 ```bash
 cd /home/hackathon/.openclaw/workspace
 
-# Test research script
+# Run full test suite
+python3 tests/test_strategies.py
+python3 tests/test_calibration.py
+
+# Test individual scripts
 python3 automation/auto_research.py
-
-# Test trading script
 python3 automation/auto_trader.py
-
-# Test daily summary
 python3 automation/daily_summary.py
-
-# Run all tests
-python3 tests/test_automation.py
 ```
 
-### 2. Setup Cron Jobs
+### 2. Check Cron Status
+
 ```bash
-# Create cron jobs from config
-openclaw cron add --file automation/cron_jobs_config.json
+# View active crontab
+crontab -l
 
-# Verify jobs
-openclaw cron list
-
-# Check status
-openclaw cron status
+# Check recent log output
+tail -50 /tmp/research.log
+tail -50 /tmp/trader.log
 ```
 
 ### 3. Monitor Execution
+
 ```bash
-# Watch logs
-tail -f ~/.openclaw/logs/gateway.log
+# Check latest research
+cat market_research.json | python3 -c "import sys,json; r=json.load(sys.stdin); recs=r.get('recommendations',[]); print(f'{len(recs)} recommendations'); print(recs[0] if recs else 'none')"
 
-# Check research results
-cat market_research.json | jq '.latest.recommendations[0]'
-
-# Check auto trades
-cat auto_trades.json | jq '.trades[-1]'
+# Check recent trades
+cat auto_trades.json | python3 -c "import sys,json; t=json.load(sys.stdin); trades=t.get('trades',[]); print(f'{len(trades)} trades total'); [print(x) for x in trades[-3:]]"
 ```
 
-## ⚙️ Configuration Files
+## Configuration
 
-### `automation/cron_jobs_config.json`
-Contains 3 pre-configured jobs:
-1. `market-research-hourly` - Runs at :00 every hour
-2. `auto-trading-hourly` - Runs at :15 every hour
-3. `daily-summary` - Runs at 19:00 UTC daily
+### Risk Parameters (in `manifold_bot/config.py` and `automation/auto_trader.py`)
 
-### Risk Parameters (in `automation/auto_trader.py`)
-- `max_positions`: 10 (maximum open positions)
-- `max_position_size`: 0.1 (10% of balance per trade, Kelly sizing when AI estimate available)
-- `min_confidence`: 0.65 (65% confidence minimum, hard gate)
-- Open-position guard: no re-entry on any market already held (use swap to replace)
+| Parameter | Value | Description |
+|---|---|---|
+| `MAX_POSITIONS` | 10 | Maximum simultaneous open positions |
+| `MAX_POSITIONS_PER_CATEGORY` | 3 | Max positions in any one topic category (reduced to 1 if accuracy < 50%) |
+| `max_position_size` | 10% | Max balance per single trade |
+| `MIN_CONFIDENCE` | 65% | Minimum strategy confidence to trade |
+| `MIN_BET_AMOUNT` | $1 | Minimum bet size |
+| `MAX_BET_AMOUNT` | $100 | Maximum bet size |
 
-## 📈 Expected Workflow
+### Strategy Weights (`data/strategy_weights.json`)
 
-1. **:00 every hour** — Research runs, analyzes markets, saves recommendations
-2. **:10 every hour** — Position resolution frees closed slots
+Per-strategy reliability scalars (0.5–1.2) updated weekly from `bet_outcomes`. Multiply the base Kelly fraction:
+- `weight = 1.0` → 50% Kelly (default until min-sample gate cleared: 10 trades per strategy)
+- `weight = 0.5` → 25% Kelly (unreliable strategy)
+- `weight = 1.2` → 60% Kelly (consistently accurate strategy)
+
+### Category Accuracy (`data/category_accuracy.json`)
+
+Per-category direction accuracy from resolved trades (min 8 samples). When accuracy < 50%, the category position cap tightens to 1. Updated weekly alongside strategy weights.
+
+## Expected Workflow
+
+1. **:00 every hour** — Research runs, scans markets, writes `market_research.json`, appends to `market_snapshots.db`
+2. **:10 every hour** — Position resolution frees closed slots, records P&L to `calibration.db`
 3. **:20 every hour** — Trading runs, executes up to 2 highest-EV opportunities
-4. **:40 every hour** — Swap checker proposes replacements for losing positions
-5. **19:00 daily** — Summary generated, sent to Telegram group
-6. **Sunday 02:00** — Calibration harvest fetches 2000+ resolved markets
-7. **Monday 07:00** — EV accuracy report by strategy and confidence band
+4. **19:00 daily** — Summary report sent to Telegram group
+5. **Sunday 02:00** — Calibration harvest fetches 2000+ resolved markets
+6. **Monday 07:00** — EV accuracy report by strategy and confidence band
+7. **Monday 07:30** — Strategy weights and category accuracy recomputed and committed
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 manifold-trading-bot/
@@ -122,43 +139,37 @@ manifold-trading-bot/
 │   ├── auto_trader.py
 │   ├── daily_summary.py
 │   ├── send_telegram.py
-│   ├── setup_cron_jobs.py
 │   └── cron_jobs_config.json
-├── tests/               # Test suite
-│   ├── test_manifold.py
-│   └── test_automation.py
-├── scripts/             # Dev & utility tools
-│   ├── demo_bot.py
-│   ├── fix_portfolio.py
-│   ├── get_market_ids.py
-│   ├── show_portfolio.py
-│   └── watch_demo.py
+│
 ├── manifold_bot/        # Core Python package
-│   ├── config.py
 │   ├── manifold_api.py
-│   ├── paper_trader.py
+│   ├── paper_trader.py          # paper trading engine + bet_outcomes writer
 │   ├── strategies.py
-│   └── dashboard.py
-├── docs/                # Documentation
-└── requirements.txt
+│   ├── ai_analyzer.py           # Ollama + DeepSeek AI integration
+│   ├── config.py
+│   └── paper_trading_state.json # live state: balance + open positions
+│
+├── scripts/             # Maintenance and pipeline scripts
+│   ├── resolve_positions.py
+│   ├── harvest_resolved.py
+│   ├── analyze_calibration.py
+│   ├── weekly_ev_report.py
+│   ├── compute_strategy_weights.py
+│   └── show_portfolio.py
+│
+├── data/                # Persistent data files (not committed except weights)
+│   ├── calibration.db           # bet_outcomes, calibration tables
+│   ├── market_snapshots.db      # hourly market state snapshots (M1)
+│   ├── strategy_weights.json    # per-strategy reliability scalars
+│   └── category_accuracy.json   # per-category direction accuracy
+│
+├── tests/
+│   ├── test_strategies.py       # 58 unit tests (strategies, trader, AI, phases B/C)
+│   └── test_calibration.py      # 56 unit tests (calibration pipeline, weights)
+│
+├── docs/
+│   ├── AUTOMATION_README.md     # this file
+│   └── technical_overview.md    # deep-dive architecture doc
+│
+└── memory/              # Daily session notes read by OpenClaw on startup
 ```
-
-## 🎯 Next Steps for Production
-
-### Immediate:
-1. ✅ Test all scripts manually
-2. ⬜ Set up cron jobs
-3. ⬜ Monitor first few cycles
-4. ⬜ Adjust risk parameters as needed
-
-### Phase 2 (Enhancements):
-1. **AI Integration** - Add DeepSeek analysis to research
-2. **Telegram Bot** - Real message sending (not placeholder)
-3. **Web Dashboard** - Real-time monitoring interface
-4. **Advanced Strategies** - More sophisticated trading logic
-
-### Phase 3 (Scaling):
-1. **SQLite Database** - Replace JSON files (Phase 1 from PLAN.md)
-2. **Backtesting** - Historical strategy testing
-3. **Multi-account** - Support multiple paper trading accounts
-4. **Alert System** - Custom alerts for specific conditions

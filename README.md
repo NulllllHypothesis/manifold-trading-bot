@@ -38,9 +38,9 @@ manifold-trading-bot/
 │   ├── config.py                # API keys and trading parameters
 │   └── main.py                  # Interactive CLI
 │
-├── tests/                       # Test suite
-│   ├── test_manifold.py         # API connectivity and core tests
-│   └── test_automation.py       # Automation script smoke tests
+├── tests/                       # Test suite (114 tests)
+│   ├── test_strategies.py       # 58 unit tests (strategies, trader, AI, phases B/C)
+│   └── test_calibration.py      # 56 unit tests (calibration pipeline, weights)
 │
 ├── scripts/                     # Maintenance and pipeline scripts
 │   ├── resolve_positions.py     # Hourly position resolution (polls Manifold API, frees slots)
@@ -52,9 +52,15 @@ manifold-trading-bot/
 │   ├── execute_swap.py          # Executes or dismisses a pending swap proposal
 │   └── show_portfolio.py        # Portfolio viewer (manual use)
 │
+├── data/                        # Persistent data (not committed except weights)
+│   ├── calibration.db           # bet_outcomes table; EV and P&L records
+│   ├── market_snapshots.db      # Hourly market state snapshots (ML training data)
+│   ├── strategy_weights.json    # Per-strategy reliability scalars (updated weekly)
+│   └── category_accuracy.json   # Per-category direction accuracy (updated weekly)
+│
 ├── docs/                        # Documentation
 │   ├── AUTOMATION_README.md     # Automation system setup guide
-│   └── README.md                # Legacy detailed reference
+│   └── technical_overview.md    # Deep-dive architecture reference
 │
 ├── memory/                      # Session logs — read by OpenClaw on startup
 │   └── YYYY-MM-DD.md            # Daily notes: what changed, current state, what's next
@@ -156,7 +162,7 @@ Six strategies across four signal families. At most one directional signal per f
 
 After statistical scoring, the top candidates are sent to a local AI (`llama3.2:3b` via Ollama, DeepSeek API as fallback). The AI reads the actual market question and estimates the true probability. Statistical and AI confidence are blended — AI can boost by up to 10pp or penalise down to 40% of the stat score.
 
-**Kelly Criterion** — position sizing scales with the AI's estimated edge. Half-Kelly used to reduce variance. Falls back to confidence-scaled sizing when no AI estimate is available.
+**Kelly Criterion** — position sizing scales with the AI's estimated edge. Half-Kelly used to reduce variance, further scaled by a per-strategy reliability weight (0.5–1.2) updated weekly from resolved trade outcomes. Falls back to confidence-scaled sizing when no AI estimate is available.
 
 ## Development Workflow
 
@@ -179,8 +185,8 @@ git push origin feature/your-feature
 ## Running Tests
 
 ```bash
-python3 tests/test_manifold.py      # API and core
-python3 tests/test_automation.py    # Automation scripts
+python3 tests/test_strategies.py    # strategies, trader, AI, phases B/C (58 tests)
+python3 tests/test_calibration.py   # calibration pipeline, weights (56 tests)
 ```
 
 The pre-push git hook runs these automatically before every `git push` (when dependencies are installed).

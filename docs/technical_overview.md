@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-08 (category caps, weighted scoring Phase A+D, telegram fixes, strategy weight parser bug fixed)* — 197 tests total.
+*Last updated: 2026-04-09 (Phase B+C Kelly/category-accuracy, M1 snapshot logger, Ollama timeout fix, Phase C data-flow bug fixed)* — 114 tests total.
 
 ---
 
@@ -47,14 +47,18 @@ Every hour at :00 UTC
 │  auto_research.py runs          │
 │  - Calls Manifold API           │
 │  - Gets 100+ markets            │
+│  - Writes snapshot rows ──────► data/market_snapshots.db (M1)
+│    (market_id, prob, vol24h,    │  ~100 rows/run; ML training
+│     bettors, liquidity, ts)     │  data in 2-3 months
 │  - Pre-filter: is_stale_market  │
 │  - Scores with 6 strategies     │
+│  - Strategy reliability weights │  data/strategy_weights.json
 │  - Family deduplication         │
 │  - Top 3 by composite score     │
 │    (confidence + priority_boost │
 │     × 0.15)                     │
-│  - AI analysis on top 3 ──────► deepseek-r1:14b (local, free)
-│    (YES/NO/SKIP + reasoning)    │  ~70-80s per market on CPU
+│  - AI analysis on top 3 ──────► llama3.2:3b via Ollama (local, free)
+│    (YES/NO/SKIP + reasoning)    │  ~35s warm / ~50s cold (CPU)
 │    calibration table in prompt  │  crowd bias corrections injected
 │  - Blends stat + AI confidence  │
 │  - Saves market_research.json   │
@@ -83,12 +87,18 @@ Every hour at :00 UTC
 │  - Reads market_research.json   │
 │  - Refuses schema_version < 2   │
 │  - Filters by risk rules:       │
+│    • AI veto (SKIP) first       │
 │    • confidence ≥ 65%           │
 │    • max 10 open positions      │
 │    • liquidity ≥ $200           │
 │    • no re-entry on OPEN pos    │
-│    • AI veto (SKIP) respected   │
-│  - Kelly sizing (half-Kelly)    │
+│    • category cap (Phase C):    │  3 default → 1 if accuracy<50%
+│      adaptive per own history   │  needs ≥8 resolved trades
+│  - Market validation guard:     │  abort if resolved/closed
+│    fetches live market first    │
+│  - Kelly sizing (Phase B):      │  kelly = 0.5 × strategy_weight
+│    weight 0.5→1.2 → 25-60%     │  data/strategy_weights.json
+│  - Ranks by estimated EV        │
 │  - Picks top 1-2 trades         │
 │  - Stores estimated_ev at trade │
 │  - Stores entry_probability +   │
@@ -610,19 +620,23 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
 - ✅ **Telegram dedup fix** — `telegram_bot.py:main()` no longer prints to stdout (OpenClaw was also forwarding stdout, causing every reply to arrive twice)
 - ✅ **Positions show real titles** — `/positions` does 3-tier lookup: stored `question` field → research data → Manifold API fetch for old trades
 
+**Completed (2026-04-09 session 2):**
+
+- ✅ **Phase B — Dynamic Kelly from strategy weights** — `auto_trader.py` loads `data/strategy_weights.json` at startup; Kelly multiplier = `0.5 × weight` (range 25–60%); `_get_strategy_weight()` takes max weight across all strategies in a rec; `strategy_weight_at_trade_time` logged in `auto_trades.json`.
+- ✅ **Phase C — Adaptive category caps** — `bet_outcomes` schema: `ADD COLUMN category TEXT`; `_write_bet_outcome` stores category; `compute_strategy_weights.py` adds `_compute_category_accuracy()` and writes `data/category_accuracy.json`; `auto_trader._effective_category_cap()` reduces cap 3→1 when accuracy < 50% with ≥8 samples. Bug fixed: `_fetch_outcomes()` was missing `category` from SELECT — every row fell back to `"other"`, silently broken.
+- ✅ **M1 — Hourly snapshot logger** — `_write_market_snapshots()` in `auto_research.py`; writes one row per non-resolved market to `data/market_snapshots.db` after every fetch (~100 rows/run); best-effort (wrapped in try/except so snapshot failures don't abort research).
+- ✅ **Ollama timeout fix** — `FIRST_TOKEN_TIMEOUT` raised 40s→90s (cold model load on this hardware takes ~40s); `keep_alive` 2h→4h.
+- ✅ **Test suite: 114 tests** — added `TestAdaptiveCategoryCapPhaseC` (8 tests), `TestSnapshotLogger` (2 tests), `TestComputeCategoryAccuracy` (4 tests including end-to-end category column check).
+
 **Next steps, in priority order:**
 
-**1. Weighted scoring Phase B** — Kelly fraction scales with strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. A strategy at weight 0.6 gets 30% Kelly instead of 50%. Only kicks in once the strategy clears the min-sample gate.
+**P3 — News fetcher** — structured news API integration as a `fundamental` family signal (`manifold_bot/news_fetcher.py`); keywords extracted from market question, queries NewsAPI.org free tier.
 
-**2. Weighted scoring Phase C** — extend `compute_strategy_weights.py` to also compute per-category direction accuracy; write `data/category_accuracy.json`; `auto_trader.py` uses it to dynamically tighten category caps (accuracy < 50% → cap drops from 3 to 1).
+**P4 — Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; bettor-accuracy cache in `data/calibration.db`.
 
-**3. News fetcher** — structured news API integration as a `fundamental` family signal.
+**M2 — Audit resolved_markets** — one script, one hour: category distribution, snapshot timing, bettor count distribution; output a report before building M3+.
 
-**4. Whale tracking** — track large-bet accounts via `/v0/bets` endpoint; build bettor-accuracy cache in SQLite.
-
-**5. Web dashboard** — FastAPI backend + Chart.js frontend on port 5000, SSH tunnel to view locally.
-
-**6. SQLite storage** — Replace flat JSON state files with a proper database.
+**M3 — Reconstruct earlier snapshots** — fetch bet history for the 1,121 resolved markets, find probability at T-7d/T-14d/T-30d before close; transforms near-close data into training data matching live conditions.
 
 ---
 
