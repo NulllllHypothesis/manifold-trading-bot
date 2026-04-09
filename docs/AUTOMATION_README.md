@@ -22,16 +22,23 @@ A complete automated trading system for Manifold Markets with:
 - Formats message for Telegram
 - Ready for automated delivery
 
-### 4. **Cron Job Configuration** (`automation/setup_cron_jobs.py`)
-- 7 scheduled jobs:
-  - Research: Every hour at :00 (UTC)
-  - Position Resolution: Every hour at :10 (UTC)
-  - Trading: Every hour at :20 (UTC)
-  - Position Swap Check: Every hour at :40 (UTC)
-  - Summary: Daily at 19:00 (UTC)
-  - Calibration Harvest: Sundays at 02:00 (UTC)
-  - EV Accuracy Report: Mondays at 07:00 (UTC)
-- Telegram delivery configured for group chat
+### 4. **Scheduling (OS crontab)**
+
+All jobs run via the OS-level cron daemon — scripts execute directly, no LLM agent in the loop.
+
+| Job | Schedule | Script |
+|---|---|---|
+| Market research | Every hour :00 UTC | `automation/auto_research.py` |
+| Position resolution | Every hour :10 UTC | `scripts/resolve_positions.py` |
+| Auto trading | Every hour :20 UTC | `automation/auto_trader.py` |
+| Daily summary | 19:00 UTC daily | `automation/daily_summary.py` |
+| Calibration harvest | Sundays 02:00 UTC | `scripts/harvest_resolved.py` + `analyze_calibration.py` |
+| EV accuracy report | Mondays 07:00 UTC | `scripts/weekly_ev_report.py --telegram` |
+| Strategy weight update | Mondays 07:30 UTC | `scripts/compute_strategy_weights.py` |
+
+To view: `crontab -l` on the server. To edit: `crontab -e`. Logs: `/tmp/research.log`, `/tmp/trader.log`, `/tmp/resolution.log`, etc.
+
+Telegram notifications are sent directly by scripts via Bot API — not via OpenClaw. Notifications fire only when something happens: trade placed, market resolved, daily summary, weekly EV report.
 
 ## 📊 Current Trading Status
 - **Balance**: $1,129.00 (starting from $1,000)

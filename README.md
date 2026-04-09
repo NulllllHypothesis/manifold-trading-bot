@@ -7,10 +7,14 @@ An automated trading system for [Manifold Markets](https://manifold.markets) —
 | Layer | Script | Schedule |
 |---|---|---|
 | Market research | `automation/auto_research.py` | Every hour at :00 UTC |
-| Trade execution | `automation/auto_trader.py` | Every hour at :15 UTC |
+| Position resolution | `scripts/resolve_positions.py` | Every hour at :10 UTC |
+| Trade execution | `automation/auto_trader.py` | Every hour at :20 UTC |
 | Daily report | `automation/daily_summary.py` | Daily at 19:00 UTC |
+| Calibration harvest | `scripts/harvest_resolved.py` + `analyze_calibration.py` | Sundays 02:00 UTC |
+| EV accuracy report | `scripts/weekly_ev_report.py` | Mondays 07:00 UTC |
+| Strategy weight update | `scripts/compute_strategy_weights.py` | Mondays 07:30 UTC |
 
-The research engine scans 100+ live markets and scores each one using three strategies: **momentum** (follow recent probability movement), **mean reversion** (bet against extremes), and **volume spike** (follow unusual activity). The auto-trader applies risk rules before executing — maximum 5 open positions, 10% of balance per trade, 65% minimum confidence, 6-hour cooldown per market.
+The research engine scans 100+ live markets and scores each one using six strategies across four signal families: **momentum**, **contrarian**, **fundamental**, and a **priority filter** for volume spikes. Each top candidate is sent to a local AI model (Ollama `llama3.2:3b`, DeepSeek API fallback) which estimates the true probability and votes YES/NO/SKIP. Statistical and AI confidence are blended before trading. The auto-trader applies risk rules — maximum 10 open positions, 10% of balance per trade, 65% minimum confidence, category exposure caps, AI veto respected.
 
 All trades run in **paper trading mode** against a simulated $1,000 balance, using real market data from the Manifold API.
 
@@ -38,12 +42,15 @@ manifold-trading-bot/
 │   ├── test_manifold.py         # API connectivity and core tests
 │   └── test_automation.py       # Automation script smoke tests
 │
-├── scripts/                     # Dev and maintenance tools
-│   ├── demo_bot.py              # End-to-end demo run
-│   ├── show_portfolio.py        # Detailed portfolio viewer
-│   ├── get_market_ids.py        # Market ID lookup tool
-│   ├── fix_portfolio.py         # Portfolio state repair utility
-│   └── watch_demo.py            # Live feature demo
+├── scripts/                     # Maintenance and pipeline scripts
+│   ├── resolve_positions.py     # Hourly position resolution (polls Manifold API, frees slots)
+│   ├── harvest_resolved.py      # Weekly — fetches 2000+ resolved markets into calibration.db
+│   ├── analyze_calibration.py   # Builds calibration_table.json from calibration.db
+│   ├── weekly_ev_report.py      # Monday EV accuracy report sent to Telegram
+│   ├── compute_strategy_weights.py # Updates data/strategy_weights.json from bet_outcomes
+│   ├── position_swap_checker.py # Proposes swapping losing positions for better opportunities
+│   ├── execute_swap.py          # Executes or dismisses a pending swap proposal
+│   └── show_portfolio.py        # Portfolio viewer (manual use)
 │
 ├── docs/                        # Documentation
 │   ├── AUTOMATION_README.md     # Automation system setup guide
@@ -90,38 +97,66 @@ python3 automation/auto_research.py
 python3 automation/auto_trader.py
 ```
 
-## Automated Trading (OpenClaw / Cron)
+## Automated Trading (OS Cron)
 
-The system runs autonomously on a Linux server via [OpenClaw](https://openclaw.dev) scheduled jobs.
+The system runs autonomously on a Linux server. All scheduling uses the OS-level cron daemon — scripts execute directly with no LLM agent in the loop. The only Telegram messages sent are the ones the scripts themselves choose to send (trade placed, market resolved, daily summary, weekly report).
 
-To set up or reset the cron jobs:
+**Crontab (active on server):**
 
-```bash
-python3 automation/setup_cron_jobs.py
-openclaw cron add --name "Manifold Market Research" --cron "0 * * * *" ...
-openclaw cron list
 ```
+# Market research — hourly :00
+0 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_research.py
+
+# Position resolution — hourly :10
+10 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py
+
+# Auto trading — hourly :20
+20 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py
+
+# Daily summary — 19:00 UTC
+0 19 * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/daily_summary.py
+
+# Weekly calibration harvest — Sunday 02:00 UTC
+0 2 * * 0  cd $WORKSPACE && git pull origin main -q && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py
+
+# Weekly EV report — Monday 07:00 UTC
+0 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/weekly_ev_report.py --telegram
+
+# Weekly strategy weights — Monday 07:30 UTC
+30 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/compute_strategy_weights.py && git add data/strategy_weights.json && git diff --cached --quiet || git commit -m "chore: update strategy weights"
+```
+
+To view or edit: `crontab -e` on the server. Logs: `/tmp/research.log`, `/tmp/trader.log`, `/tmp/resolution.log`, etc.
 
 See [docs/AUTOMATION_README.md](docs/AUTOMATION_README.md) for the full setup guide.
 
-**Risk parameters** (configurable in `automation/auto_trader.py`):
+**Risk parameters** (in `manifold_bot/config.py` and `automation/auto_trader.py`):
 
 | Parameter | Value | Description |
 |---|---|---|
-| `max_positions` | 5 | Maximum simultaneous open positions |
+| `MAX_POSITIONS` | 10 | Maximum simultaneous open positions |
+| `MAX_POSITIONS_PER_CATEGORY` | 3 | Max positions in any one topic category |
 | `max_position_size` | 10% | Max balance per single trade |
-| `min_confidence` | 65% | Minimum strategy confidence to trade |
-| `cooldown_hours` | 6 | Hours before re-entering the same market |
+| `MIN_CONFIDENCE` | 65% | Minimum strategy confidence to trade |
+| `MIN_BET_AMOUNT` | $1 | Minimum bet size |
+| `MAX_BET_AMOUNT` | $100 | Maximum bet size |
 
 ## Trading Strategies
 
-**Momentum** — if a market probability has been drifting in one direction, continue betting that way. Uses a threshold to avoid noise near 50%.
+Six strategies across four signal families. At most one directional signal per family is allowed into a trade (highest confidence wins within a family), preventing correlated strategies from stacking as independent evidence.
 
-**Mean Reversion** — if probability is extreme (>80% YES or <20% YES), bet it will pull back toward the middle.
+| Strategy | Family | What it does |
+|---|---|---|
+| Probability Direction | momentum | Bet with sustained drift; skips the 45-55% noise zone |
+| Mean Reversion | contrarian | Bet against extremes (>80% or <20%) when fewer than 100 bettors have weighed in |
+| Probability Bias | contrarian | Exploits measured crowd overconfidence from 1,100+ resolved markets (e.g. 60-70% bucket resolves YES only 47% of the time) |
+| Creator Disagreement | fundamental | Bet toward the market creator when their estimate differs from the crowd by ≥15pp |
+| Thin Market | fundamental | Bet toward the underrepresented side of the AMM liquidity pool (<15% of pool) |
+| Volume Spike Priority | filter | Not directional — boosts candidate ranking score when 24h volume is >2× the batch median |
 
-**Volume Spike** — if trading volume is 2× above the market average, follow the direction of the current probability. Unusual volume signals new information.
+After statistical scoring, the top candidates are sent to a local AI (`llama3.2:3b` via Ollama, DeepSeek API as fallback). The AI reads the actual market question and estimates the true probability. Statistical and AI confidence are blended — AI can boost by up to 10pp or penalise down to 40% of the stat score.
 
-**Kelly Criterion** — position sizing formula that maximises long-run growth given your estimated edge and payout ratio. Capped at 25% of balance.
+**Kelly Criterion** — position sizing scales with the AI's estimated edge. Half-Kelly used to reduce variance. Falls back to confidence-scaled sizing when no AI estimate is available.
 
 ## Development Workflow
 

@@ -146,7 +146,7 @@ Every hour at :00 UTC
 │  - Mondays: appends weekly EV   │
 │    accuracy section             │
 │  - Formats a Telegram message   │
-│  - OpenClaw delivers to group   │
+│  - Sends directly via Bot API   │
 └─────────────────────────────────┘
         │
         │  (Sundays 02:00 UTC)
@@ -592,6 +592,16 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
   - `test_strategies.py` — 48 tests including regression for duplicate-bet (2czul2Rync) bug
   - **173 tests total across all suites**
 
+**Completed (2026-04-09):**
+
+- ✅ **OS cron migration** — all 7 scheduled jobs moved from OpenClaw `agentTurn` cron to Linux OS crontab. Scripts run directly (no LLM agent, no narration). Telegram messages come only from the scripts themselves. OpenClaw cron jobs disabled.
+- ✅ **Market validation guard** — `auto_trader.py:execute_trade()` now aborts if the market doesn't exist on Manifold, is already resolved, or is closed. Previously a fetch failure silently continued and placed a bet on a phantom market.
+- ✅ **Test suite green** — `volume_spike` → `volume_spike_priority` rename reflected in `tests/test_strategies.py`; 48/48 passing.
+- ✅ **Weekly strategy weights cron** — registered (Mondays 07:30 UTC); runs `compute_strategy_weights.py`, auto-commits updated `data/strategy_weights.json`.
+- ✅ **Trade + resolution Telegram notifications** — `auto_trader.py` sends a message per executed trade; `resolve_positions.py` sends a message when markets resolve. Silent otherwise.
+- ✅ **Stale root files deleted** — 14 stale `.py` and 4 stale `.json` files removed from workspace root.
+- ✅ **.gitignore updated** — `pending_swaps.json`, `auto_trades.json`, `market_research.json`, `.clawhub/` excluded.
+
 **Completed this session (2026-04-08):**
 
 - ✅ **Category exposure caps** — `MAX_POSITIONS_PER_CATEGORY=3` in `config.py`; enforced in `should_trade_market()`; `category` stored on every trade record; `🗂 BY CATEGORY` breakdown in daily summary
@@ -622,29 +632,31 @@ The bot doesn't run on your laptop. It runs on a server (Aleksi's homelab) insid
 
 ```
 Docker Container (Linux)
-    └── OpenClaw (Node.js AI agent gateway)
-            ├── Cron scheduler (built-in, not OS cron)
-            │       ├── hourly   :00 UTC  → runs auto_research.py (swap check inside)
-            │       ├── hourly   :10 UTC  → runs resolve_positions.py
-            │       ├── hourly   :20 UTC  → runs auto_trader.py
-            │       ├── daily 19:00 UTC   → runs daily_summary.py
-            │       ├── Sundays  02:00    → runs harvest_resolved.py + analyze_calibration.py
-            │       └── Mondays  07:00    → runs weekly_ev_report.py
+    ├── OS cron daemon (crontab — scripts run directly, no LLM in the loop)
+    │       ├── hourly   :00 UTC  → python3 automation/auto_research.py
+    │       ├── hourly   :10 UTC  → python3 scripts/resolve_positions.py
+    │       ├── hourly   :20 UTC  → python3 automation/auto_trader.py
+    │       ├── daily 19:00 UTC   → python3 automation/daily_summary.py
+    │       ├── Sundays  02:00    → python3 scripts/harvest_resolved.py + analyze_calibration.py
+    │       ├── Mondays  07:00    → python3 scripts/weekly_ev_report.py --telegram
+    │       └── Mondays  07:30    → python3 scripts/compute_strategy_weights.py + git commit
+    └── OpenClaw (Node.js AI agent gateway — handles Telegram bot, DM commands, skills)
             ├── Telegram bot (@hackathon_26_bot)
-            │       └── sends results to group -5240775171
+            │       ├── group -5240775171: /portfolio /positions /scan /autotrader on/off
+            │       └── Notifications sent directly by scripts via Bot API (not via OpenClaw)
             └── Git workspace (~/.openclaw/workspace/)
-                    ├── This repo (main branch)
+                    ├── This repo (main branch) — each cron run does git pull first
                     └── data/calibration.db (SQLite, gitignored)
                         ├── resolved_markets (1,121+ rows)
                         └── bet_outcomes (written on each resolution)
 ```
 
-The scripts run inside the container's shell. OpenClaw executes them as shell commands (via its `coding` tools profile), reads stdout, and forwards summaries to Telegram.
+Scripts execute directly via OS cron — no LLM agent involved in scheduling. Each script sends its own Telegram notification when something meaningful happens (trade placed, market resolved, daily/weekly reports). The OpenClaw gateway handles interactive bot commands only.
 
 **Environment variables:** `MANIFOLD_API_KEY` is set in both `/etc/profile.d/hackathon.sh` (sourced by login shells) and in `openclaw.json` (injected into cron session environments). `config.py` also loads from the workspace `.env` file via `load_dotenv`. Key priority: OS environment (from `openclaw.json`) wins over `.env` since `load_dotenv` does not override existing vars.
 
-**Ollama:** `deepseek-r1:14b` (8.5 GB) runs as a persistent `ollama serve` + runner process pair. The runner spawns on first generation request and stays alive. If it gets stuck in a spin loop (symptom: 700%+ CPU, no output), restart with `kill $(pgrep -f "ollama serve") && nohup ollama serve > /tmp/ollama.log 2>&1 &` — the model reloads on next call (~87s cold, ~21s warm).
+**Ollama:** `llama3.2:3b` (2.0 GB) runs as a persistent `ollama serve` + runner process pair. The runner spawns on first generation request and stays alive. `keep_alive: "2h"` in API requests keeps the model resident between hourly cron runs (warm start ~2s vs cold ~20s). If it gets stuck in a spin loop (symptom: 700%+ CPU, no output), restart with `kill $(pgrep -f "ollama runner") && nohup ollama serve > /tmp/ollama.log 2>&1 &` — the model reloads on next call.
 
 ---
 
-*Last updated: 2026-04-08 (category caps, weighted scoring Phase A+D, telegram fixes, strategy weight parser)*
+*Last updated: 2026-04-09 (OS cron migration, llama3.2:3b, market validation guard, test suite green, weekly weights cron)*
