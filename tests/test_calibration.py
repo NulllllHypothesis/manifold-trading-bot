@@ -578,5 +578,83 @@ class TestBuildCalibrationNote(unittest.TestCase):
             os.unlink(tmp)
 
 
+def _cat_outcome(rec, resolution, category):
+    return {
+        "our_recommendation": rec,
+        "market_resolution": resolution,
+        "category": category,
+        "strategies": '["probability_direction"]',
+    }
+
+
+class TestComputeCategoryAccuracy(unittest.TestCase):
+    """Phase C: _compute_category_accuracy() correctly uses the category column."""
+
+    def test_correct_accuracy_per_category(self):
+        from scripts.compute_strategy_weights import _compute_category_accuracy
+        outcomes = [
+            _cat_outcome("YES", "YES", "crypto"),    # correct
+            _cat_outcome("YES", "NO",  "crypto"),    # wrong
+            _cat_outcome("YES", "YES", "crypto"),    # correct
+            _cat_outcome("NO",  "NO",  "politics"),  # correct
+            _cat_outcome("YES", "NO",  "politics"),  # wrong
+        ]
+        result = _compute_category_accuracy(outcomes)
+        self.assertAlmostEqual(result["crypto"]["accuracy"], 2/3, places=3)
+        self.assertEqual(result["crypto"]["sample_count"], 3)
+        self.assertAlmostEqual(result["politics"]["accuracy"], 0.5, places=3)
+        self.assertEqual(result["politics"]["sample_count"], 2)
+
+    def test_none_category_falls_back_to_other(self):
+        from scripts.compute_strategy_weights import _compute_category_accuracy
+        outcomes = [
+            _cat_outcome("YES", "YES", None),
+            _cat_outcome("YES", "NO",  None),
+        ]
+        result = _compute_category_accuracy(outcomes)
+        self.assertIn("other", result)
+        self.assertEqual(result["other"]["sample_count"], 2)
+
+    def test_empty_outcomes_returns_empty_dict(self):
+        from scripts.compute_strategy_weights import _compute_category_accuracy
+        self.assertEqual(_compute_category_accuracy([]), {})
+
+    def test_fetch_outcomes_includes_category_column(self):
+        """_fetch_outcomes must return dicts with a 'category' key so Phase C has data."""
+        import sqlite3, tempfile as _tempfile
+        from scripts.weekly_ev_report import _fetch_outcomes
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "calibration.db")
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE TABLE bet_outcomes (
+                    id INTEGER PRIMARY KEY,
+                    market_id TEXT, our_recommendation TEXT, amount REAL,
+                    probability REAL, estimated_ev REAL, ai_confidence REAL,
+                    ai_estimated_probability REAL, strategies TEXT,
+                    market_resolution TEXT, actual_pnl REAL, ev_error REAL,
+                    era TEXT, resolved_at TEXT, category TEXT
+                )
+            """)
+            conn.execute("""
+                INSERT INTO bet_outcomes
+                (market_id, our_recommendation, amount, probability,
+                 estimated_ev, ai_confidence, ai_estimated_probability,
+                 strategies, market_resolution, actual_pnl, ev_error,
+                 era, resolved_at, category)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, ('m1','YES',10,0.4,1.0,0.8,0.6,'[]','YES',5.0,-4.0,'post_ev_fix','2026-04-09','crypto'))
+            conn.commit()
+            conn.close()
+
+            with patch("scripts.weekly_ev_report.DB_PATH", db_path):
+                rows = _fetch_outcomes(era=None)
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("category", rows[0], "_fetch_outcomes must return 'category' key")
+        self.assertEqual(rows[0]["category"], "crypto")
+
+
 if __name__ == "__main__":
     unittest.main()

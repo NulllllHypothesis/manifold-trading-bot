@@ -74,7 +74,8 @@ def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
     rows = conn.execute(f"""
         SELECT market_id, our_recommendation, amount, probability,
                estimated_ev, ai_confidence, ai_estimated_probability, strategies,
-               market_resolution, actual_pnl, ev_error, era, resolved_at
+               market_resolution, actual_pnl, ev_error, era, resolved_at,
+               category
         FROM bet_outcomes
         {where}
         ORDER BY resolved_at
@@ -83,7 +84,8 @@ def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
 
     cols = ['market_id', 'our_recommendation', 'amount', 'probability',
             'estimated_ev', 'ai_confidence', 'ai_estimated_probability', 'strategies',
-            'market_resolution', 'actual_pnl', 'ev_error', 'era', 'resolved_at']
+            'market_resolution', 'actual_pnl', 'ev_error', 'era', 'resolved_at',
+            'category']
     return [dict(zip(cols, row)) for row in rows]
 
 

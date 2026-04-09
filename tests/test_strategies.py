@@ -15,7 +15,7 @@ import sys
 import os
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -422,6 +422,123 @@ class TestOpenPositionGuard(unittest.TestCase):
             'ai_returned_skip': False,
         }
         self.assertFalse(trader.should_trade_market('mkt_dup', rec))
+
+
+class TestAdaptiveCategoryCapPhaseC(unittest.TestCase):
+    """Phase C: _effective_category_cap() and _get_strategy_weight() correctness."""
+
+    def _make_trader(self):
+        from automation.auto_trader import AutoTrader
+        trader = AutoTrader.__new__(AutoTrader)
+        trader.max_positions = 10
+        trader.max_position_size = 0.1
+        trader.min_confidence = 0.65
+        mock_pt = MagicMock()
+        mock_pt.balance = 500.0
+        mock_pt.positions = {}
+        trader.trader = mock_pt
+        return trader
+
+    def test_no_data_returns_default_cap(self):
+        trader = self._make_trader()
+        trader._category_accuracy = {}
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        self.assertEqual(trader._effective_category_cap("crypto"), MAX_POSITIONS_PER_CATEGORY)
+
+    def test_below_min_samples_returns_default_cap(self):
+        from automation.auto_trader import _MIN_SAMPLES_PER_CATEGORY
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        trader = self._make_trader()
+        trader._category_accuracy = {
+            "crypto": {"accuracy": 0.30, "sample_count": _MIN_SAMPLES_PER_CATEGORY - 1}
+        }
+        # Not enough samples — don't penalise yet
+        self.assertEqual(trader._effective_category_cap("crypto"), MAX_POSITIONS_PER_CATEGORY)
+
+    def test_poor_accuracy_with_sufficient_samples_reduces_cap(self):
+        from automation.auto_trader import _MIN_SAMPLES_PER_CATEGORY
+        trader = self._make_trader()
+        trader._category_accuracy = {
+            "crypto": {"accuracy": 0.40, "sample_count": _MIN_SAMPLES_PER_CATEGORY + 2}
+        }
+        self.assertEqual(trader._effective_category_cap("crypto"), 1)
+
+    def test_good_accuracy_returns_default_cap(self):
+        from automation.auto_trader import _MIN_SAMPLES_PER_CATEGORY
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        trader = self._make_trader()
+        trader._category_accuracy = {
+            "politics": {"accuracy": 0.65, "sample_count": _MIN_SAMPLES_PER_CATEGORY + 2}
+        }
+        self.assertEqual(trader._effective_category_cap("politics"), MAX_POSITIONS_PER_CATEGORY)
+
+    def test_unknown_category_returns_default_cap(self):
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        trader = self._make_trader()
+        trader._category_accuracy = {"crypto": {"accuracy": 0.30, "sample_count": 20}}
+        self.assertEqual(trader._effective_category_cap("sports"), MAX_POSITIONS_PER_CATEGORY)
+
+    def test_strategy_weight_uses_max_across_strategies(self):
+        trader = self._make_trader()
+        trader._strategy_weights = {
+            "probability_direction": 0.6,
+            "mean_reversion": 1.1,
+            "volume_spike": 0.8,
+        }
+        self.assertAlmostEqual(trader._get_strategy_weight(["probability_direction", "mean_reversion"]), 1.1)
+
+    def test_strategy_weight_missing_attr_falls_back_to_one(self):
+        """Test that _get_strategy_weight is safe even if __new__ skipped __init__."""
+        from automation.auto_trader import AutoTrader
+        trader = AutoTrader.__new__(AutoTrader)
+        # _strategy_weights not set at all — getattr guard should kick in
+        self.assertEqual(trader._get_strategy_weight(["mean_reversion"]), 1.0)
+
+    def test_category_cap_missing_attr_falls_back_to_default(self):
+        """Test that _effective_category_cap is safe even if __new__ skipped __init__."""
+        from automation.auto_trader import AutoTrader
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        trader = AutoTrader.__new__(AutoTrader)
+        # _category_accuracy not set at all — getattr guard should kick in
+        self.assertEqual(trader._effective_category_cap("crypto"), MAX_POSITIONS_PER_CATEGORY)
+
+
+class TestSnapshotLogger(unittest.TestCase):
+    """M1: _write_market_snapshots() writes rows and is best-effort."""
+
+    def test_writes_non_resolved_markets_to_db(self):
+        import tempfile, sqlite3
+        from automation.auto_research import _write_market_snapshots
+        markets = [
+            {"id": "mkt1", "question": "Will X?", "probability": 0.6,
+             "volume24Hours": 100.0, "uniqueBettorCount": 10,
+             "totalLiquidity": 500.0, "isResolved": False},
+            {"id": "mkt2", "question": "Will Y?", "probability": 0.3,
+             "volume24Hours": 50.0, "uniqueBettorCount": 5,
+             "totalLiquidity": 200.0, "isResolved": True},  # resolved — should be excluded
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "market_snapshots.db")
+            with patch("automation.auto_research._SNAPSHOTS_DB_PATH", db_path):
+                _write_market_snapshots(markets)
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute("SELECT market_id FROM market_snapshots").fetchall()
+            conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "mkt1")
+
+    def test_snapshot_failure_does_not_propagate(self):
+        """A broken DB path must not raise — the call site wraps in try/except."""
+        from automation.auto_research import _write_market_snapshots
+        markets = [{"id": "m", "question": "Q?", "probability": 0.5,
+                    "volume24Hours": 0, "uniqueBettorCount": 0,
+                    "totalLiquidity": 100, "isResolved": False}]
+        with patch("automation.auto_research._SNAPSHOTS_DB_PATH", "/nonexistent/path/db.sqlite"):
+            # Should raise — but the call site in analyze_markets() catches it.
+            # Here we just verify the exception type is not silently swallowed inside
+            # _write_market_snapshots itself (it shouldn't be — caller handles it).
+            with self.assertRaises(Exception):
+                _write_market_snapshots(markets)
 
 
 if __name__ == '__main__':

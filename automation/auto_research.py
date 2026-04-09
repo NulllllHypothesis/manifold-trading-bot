@@ -151,8 +151,13 @@ class MarketResearcher:
             markets = api_client.get_markets(limit=limit)
             print(f"  Retrieved {len(markets)} markets")
 
-            # M1: write hourly snapshot for ML training pipeline
-            _write_market_snapshots(markets)
+            # M1: write hourly snapshot for ML training pipeline.
+            # Best-effort: a snapshot failure (disk full, lock, schema) must never
+            # abort the research cycle — market analysis is the primary job here.
+            try:
+                _write_market_snapshots(markets)
+            except Exception as snap_err:
+                print(f"  Warning: snapshot write failed ({snap_err}) — continuing without snapshots")
 
             # Compute median 24h volume once (outside the loop) to avoid O(n²) recomputation.
             # volume24Hours is the correct signal: total volume inflates for old markets.
