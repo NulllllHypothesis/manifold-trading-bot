@@ -282,7 +282,28 @@ def _log_llm_call(
 
 
 def _call_ollama(prompt: str) -> Optional[str]:
-    """Call local Ollama instance."""
+    """
+    Call local Ollama instance using streaming.
+
+    We stream (stream=True) instead of waiting for the full response in one shot
+    (stream=False) for a critical reason: when the Ollama runner process is stuck
+    in a spin loop (symptom: 700%+ CPU, no useful output), it accepts the TCP
+    connection but never writes the first response byte. With stream=False the
+    read_timeout is the only protection — it had to be set to 60s to allow normal
+    80s generation, meaning a stuck runner blocks for 60s per market (180s for 3).
+
+    With streaming, the connect timeout (5s) catches an unreachable Ollama, and a
+    separate FIRST_TOKEN_TIMEOUT (20s) catches a stuck runner: healthy Ollama sends
+    the first token within a few seconds of starting generation; a hung process
+    never does. Once the first token arrives we read the rest with a generous
+    per-chunk timeout since generation can legitimately take 80-90s on CPU.
+
+    The full response text is accumulated from the 'response' field of each
+    streamed JSON line and returned as a single string, matching the stream=False
+    interface that the rest of the code expects.
+    """
+    FIRST_TOKEN_TIMEOUT = 20   # seconds to wait for first token — catches stuck runners fast
+    PER_CHUNK_TIMEOUT   = 120  # seconds per subsequent chunk — generous for slow CPU inference
     try:
         import requests
         response = requests.post(
@@ -290,13 +311,35 @@ def _call_ollama(prompt: str) -> Optional[str]:
             json={
                 "model": OLLAMA_MODEL,
                 "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
-                "stream": False,
+                "stream": True,
                 "options": {"temperature": 0.3}
             },
-            timeout=(5, 60)  # (connect_timeout, read_timeout) — fail fast if Ollama unreachable
+            timeout=(5, FIRST_TOKEN_TIMEOUT),  # connect=5s, first-byte=20s
+            stream=True,
         )
-        if response.status_code == 200:
-            return response.json().get("response", "")
+        if response.status_code != 200:
+            return None
+
+        full_text = []
+        first_chunk = True
+        for raw_line in response.iter_lines(chunk_size=None):
+            if not raw_line:
+                continue
+            try:
+                chunk = json.loads(raw_line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            full_text.append(chunk.get("response", ""))
+            if chunk.get("done"):
+                break
+            if first_chunk:
+                # After the first token arrives, extend the socket timeout so
+                # long CPU inference can finish without hitting the 20s deadline.
+                response.raw._fp.fp.raw._sock.settimeout(PER_CHUNK_TIMEOUT)
+                first_chunk = False
+
+        return "".join(full_text) if full_text else None
+
     except Exception:
         pass
     return None
