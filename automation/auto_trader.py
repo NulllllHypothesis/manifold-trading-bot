@@ -19,6 +19,7 @@ from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY
 from manifold_bot.strategies import _infer_market_category
+from automation.send_telegram import send_message as _tg
 
 class AutoTrader:
     """Automated trading with risk management"""
@@ -303,6 +304,15 @@ class AutoTrader:
 
         if success:
             print(f"  ✅ Trade executed successfully")
+            try:
+                _tg(
+                    f"🎯 *Trade placed: {outcome}*\n"
+                    f"_{recommendation['question'][:80]}_\n"
+                    f"Prob: {current_prob*100:.1f}% | Size: ${amount:.0f} | Conf: {confidence*100:.0f}%\n"
+                    f"Balance: ${self.trader.balance:.2f}"
+                )
+            except Exception:
+                pass
 
             # Build reasoning
             reasoning_parts = []

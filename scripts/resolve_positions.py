@@ -18,6 +18,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.paper_trader import PaperTrader
+from automation.send_telegram import send_message as _tg
 
 
 def main() -> int:
@@ -81,6 +82,17 @@ def main() -> int:
     print(f"  Balance change   : ${balance_change:+.2f}")
     print(f"  Current balance  : ${trader.balance:.2f}")
     print("=" * 50)
+
+    if resolved_count > 0:
+        try:
+            sign = "+" if balance_change >= 0 else ""
+            _tg(
+                f"📊 *{resolved_count} market(s) resolved*\n"
+                f"P&L: {sign}${balance_change:.2f} | Balance: ${trader.balance:.2f}\n"
+                f"Positions: {open_before} → {open_after}"
+            )
+        except Exception:
+            pass
 
     return 0
 
