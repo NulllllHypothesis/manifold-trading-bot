@@ -5,9 +5,10 @@ Runs hourly to analyze markets and identify trading opportunities.
 """
 
 import json
+import sqlite3
 import sys
 import statistics as _stats
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 import os
 
@@ -22,6 +23,67 @@ from manifold_bot.config import MIN_CONFIDENCE
 from scripts.position_swap_checker import run_swap_check
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SNAPSHOTS_DB_PATH = os.path.join(_ROOT, "data", "market_snapshots.db")
+
+
+def _write_market_snapshots(markets: list) -> None:
+    """
+    Write one snapshot row per non-resolved market to data/market_snapshots.db.
+
+    Called after every hourly market fetch (~100 rows/run).  After 2–3 months,
+    these rows can be joined against resolved_markets to produce training data
+    for the ML pipeline (M1 in PLAN.md).
+
+    Schema: market_id, question, probability, volume24h, bettors, liquidity, snapshot_at
+    """
+    os.makedirs(os.path.dirname(_SNAPSHOTS_DB_PATH), exist_ok=True)
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+
+    conn = sqlite3.connect(_SNAPSHOTS_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id   TEXT NOT NULL,
+            question    TEXT,
+            probability REAL,
+            volume24h   REAL,
+            bettors     INTEGER,
+            liquidity   REAL,
+            snapshot_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_snapshots_market
+        ON market_snapshots(market_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_snapshots_time
+        ON market_snapshots(snapshot_at)
+    """)
+
+    rows = [
+        (
+            m.get("id"),
+            (m.get("question") or "")[:200],
+            m.get("probability"),
+            m.get("volume24Hours") or 0.0,
+            m.get("uniqueBettorCount") or 0,
+            m.get("totalLiquidity") or 0.0,
+            snapshot_at,
+        )
+        for m in markets
+        if m.get("id") and not m.get("isResolved")
+    ]
+
+    conn.executemany("""
+        INSERT INTO market_snapshots
+        (market_id, question, probability, volume24h, bettors, liquidity, snapshot_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, rows)
+
+    conn.commit()
+    conn.close()
+    print(f"  Snapshots: {len(rows)} rows → market_snapshots.db")
 _STRATEGY_WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
 _DEFAULT_STRATEGY_WEIGHT = 1.0
 
@@ -88,6 +150,9 @@ class MarketResearcher:
             # Get recent markets
             markets = api_client.get_markets(limit=limit)
             print(f"  Retrieved {len(markets)} markets")
+
+            # M1: write hourly snapshot for ML training pipeline
+            _write_market_snapshots(markets)
 
             # Compute median 24h volume once (outside the loop) to avoid O(n²) recomputation.
             # volume24Hours is the correct signal: total volume inflates for old markets.

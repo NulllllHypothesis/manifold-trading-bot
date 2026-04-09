@@ -27,10 +27,11 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.weekly_ev_report import _fetch_outcomes, MIN_SAMPLES_PER_STRATEGY
+from scripts.weekly_ev_report import _fetch_outcomes, MIN_SAMPLES_PER_STRATEGY, MIN_SAMPLES_PER_CATEGORY
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
+_CATEGORY_ACCURACY_PATH = os.path.join(_ROOT, "data", "category_accuracy.json")
 
 # Known strategies — always emitted so consumers can rely on all keys being present.
 # Must match every strategy name that auto_research.py can write into the strategies list.
@@ -111,9 +112,36 @@ def _compute_weights(outcomes: list[dict]) -> dict:
     return weights
 
 
+def _compute_category_accuracy(outcomes: list[dict]) -> dict:
+    """
+    Returns {category: {"accuracy": float, "sample_count": int}} for every
+    category seen in bet_outcomes.  Categories below MIN_SAMPLES_PER_CATEGORY
+    are included in the output (auto_trader.py checks the threshold itself).
+    """
+    per_cat: dict[str, dict] = {}
+
+    for o in outcomes:
+        cat = o.get("category") or "other"
+        correct = o.get("our_recommendation") == o.get("market_resolution")
+        if cat not in per_cat:
+            per_cat[cat] = {"total": 0, "correct": 0}
+        per_cat[cat]["total"] += 1
+        if correct:
+            per_cat[cat]["correct"] += 1
+
+    result = {}
+    for cat, stats in per_cat.items():
+        total = stats["total"]
+        acc = round(stats["correct"] / total, 4) if total > 0 else 0.0
+        result[cat] = {"accuracy": acc, "sample_count": total}
+
+    return result
+
+
 def main(dry_run: bool = False) -> None:
     outcomes = _fetch_outcomes(era="post_ev_fix")
     weights = _compute_weights(outcomes)
+    cat_accuracy = _compute_category_accuracy(outcomes)
 
     result = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -139,6 +167,15 @@ def main(dry_run: bool = False) -> None:
             note = f"<{MIN_SAMPLES_PER_STRATEGY} samples — default"
         print(f"  {strat:<28} weight={w:.4f}  [{note}]")
 
+    print(f"\nCategory accuracy (min {MIN_SAMPLES_PER_CATEGORY} samples for adaptive cap):")
+    if cat_accuracy:
+        for cat, info in sorted(cat_accuracy.items()):
+            gate = "✓ active" if info["sample_count"] >= MIN_SAMPLES_PER_CATEGORY else f"< {MIN_SAMPLES_PER_CATEGORY} samples"
+            cap_note = "→ cap reduced to 1" if (info["sample_count"] >= MIN_SAMPLES_PER_CATEGORY and info["accuracy"] < 0.50) else ""
+            print(f"  {cat:<20} acc={info['accuracy']*100:.0f}%  n={info['sample_count']}  [{gate}] {cap_note}")
+    else:
+        print("  No resolved trades with category data yet.")
+
     if dry_run:
         print("\n[dry-run] Not writing to disk.")
         return
@@ -146,6 +183,16 @@ def main(dry_run: bool = False) -> None:
     with open(_WEIGHTS_PATH, "w") as f:
         json.dump(result, f, indent=2)
     print(f"\nWritten → {_WEIGHTS_PATH}")
+
+    cat_result = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "sample_count": len(outcomes),
+        "min_samples_per_category": MIN_SAMPLES_PER_CATEGORY,
+        "categories": cat_accuracy,
+    }
+    with open(_CATEGORY_ACCURACY_PATH, "w") as f:
+        json.dump(cat_result, f, indent=2)
+    print(f"Written → {_CATEGORY_ACCURACY_PATH}")
 
 
 if __name__ == "__main__":

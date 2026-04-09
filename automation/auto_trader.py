@@ -21,6 +21,32 @@ from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, 
 from manifold_bot.strategies import _infer_market_category
 from automation.send_telegram import send_message as _tg
 
+# Minimum resolved trades per category before adaptive cap kicks in (mirrors
+# MIN_SAMPLES_PER_STRATEGY from weekly_ev_report.py but for categories).
+_MIN_SAMPLES_PER_CATEGORY = 8
+
+
+def _load_weights_file(root: str) -> tuple[dict, int, int]:
+    """Load strategy_weights.json. Returns (weights, sample_count, min_threshold)."""
+    path = os.path.join(root, "data", "strategy_weights.json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d.get("weights", {}), d.get("sample_count", 0), d.get("min_samples_threshold", 10)
+    except Exception:
+        return {}, 0, 10
+
+
+def _load_category_accuracy_file(root: str) -> dict:
+    """Load category_accuracy.json. Returns {category: {accuracy, sample_count}} or {}."""
+    path = os.path.join(root, "data", "category_accuracy.json")
+    try:
+        with open(path) as f:
+            return json.load(f).get("categories", {})
+    except Exception:
+        return {}
+
+
 class AutoTrader:
     """Automated trading with risk management"""
 
@@ -34,6 +60,12 @@ class AutoTrader:
         self.max_positions = MAX_POSITIONS
         self.max_position_size = 0.1  # 10% of balance per trade
         self.min_confidence = MIN_CONFIDENCE
+
+        # Phase B: strategy reliability weights — scale Kelly fraction per strategy
+        self._strategy_weights, self._weights_sample_count, _ = _load_weights_file(_root)
+
+        # Phase C: category accuracy — drive adaptive exposure caps
+        self._category_accuracy = _load_category_accuracy_file(_root)
 
     def load_latest_research(self) -> Optional[Dict]:
         """Load the latest market research"""
@@ -69,6 +101,42 @@ class AutoTrader:
         except Exception as e:
             print(f"Error loading research: {e}")
             return None
+
+    def _get_strategy_weight(self, strategies: list) -> float:
+        """
+        Return the effective strategy weight for a recommendation.
+
+        Uses the maximum weight across all strategies that fired — the strongest
+        reliable signal drives sizing; we don't average down good signals with
+        neutral ones.
+
+        Falls back to 1.0 (standard half-Kelly) when no weight data exists or
+        all strategies are below the min-sample threshold (their stored weight
+        is already 1.0 in that case, so the fallback is implicit).
+        """
+        weights = getattr(self, '_strategy_weights', {})
+        if not strategies or not weights:
+            return 1.0
+        return max((weights.get(s, 1.0) for s in strategies), default=1.0)
+
+    def _effective_category_cap(self, category: str) -> int:
+        """
+        Return the position cap for a category, reduced to 1 if own trade history
+        shows < 50% directional accuracy with sufficient sample size.
+
+        Phase C: adaptive caps based on per-category resolved trade history.
+        Below _MIN_SAMPLES_PER_CATEGORY the default cap (MAX_POSITIONS_PER_CATEGORY)
+        is always used — never penalise a category on too-small a sample.
+        """
+        cat_accuracy = getattr(self, '_category_accuracy', {})
+        info = cat_accuracy.get(category)
+        if info is None:
+            return MAX_POSITIONS_PER_CATEGORY
+        if info.get("sample_count", 0) < _MIN_SAMPLES_PER_CATEGORY:
+            return MAX_POSITIONS_PER_CATEGORY
+        if info.get("accuracy", 1.0) < 0.50:
+            return 1
+        return MAX_POSITIONS_PER_CATEGORY
 
     def should_trade_market(self, market_id: str, recommendation: Dict) -> bool:
         """
@@ -128,8 +196,9 @@ class AutoTrader:
             and (pos.get('category') or pos.get('question'))
             and (pos.get('category') or _infer_market_category(pos.get('question', ''))) == rec_category
         )
-        if open_in_category >= MAX_POSITIONS_PER_CATEGORY:
-            print(f"  Category cap reached: {rec_category} has {open_in_category}/{MAX_POSITIONS_PER_CATEGORY} open positions")
+        effective_cap = self._effective_category_cap(rec_category)
+        if open_in_category >= effective_cap:
+            print(f"  Category cap reached: {rec_category} has {open_in_category}/{effective_cap} open positions")
             return False
 
         # Check market liquidity
@@ -194,10 +263,15 @@ class AutoTrader:
                 print(f"  Sizing: kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}) → no edge (k={kelly_fraction:.3f}), skipping")
                 return 0.0
 
-            # Half-Kelly reduces bet size when model has uncertainty — lowers ruin risk
-            kelly_fraction *= 0.5
+            # Phase B: scale half-Kelly by strategy reliability weight.
+            # weight range 0.5–1.2 → Kelly multiplier 25%–60%.
+            # Weights below min-sample threshold are stored as 1.0, so the default
+            # half-Kelly (50%) applies automatically until data accumulates.
+            strategies = recommendation.get('strategies', [])
+            weight = self._get_strategy_weight(strategies)
+            kelly_fraction *= 0.5 * weight
             position_size = self.trader.balance * kelly_fraction
-            sizing_method = f"kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}, k={kelly_fraction:.3f})"
+            sizing_method = f"kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}, k={kelly_fraction:.3f}, w={weight:.2f})"
         else:
             # No AI estimate available — fall back to confidence-scaled sizing
             base_size = self.trader.balance * self.max_position_size
@@ -331,6 +405,7 @@ class AutoTrader:
             reasoning = ' | '.join(reasoning_parts) if reasoning_parts else 'No reasoning provided'
 
             # Log trade
+            strategies = recommendation.get('strategies', [])
             self.log_trade({
                 'market_id': market_id,
                 'question': recommendation['question'],
@@ -340,7 +415,8 @@ class AutoTrader:
                 'confidence': confidence,
                 'estimated_ev': estimated_ev,
                 'timestamp': datetime.now().isoformat(),
-                'strategies': recommendation.get('strategies', []),
+                'strategies': strategies,
+                'strategy_weight_at_trade_time': self._get_strategy_weight(strategies),
                 'reasoning': reasoning,
                 'balance_after': self.trader.balance
             })

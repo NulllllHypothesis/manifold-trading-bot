@@ -73,6 +73,7 @@ def _init_bet_outcomes_db() -> None:
     for migration in [
         "ALTER TABLE bet_outcomes ADD COLUMN ai_estimated_probability REAL",
         "ALTER TABLE bet_outcomes ADD COLUMN era TEXT",
+        "ALTER TABLE bet_outcomes ADD COLUMN category TEXT",
     ]:
         try:
             conn.execute(migration)
@@ -118,8 +119,8 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
             INSERT INTO bet_outcomes
             (market_id, our_recommendation, amount, probability,
              estimated_ev, ai_confidence, ai_estimated_probability, strategies,
-             market_resolution, actual_pnl, ev_error, era, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             market_resolution, actual_pnl, ev_error, era, resolved_at, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("market_id"),
             trade.get("outcome"),
@@ -134,6 +135,7 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
             ev_error,
             "post_ev_fix",
             datetime.now().isoformat(),
+            trade.get("category"),
         ))
         conn.commit()
         conn.close()
