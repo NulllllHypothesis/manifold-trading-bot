@@ -23,7 +23,7 @@ python3 tests/test_manifold.py # verify everything works
 ## Server
 - **Host:** See `.env` for `SANDBOX_IP`, `SANDBOX_PASS` (user: `hackathon`)
 - **Workspace:** `~/.openclaw/workspace/`
-- **Local LLM (free):** `http://localhost:11434` — model `deepseek-r1:14b`
+- **Local LLM (free):** `http://localhost:11434` — model `llama3.2:3b` (switched 2026-04-09; 9.3 tok/s vs 0.7 tok/s for old deepseek-r1:14b)
 - **DeepSeek API:** `https://api.deepseek.com` — model `deepseek-chat`
 
 ## SSH Tunnel (run on your laptop)
@@ -337,74 +337,133 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
 
 ---
 
-### 🟡 Next — Weighted Scoring Phase B + C
+## Roadmap — Priority Order
 
-**Phase B — Dynamic Kelly scaling from EV accuracy**
-
-- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; Kelly fraction scales with strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. A strategy at weight 0.6 gets 30% Kelly instead of 50%.
-- [ ] Add `strategy_weight_at_trade_time` to each trade record in `auto_trades.json` for audit trail
-- [ ] Guard: only applies when strategy has cleared `MIN_SAMPLES_PER_STRATEGY` gate — below threshold, use standard 0.5 Kelly
-
-**Phase C — Category-level accuracy from own trade history**
-
-- [ ] `scripts/compute_strategy_weights.py` — extend to also compute per-category direction accuracy from `bet_outcomes`; write to `data/category_accuracy.json`
-- [ ] `auto_trader.py` — if a category's accuracy < 50% (and ≥ `MIN_SAMPLES_PER_CATEGORY=8`), reduce its cap from 3 to 1 automatically
-- [ ] Complements the static calibration table: crowd bias corrects probability estimates; our own trade history corrects exposure per topic
+Two parallel tracks. Neither blocks the other.
 
 ---
 
-### 🟡 Medium Priority — News Fetcher
+### Track 1 — Trading Quality (improves the live bot)
 
-Add a real news signal to the fundamental family. The key design point: use a structured news API (not DDG/Google scraping) to get recent headlines per market topic.
+#### 🔴 P1 — Weighted Scoring Phase B + C (next code task)
 
-- [ ] `manifold_bot/news_fetcher.py` — takes a market question, extracts keywords, queries news API (e.g. NewsAPI.org free tier)
-- [ ] Returns: list of recent headlines with publication date and sentiment
-- [ ] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60-0.80 based on headline count and recency
-- [ ] Wire into `auto_research.py` — runs in parallel with stat strategies (not on every market — only top 20 candidates to stay within time budget)
+Phase A is live. Phase B+C closes the Kelly sizing loop using data already in `bet_outcomes`.
+
+**Phase B — Dynamic Kelly scaling from strategy weights**
+
+- [ ] `auto_trader.py` — read `data/strategy_weights.json` at startup; scale Kelly fraction by strategy weight: `kelly_fraction = 0.5 × min(weight, 1.0)`. Weight 0.6 → 30% Kelly, weight 1.2 → 60% Kelly.
+- [ ] Add `strategy_weight_at_trade_time` to each trade record for audit trail
+- [ ] Guard: only applies when strategy has cleared `MIN_SAMPLES_PER_STRATEGY` — below threshold, use standard 0.5 Kelly
+
+**Phase C — Category-level accuracy → adaptive caps**
+
+- [ ] `scripts/compute_strategy_weights.py` — extend to compute per-category direction accuracy from `bet_outcomes`; write `data/category_accuracy.json`
+- [ ] `auto_trader.py` — if category accuracy < 50% (and ≥ `MIN_SAMPLES_PER_CATEGORY=8`), reduce cap from 3 → 1 automatically
+- [ ] Complements the static calibration table: crowd bias corrects probability estimates; own trade history corrects exposure per topic
+
+#### 🔴 P2 — Register weekly-strategy-weights cron (5 min task)
+
+`compute_strategy_weights.py` exists and works but no cron runs it. Weights will never update until this is registered.
+- [ ] `openclaw cron add` — Sundays 03:00 UTC, after weekly harvest
+
+#### 🟡 P3 — News Fetcher
+
+Adds real current-event awareness to the fundamental family. Addresses the knowledge cutoff problem — markets about near-future events need fresh context, not a frozen training corpus.
+
+- [ ] `manifold_bot/news_fetcher.py` — extracts keywords from market question, queries NewsAPI.org (free tier, no cost)
+- [ ] Returns: recent headlines with publication date
+- [ ] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60–0.80 based on headline recency and relevance
+- [ ] Wire into `auto_research.py` — only on top 20 candidates per cycle to stay within time budget
+
+#### 🟡 P4 — Whale Tracking
+
+Strong signal when it fires. High-accuracy large bettors on Manifold have asymmetric information. Confidence scales with bettor track record and bet size.
+
+- [ ] `manifold_bot/whale_tracker.py` — fetches recent large bets via `/v0/bets`, filters by amount and bettor profit history
+- [ ] `whale_strategy` in `strategies.py` — `family: "fundamental"`, confidence scales with whale accuracy × bet size
+- [ ] Bettor-accuracy cache in SQLite (`data/calibration.db` — reuse existing DB)
+
+#### 🟢 P5 — Web Dashboard (convenience)
+
+- [ ] FastAPI server, port 5000: portfolio, trades, positions, opportunities endpoints
+- [ ] Single-page HTML with Chart.js — balance over time, daily P&L, open positions, top opportunities
+- [ ] SSH tunnel to view locally
+
+#### 🟢 P6 — SQLite storage (housekeeping)
+
+- [ ] Replace flat JSON state files with SQLite tables
+- [ ] `get_market_history(market_id)` — `/v0/market/{id}/bets` for historical bets
 
 ---
 
-### 🟡 Medium Priority — Whale Tracking
+### Track 2 — ML Pipeline (fine-tuning path)
 
-Track large individual bettors on Manifold as a signal. When a known high-accuracy bettor places a big bet, that's strong evidence about the true probability.
+Goal: train a local model that estimates true market probability better than the crowd or generic LLM prompts.
+Constraint: CPU-only server (i5-1340P, 62 GB RAM). Max viable model: ~7B params. Fine-tuning viable with LoRA.
 
-- [ ] `manifold_bot/whale_tracker.py` — fetches recent large bets via `/v0/bets` endpoint, filters by amount threshold (e.g. > M$500) and bettor profit history
-- [ ] `whale_strategy` in `strategies.py` — `family: "fundamental"`, confidence scales with whale's historical accuracy and bet size
-- [ ] Wire into `auto_research.py` as a supplemental fundamental signal
-- [ ] Requires: building a bettor-accuracy cache in SQLite (can reuse `data/calibration.db`)
+#### 🔴 M1 — Hourly snapshot logger (start this week)
+
+The single highest-leverage infrastructure investment. Without it, any training dataset will only have near-close snapshots — teaching the model late-stage market behavior instead of decision-time behavior.
+
+- [ ] Add snapshot writer to `auto_research.py` — after fetching markets, write `(market_id, question, probability, volume24h, bettors, liquidity, timestamp)` for every non-resolved market to `data/market_snapshots.db` (SQLite)
+- [ ] One row per market per hour — extremely cheap, ~100 rows/run
+- [ ] After 2–3 months: join against `resolved_markets` to get `(snapshot_at_T, actual_resolution)` pairs for training
+
+#### 🟡 M2 — Audit the 1121 resolved_markets rows
+
+Before building anything on top of that data, understand what's in it. One script, one hour.
+
+- [ ] Category distribution — is it balanced or 80% "other"?
+- [ ] Snapshot timing — are these near-close (final probability) or earlier? If near-close, training signal is weak
+- [ ] Bettor count distribution — how many markets are too thin to trust?
+- [ ] Output: a short report so decisions about M3–M6 are data-driven
+
+#### 🟡 M3 — Reconstruct earlier snapshots from bet history
+
+For each of the 1121 markets, fetch bet history via Manifold API and find the probability at T-7d, T-14d, T-30d before close. Transforms near-close snapshots into training data that matches live trading conditions.
+
+- [ ] `scripts/reconstruct_snapshots.py` — fetch `/v0/market/{id}/bets`, walk backwards to find probability at target time windows, write to `data/market_snapshots.db`
+- [ ] Gate on markets with ≥10 bettors (thin markets produce noisy labels)
+- [ ] Depends on M2 audit to know which time windows are meaningful
+
+#### 🟡 M4 — Dataset formatter
+
+- [ ] `scripts/build_training_dataset.py` — joins `market_snapshots.db` + `resolved_markets` into training examples
+- [ ] Input fields: question, category, crowd_prob_at_snapshot, days_to_close, unique_bettors, liquidity
+- [ ] Target: `estimated_true_probability` (float) + derived `direction` (YES/NO/SKIP based on edge vs threshold) + short rationale template
+- [ ] Train for probability estimation, not YES/NO classification — binary cross-entropy against resolution IS probability calibration training
+
+#### 🔴 M5 — Eval harness (required before trusting any fine-tuned model)
+
+Non-negotiable. Without this you cannot know if fine-tuning helped or just made the model sound more confident on the same wrong answers.
+
+- [ ] `scripts/eval_model.py` — held-out test set from `market_snapshots.db`
+- [ ] Four baselines measured for every candidate model:
+  1. Crowd probability (raw — the floor to beat)
+  2. Current heuristic/stat system
+  3. DeepSeek API prompt (current production)
+  4. Fine-tuned local model (candidate)
+- [ ] Metrics: Brier score, log loss, directional accuracy, SKIP quality (did it avoid weak-edge markets correctly?), calibration curve by probability bucket + category
+- [ ] Promotion rule: fine-tuned model replaces DeepSeek prompt only if it beats crowd + DeepSeek on Brier score on held-out set
+
+#### 🟢 M6 — LoRA fine-tune llama3.2:3b
+
+- [ ] `requirements-train.txt` — `transformers`, `peft`, `datasets`, `bitsandbytes`
+- [ ] `scripts/finetune.py` — LoRA fine-tune on dataset from M4; ~8–10 GB RAM (well within 62 GB available); training time ~2–4h on CPU
+- [ ] After training: convert to GGUF, push to Ollama, evaluate via M5 harness
+- [ ] Promote to production if it clears the M5 promotion rule
 
 ---
 
-### 🟡 Medium Priority — Web Dashboard
+### What's retired / deprioritized
 
-- [ ] `web_server.py` using FastAPI, endpoints:
-  - `GET /api/portfolio` — balance, P&L, metrics
-  - `GET /api/trades` — full trade history
-  - `GET /api/positions` — open positions
-  - `GET /api/opportunities` — current research recommendations
-- [ ] `static/index.html` — single page with:
-  - Balance over time (Chart.js line chart)
-  - Daily P&L (bar chart)
-  - Open positions table
-  - Top opportunities list
-  - Auto-refresh every 30s
-- [ ] Run on port `5000`, SSH tunnel to view locally
+| Item | Status | Reason |
+|---|---|---|
+| `deepseek-r1:14b` on Ollama | Retired | 0.7 tok/s on CPU; replaced by `llama3.2:3b` (9.3 tok/s) |
+| Agent auto-reviewer | Disabled | Truncated files and introduced bugs on 3/4 PRs — human review only |
+| Close open positions manually | Dropped | Auto-resolver handles this passively |
 
 ---
-
-### 🟢 Lower Priority — Data & Storage
-
-- [ ] Replace flat JSON state files with **SQLite** — one DB file, tables for trades, positions, markets
-- [ ] Add `get_market_history(market_id)` to `manifold_api.py` — fetch historical bets from `/v0/market/{id}/bets`
-- [ ] Background polling loop — refresh open market prices every 5 min, save snapshots
-
----
-
-### 🔄 Close Open Positions — IN PROGRESS
-
-Initiated closure of positions 5 (`6pAcuEd22A`, $65) and 6 (`yEcN9AzZ05`, $60) — pre-AI NO bets at 50%, no signal.
-- ⚠️ Positions 5+6 (`6pAcuEd22A`, `yEcN9AzZ05`) still open on server — close manually or via auto-close feature before treating slot as free.
-- Bot currently at 6/5 open positions and remains blocked from new trades until both positions are confirmed closed.
 
 ### ✅ Fix `per_market_timeout` Bug — DONE
 
@@ -460,8 +519,18 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Sandbox reproducibility | ✅ Fixed | `auto_research_fast.py` removed; experiment files cleaned; duplicate trading job removed |
 | Category exposure caps | ✅ Done | `MAX_POSITIONS_PER_CATEGORY=3`; enforced in `should_trade_market()`; category stored on trade record; breakdown in daily summary |
 | Weighted scoring Phase A + D | ✅ Done | `compute_strategy_weights.py` (JSON parse fixed, all 6 strategies); weights applied to signals in `auto_research.py`; performance note in AI prompt |
-| Weighted scoring Phase B + C | 🟡 Next | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps |
-| News fetcher | ❌ Not started | |
-| Whale tracking | ❌ Not started | |
-| Web dashboard | ❌ Not started | |
-| SQLite storage | ❌ Not started | |
+| Local model switch (llama3.2:3b) | ✅ Done | 9.3 tok/s vs 0.7 tok/s; keep_alive 2h; cold-start timeout 40s |
+| AI call tracking | ✅ Done | source, latency_ms, ollama_timed_out in llm_calls.jsonl |
+| Code quality (13 issues) | ✅ Done | crash fix, dead code removed, pandas removed, paths absolute, imports cleaned |
+| Weighted scoring Phase B + C | 🔴 P1 | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps |
+| Register weekly-strategy-weights cron | 🔴 P2 | 5-min task; weights never update until this is done |
+| News fetcher | 🟡 P3 | NewsAPI.org free tier; fundamental family signal |
+| Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
+| Web dashboard | 🟢 P5 | convenience only |
+| SQLite storage | 🟢 P6 | housekeeping |
+| Hourly snapshot logger | 🔴 M1 | highest-leverage ML infrastructure; start this week |
+| Audit 1121 resolved_markets | 🟡 M2 | category skew, snapshot timing check |
+| Reconstruct earlier snapshots | 🟡 M3 | bet history API; training data at decision-time not close-time |
+| Dataset formatter | 🟡 M4 | probability estimation format, not YES/NO classification |
+| Eval harness | 🔴 M5 | Brier score, 4 baselines; required before trusting fine-tuning |
+| LoRA fine-tune llama3.2:3b | 🟢 M6 | only after M5 clears; promote only if beats crowd + DeepSeek |
