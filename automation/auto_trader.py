@@ -250,13 +250,21 @@ class AutoTrader:
         print(f"  Probability: {recommendation['probability']*100:.1f}%")
         print(f"  Recommendation: {outcome} (confidence: {confidence*100:.0f}%)")
 
-        # Get current market probability
+        # Verify market exists, is open, and get current probability.
+        # If the market can't be fetched, abort — never bet on an unverifiable market.
         try:
             market = api_client.get_market(market_id)
+            if market.get('isResolved'):
+                print(f"  Market is already resolved — skipping")
+                return False
+            close_time_ms = market.get('closeTime', 9e12)
+            if close_time_ms < time.time() * 1000:
+                print(f"  Market is closed — skipping")
+                return False
             current_prob = market.get('probability', recommendation['probability'])
-        except:
-            current_prob = recommendation['probability']
-            print(f"  Warning: Could not fetch current probability, using research value")
+        except Exception as e:
+            print(f"  Could not verify market exists ({e}) — skipping to avoid phantom bet")
+            return False
 
         # Calculate position size (Kelly when AI estimate available, else confidence-scaled)
         amount = self.calculate_position_size(recommendation, outcome)
