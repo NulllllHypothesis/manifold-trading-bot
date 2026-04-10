@@ -12,7 +12,7 @@ A fully automated paper trading system for Manifold Markets running on a Linux s
 
 ### 2. Hourly Auto Trading (`automation/auto_trader.py`)
 - Executes paper trades based on research output
-- Risk management: max 10 positions, max 3 per category, 10% per trade, 65% min confidence, AI veto respected
+- Risk management: max 10 positions, max 3 per category (≤1 if accuracy < 50%; "other" uncapped), 10% per trade, 65% min confidence, AI veto respected, max bet $5 (throttled)
 - **Phase B** — Kelly fraction scales with strategy reliability weight (`kelly_fraction = 0.5 × weight`)
 - **Phase C** — Category exposure cap tightens to 1 when per-category direction accuracy < 50% (≥8 samples)
 - Selects trades by estimated EV (highest edge first); confidence is a hard gate (≥65%)
@@ -107,7 +107,7 @@ cat auto_trades.json | python3 -c "import sys,json; t=json.load(sys.stdin); trad
 | `max_position_size` | 10% | Max balance per single trade |
 | `MIN_CONFIDENCE` | 65% | Minimum strategy confidence to trade |
 | `MIN_BET_AMOUNT` | $1 | Minimum bet size |
-| `MAX_BET_AMOUNT` | $100 | Maximum bet size |
+| `MAX_BET_AMOUNT` | $5 (throttled — restore to $25 once strategy weights diverge from 1.0) | Maximum bet size |
 
 ### Strategy Weights (`data/strategy_weights.json`)
 

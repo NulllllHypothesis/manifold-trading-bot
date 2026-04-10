@@ -35,6 +35,7 @@ from scripts.position_swap_checker import (
     SWAP_EXPIRY_HOURS,
 )
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.config import MIN_LIQUIDITY, MAX_BET_AMOUNT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ def _make_recommendation(market_id='mkt_new', confidence=0.75, ev=20.0,
         'ai_recommendation': ai_rec,
         'ai_returned_skip': False,
         'strategies': ['volume_spike'],
+        'liquidity': MIN_LIQUIDITY,  # must meet the liquidity gate in find_best_opportunity
     }
 
 
@@ -863,7 +865,7 @@ class TestEvPipelineRegression(unittest.TestCase):
             trader.place_paper_bet(
                 market_id='ev_test_mkt',
                 outcome='YES',
-                amount=50.0,
+                amount=MAX_BET_AMOUNT,
                 probability=0.40,
                 estimated_ev=ev_at_trade_time,
                 ai_confidence=0.72,
@@ -906,7 +908,7 @@ class TestEvPipelineRegression(unittest.TestCase):
             trader.place_paper_bet(
                 market_id='no_ev_mkt',
                 outcome='NO',
-                amount=20.0,
+                amount=MAX_BET_AMOUNT,
                 probability=0.65,
                 estimated_ev=None,
             )

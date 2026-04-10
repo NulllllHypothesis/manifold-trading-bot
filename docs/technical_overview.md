@@ -770,11 +770,11 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 - ✅ **`automation/cron_jobs_config.json` gitignored** — OpenClaw background sync regenerates this file on every sync, stomping manually-added entries. Permanently fixed by removing from git tracking.
 - ✅ **Test suite: 210 tests** — 17 new tests across `TestLiquidityThresholdAlignment`, `TestAiTimeoutCooldown`, `TestSwapCheckerLiquidityGate`, new keyword coverage in `TestInferCategory`, and `TestAdaptiveCategoryCapPhaseC` extended with "other" uncap behavior.
 
-**Remaining architectural issue (planned next):**
+**Architectural improvements shipped (sessions 4–5):**
 
-- ✅ Strategy weights removed from AI prompt — weights now only in stat-scoring (auto_research.py) and sizing (auto_trader.py) layers.
-- ⏳ Crowd calibration still global — AI sees a broad table; planned fix is query-specific prior `(category, probability_bucket, crowd_bias, n_samples)`.
-- ⏳ Strategy weights still global — planned `by_category` weights: `weight(strategy, category)` → `weight(strategy)` → `1.0` fallback.
+- ✅ Strategy weights removed from AI prompt — weights only in stat-scoring (auto_research.py) and sizing (auto_trader.py) layers.
+- ✅ Crowd calibration now query-specific — `_build_query_calibration_note()` replaces the global 10-row table; AI sees the `(category, bucket)` prior for this exact market.
+- ✅ `by_category` strategy weights — `weight(strategy, category)` → `weight(strategy)` → `1.0` fallback; emitted by `compute_strategy_weights.py`, consumed in both `auto_research.py` stat-scoring and `auto_trader.py` Kelly sizing.
 
 **P3 — News fetcher** — structured news API integration as a `fundamental` family signal (`manifold_bot/news_fetcher.py`); keywords extracted from market question, queries NewsAPI.org free tier.
 
