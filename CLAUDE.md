@@ -48,30 +48,53 @@ This isolation is why the bot rediscovers the same information every hour during
 
 ### Cron System
 
-Cron is built into OpenClaw (NOT OS crontab). Jobs are defined in `/home/hackathon/.openclaw/cron/jobs.json`.
+**⚠️ MIGRATED — All scheduling now uses Linux OS crontab, NOT OpenClaw cron.**
 
-| Job | ID | Schedule | Model |
-|---|---|---|---|
-| Market Research | `359e61eb-5d56-452e-ab9d-506ddd9c4cb6` | `0 * * * *` (hourly :00) + 5min stagger | deepseek-chat |
-| Auto Trading | `57ce0ebc-d780-4c80-ba51-476a4a62f7ea` | `15 * * * *` (hourly :15) | deepseek-chat |
-| Daily Summary | `0a77ecb9-0652-4afa-873d-0dffeb28b708` | `0 19 * * *` (daily 19:00 UTC) | deepseek-chat |
+OpenClaw `agentTurn` cron jobs route through an LLM agent that has a Telegram session wired in. No configuration prevents the agent from narrating results to the group chat. Migrated to OS crontab on 2026-04-09 — scripts run directly with no LLM in the loop.
 
-Each job sends a prompt to the agent as an `agentTurn` payload. The agent runs the command, then the result is announced to the Telegram group.
+**OpenClaw cron jobs** (IDs below) still exist on the server but are **ALL DISABLED**. Do not re-enable them.
 
-**Managing cron jobs:**
-```bash
-openclaw cron list                          # List all jobs
-openclaw cron edit <id> --message "new prompt"  # Change the prompt
-openclaw cron edit <id> --disable           # Disable a job
-openclaw cron edit <id> --enable            # Re-enable
-openclaw cron run <id>                      # Run immediately (debug)
-openclaw cron runs                          # Show run history
+| Job | ID | Status |
+|---|---|---|
+| Market Research | `359e61eb-5d56-452e-ab9d-506ddd9c4cb6` | **DISABLED** |
+| Auto Trading | `57ce0ebc-d780-4c80-ba51-476a4a62f7ea` | **DISABLED** |
+| Daily Summary | `0a77ecb9-0652-4afa-873d-0dffeb28b708` | **DISABLED** |
+
+**Live OS crontab** (view/edit with `crontab -l` / `crontab -e` on the server):
+
+```
+# Hourly :00 — market research
+0 * * * *   cd $WORKSPACE && git pull origin main -q && python3 automation/auto_research.py >> /tmp/research.log 2>&1
+
+# Hourly :10 — position resolution
+10 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py >> /tmp/resolution.log 2>&1
+
+# Hourly :20 — auto trading
+20 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py >> /tmp/trader.log 2>&1
+
+# Daily 19:00 UTC — daily summary
+0 19 * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/daily_summary.py >> /tmp/daily_summary.log 2>&1
+
+# Sunday 02:00 — calibration harvest
+0 2 * * 0   cd $WORKSPACE && git pull origin main -q && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py >> /tmp/harvest.log 2>&1
+
+# Sunday 02:30 — M2 re-audit
+30 2 * * 0  cd $WORKSPACE && python3 scripts/audit_resolved_markets.py --quiet >> /tmp/harvest.log 2>&1
+
+# Sunday 03:00 — M3 snapshot reconstruction
+0 3 * * 0   cd $WORKSPACE && python3 scripts/reconstruct_snapshots.py >> /tmp/harvest.log 2>&1
+
+# Sunday 03:30 — backtest → strategy weights
+30 3 * * 0  cd $WORKSPACE && python3 scripts/backtest_from_snapshots.py >> /tmp/harvest.log 2>&1
+
+# Monday 07:00 — weekly EV report
+0 7 * * 1   cd $WORKSPACE && git pull origin main -q && python3 scripts/weekly_ev_report.py --telegram >> /tmp/ev_report.log 2>&1
+
+# Monday 07:30 — live strategy weights
+30 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/compute_strategy_weights.py && git add data/strategy_weights.json && git diff --cached --quiet || git commit -m "chore: update strategy weights [skip ci]" >> /tmp/weights.log 2>&1
 ```
 
-**Current cron prompts** (these are what the bot receives each run):
-- Research: `"Run hourly market research for Manifold trading bot. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_research.py"`
-- Trading: `"Execute automated trading based on latest research. Run: cd /home/hackathon/.openclaw/workspace && python3 automation/auto_trader.py"`
-- Summary: `"Generate and send daily trading summary to Telegram group. Execute: cd /home/hackathon/.openclaw/workspace && python3 automation/daily_summary.py"`
+**Setup on a fresh server:** Run `automation/setup_cron_jobs.py` — it prints the full crontab block ready to paste into `crontab -e`.
 
 ### Memory System
 

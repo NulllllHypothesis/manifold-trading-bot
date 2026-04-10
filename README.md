@@ -125,11 +125,20 @@ The system runs autonomously on a Linux server. All scheduling uses the OS-level
 # Weekly calibration harvest — Sunday 02:00 UTC
 0 2 * * 0  cd $WORKSPACE && git pull origin main -q && python3 scripts/harvest_resolved.py --limit 2000 && python3 scripts/analyze_calibration.py
 
+# Weekly M2 re-audit — Sunday 02:30 UTC
+30 2 * * 0  cd $WORKSPACE && python3 scripts/audit_resolved_markets.py --quiet
+
+# Weekly M3 reconstruction — Sunday 03:00 UTC
+0 3 * * 0  cd $WORKSPACE && python3 scripts/reconstruct_snapshots.py
+
+# Weekly backtest → strategy weights — Sunday 03:30 UTC
+30 3 * * 0  cd $WORKSPACE && python3 scripts/backtest_from_snapshots.py
+
 # Weekly EV report — Monday 07:00 UTC
 0 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/weekly_ev_report.py --telegram
 
 # Weekly strategy weights — Monday 07:30 UTC
-30 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/compute_strategy_weights.py && git add data/strategy_weights.json && git diff --cached --quiet || git commit -m "chore: update strategy weights"
+30 7 * * 1  cd $WORKSPACE && git pull origin main -q && python3 scripts/compute_strategy_weights.py && git add data/strategy_weights.json && git diff --cached --quiet || git commit -m "chore: update strategy weights [skip ci]"
 ```
 
 To view or edit: `crontab -e` on the server. Logs: `/tmp/research.log`, `/tmp/trader.log`, `/tmp/resolution.log`, etc.
@@ -145,7 +154,7 @@ See [docs/AUTOMATION_README.md](docs/AUTOMATION_README.md) for the full setup gu
 | `max_position_size` | 10% | Max balance per single trade |
 | `MIN_CONFIDENCE` | 65% | Minimum strategy confidence to trade |
 | `MIN_BET_AMOUNT` | $1 | Minimum bet size |
-| `MAX_BET_AMOUNT` | $100 | Maximum bet size |
+| `MAX_BET_AMOUNT` | $5 (throttled — restore to $25 once strategy weights diverge from 1.0) | Maximum bet size |
 
 ## Trading Strategies
 
