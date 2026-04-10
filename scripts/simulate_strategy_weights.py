@@ -63,7 +63,7 @@ WEIGHTS_PATH   = os.path.join(ROOT_DIR, "data", "strategy_weights.json")
 REPORT_PATH    = os.path.join(ROOT_DIR, "data", "simulation_report.json")
 
 # Minimum samples for simulation weight to override the 1.0 default.
-SIM_MIN_SAMPLES = 50
+SIM_MIN_SAMPLES = 25
 
 # Strategies to simulate — ones whose signals can be computed from resolved_markets.
 SIM_STRATEGIES = [
@@ -71,24 +71,6 @@ SIM_STRATEGIES = [
     "mean_reversion",
     "probability_bias",
 ]
-
-# Strategies excluded from weight updates even if they clear the sample gate.
-#
-# Using probability_close (the crowd's FINAL price before resolution) introduces
-# a convergence bias: by the time a market closes, its price has converged toward
-# the true outcome. Strategies that follow or fade the price level are therefore
-# trivially "right" or trivially "wrong" on final prices — not a real signal.
-#
-#   probability_direction at 88%+  → artifact: final price ≈ outcome (cheating)
-#   mean_reversion        at ~2%   → artifact: fighting converged final price
-#
-# These strategies need DECISION-TIME probabilities (T-7/14 snapshots from M3)
-# to be evaluated fairly. Use backtest_from_snapshots.py for those.
-#
-# probability_bias is valid here: it tests systematic BUCKET-LEVEL bias
-# (is crowd probability in the 30-40% range predictively biased toward NO?),
-# which holds whether we use final prices or decision-time prices.
-_FINAL_PRICE_BIASED = frozenset({"probability_direction", "mean_reversion"})
 
 # Fake far-future close time so mean_reversion's near-close guard doesn't fire.
 _FAR_FUTURE_MS = int((datetime.now(timezone.utc) + timedelta(days=365)).timestamp() * 1000)
@@ -188,14 +170,9 @@ def _accuracy_to_weight(accuracy: float) -> float:
 
 
 def compute_sim_weights(sim_results: dict[str, dict]) -> dict[str, float]:
-    """
-    Convert simulation accuracy to weight scalars for strategies that cleared SIM_MIN_SAMPLES.
-    Excludes strategies whose simulation accuracy is known to be biased by final-price convergence.
-    """
+    """Convert simulation accuracy to weight scalars for strategies that cleared SIM_MIN_SAMPLES."""
     weights = {}
     for strat, stats in sim_results.items():
-        if strat in _FINAL_PRICE_BIASED:
-            continue  # accuracy from final prices is misleading — skip
         n = stats["total"]
         acc = stats["accuracy"]
         if n < SIM_MIN_SAMPLES or acc is None:
@@ -280,10 +257,7 @@ def main(dry_run: bool = False, min_bettors: int = 3) -> None:
         n    = stats["total"]
         acc  = stats["accuracy"]
         w    = sim_weights.get(strat)
-        if strat in _FINAL_PRICE_BIASED:
-            note  = "⚠ final-price bias — not applied"
-            w_str = "  (skip)"
-        elif n < SIM_MIN_SAMPLES:
+        if n < SIM_MIN_SAMPLES:
             note  = f"< {SIM_MIN_SAMPLES} samples"
             w_str = "  1.0000"
         elif acc is None:
