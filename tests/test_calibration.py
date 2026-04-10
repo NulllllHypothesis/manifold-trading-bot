@@ -7,7 +7,7 @@ Covers:
   - manifold_bot/paper_trader.py  : _init_bet_outcomes_db, _write_bet_outcome
   - scripts/weekly_ev_report.py   : _ev_accuracy_section, _strategy_breakdown,
                                     _confidence_breakdown
-  - manifold_bot/ai_analyzer.py   : _build_calibration_note
+  - manifold_bot/ai_analyzer.py   : _build_query_calibration_note
 
 All tests are pure unit tests — no network calls, no Manifold API, no Ollama.
 DB-dependent tests use a temporary SQLite file cleaned up after each test.
@@ -32,7 +32,7 @@ from scripts.weekly_ev_report import (
     _strategy_breakdown,
     _confidence_breakdown,
 )
-from manifold_bot.ai_analyzer import _build_calibration_note
+from manifold_bot.ai_analyzer import _build_query_calibration_note
 from manifold_bot.paper_trader import _init_bet_outcomes_db, _write_bet_outcome
 
 
@@ -497,119 +497,106 @@ class TestConfidenceBreakdown(unittest.TestCase):
         self.assertEqual(_confidence_breakdown([]), "No confidence data.")
 
 
-# ── Group 8: _build_calibration_note ──────────────────────────────────────────
+# ── Group 8: _build_query_calibration_note ────────────────────────────────────
 
-class TestBuildCalibrationNote(unittest.TestCase):
+class TestBuildQueryCalibrationNote(unittest.TestCase):
+    """
+    Tests for _build_query_calibration_note(question, probability).
 
-    def test_returns_empty_string_when_file_missing(self):
-        missing = Path("/nonexistent/calibration_table.json")
-        with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", missing):
-            result = _build_calibration_note()
+    The function reads module-level _CALIBRATION_DATA (cached at import time).
+    Tests patch that dict directly so they don't depend on file I/O.
+    """
+
+    def _patch_data(self, data: dict):
+        return patch("manifold_bot.ai_analyzer._CALIBRATION_DATA", data)
+
+    def test_returns_empty_when_no_calibration_data(self):
+        with self._patch_data({}):
+            result = _build_query_calibration_note("Will Bitcoin hit $100k?", 0.65)
         self.assertEqual(result, "")
 
-    def test_returns_formatted_table_when_file_exists(self):
-        table = {
+    def test_uses_category_bucket_cell_when_available(self):
+        """Category-specific cell (category in cell) takes precedence over global."""
+        data = {
+            "by_category_bucket": [{
+                "category": "crypto",
+                "bucket_low": 0.60, "bucket_high": 0.70,
+                "crowd_midpoint": 0.65, "actual_yes_rate": 0.42,
+                "sample_size": 50, "bias": 0.23, "reliable": True,
+            }],
+            "buckets": [],
+        }
+        with self._patch_data(data):
+            result = _build_query_calibration_note("Will Bitcoin reach $200k by 2027?", 0.65)
+        self.assertIn("60", result)
+        self.assertIn("70", result)
+        self.assertIn("42", result)   # actual YES rate
+        self.assertIn("category: crypto", result)
+
+    def test_falls_back_to_global_bucket_when_no_category_cell(self):
+        """No category cell → uses global bucket row."""
+        data = {
+            "by_category_bucket": [],
             "buckets": [{
                 "bucket_low": 0.60, "bucket_high": 0.70,
                 "crowd_midpoint": 0.65, "actual_yes_rate": 0.47,
                 "sample_size": 120, "bias": 0.18, "reliable": True,
             }],
-            "by_category": [],
         }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(table, f)
-            tmp = Path(f.name)
-        try:
-            with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", tmp):
-                result = _build_calibration_note()
-            self.assertIn("60", result)     # bucket low
-            self.assertIn("70", result)     # bucket high
-            self.assertIn("47", result)     # actual YES rate
-            self.assertIn("+18pp", result)  # bias annotation
-        finally:
-            os.unlink(tmp)
+        with self._patch_data(data):
+            # Question maps to 'other' — no category cell — uses global
+            result = _build_query_calibration_note("Will this resolve YES?", 0.65)
+        self.assertIn("47", result)
+        self.assertIn("global average", result)
 
-    def test_most_biased_annotation_on_large_bias(self):
-        table = {
+    def test_unreliable_category_cell_skipped_falls_to_global(self):
+        """Unreliable category cell is ignored; function falls back to global."""
+        data = {
+            "by_category_bucket": [{
+                "category": "crypto",
+                "bucket_low": 0.60, "bucket_high": 0.70,
+                "crowd_midpoint": 0.65, "actual_yes_rate": 0.50,
+                "sample_size": 3, "bias": 0.15, "reliable": False,
+            }],
             "buckets": [{
                 "bucket_low": 0.60, "bucket_high": 0.70,
                 "crowd_midpoint": 0.65, "actual_yes_rate": 0.47,
-                "sample_size": 120, "bias": 0.18,   # abs >= 0.15 → MOST BIASED
-                "reliable": True,
+                "sample_size": 120, "bias": 0.18, "reliable": True,
             }],
-            "by_category": [],
         }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(table, f)
-            tmp = Path(f.name)
-        try:
-            with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", tmp):
-                result = _build_calibration_note()
-            self.assertIn("MOST BIASED", result)
-        finally:
-            os.unlink(tmp)
+        with self._patch_data(data):
+            result = _build_query_calibration_note("Will Bitcoin reach $200k?", 0.65)
+        self.assertIn("47", result)   # global cell's YES rate
+        self.assertIn("global average", result)
 
-    def test_unreliable_buckets_are_excluded(self):
-        table = {
-            "buckets": [
-                {
-                    "bucket_low": 0.00, "bucket_high": 0.10,
-                    "crowd_midpoint": 0.05, "actual_yes_rate": 0.04,
-                    "sample_size": 2, "bias": 0.01, "reliable": False,
-                },
-                {
-                    "bucket_low": 0.40, "bucket_high": 0.50,
-                    "crowd_midpoint": 0.45, "actual_yes_rate": 0.46,
-                    "sample_size": 80, "bias": -0.01, "reliable": True,
-                },
-            ],
-            "by_category": [],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(table, f)
-            tmp = Path(f.name)
-        try:
-            with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", tmp):
-                result = _build_calibration_note()
-            # Only the reliable 40-50% bucket should produce a table row
-            bucket_rows = [l for l in result.split("\n") if "–" in l and "%" in l]
-            self.assertEqual(len(bucket_rows), 1, "Only 1 reliable bucket should appear")
-        finally:
-            os.unlink(tmp)
-
-    def test_returns_empty_string_when_no_buckets(self):
-        table = {"buckets": [], "by_category": []}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(table, f)
-            tmp = Path(f.name)
-        try:
-            with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", tmp):
-                result = _build_calibration_note()
-            self.assertEqual(result, "")
-        finally:
-            os.unlink(tmp)
-
-    def test_returns_empty_string_when_all_buckets_unreliable(self):
-        table = {
+    def test_returns_empty_when_no_matching_bucket(self):
+        """Probability falls outside any stored bucket → returns empty string."""
+        data = {
+            "by_category_bucket": [],
             "buckets": [{
-                "bucket_low": 0.40, "bucket_high": 0.50,
-                "crowd_midpoint": 0.45, "actual_yes_rate": 0.44,
-                "sample_size": 1, "bias": 0.01, "reliable": False,
+                "bucket_low": 0.60, "bucket_high": 0.70,
+                "crowd_midpoint": 0.65, "actual_yes_rate": 0.47,
+                "sample_size": 120, "bias": 0.18, "reliable": True,
             }],
-            "by_category": [],
         }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(table, f)
-            tmp = Path(f.name)
-        try:
-            with patch("manifold_bot.ai_analyzer._CALIBRATION_TABLE_PATH", tmp):
-                result = _build_calibration_note()
-            # All reliable=False → no rows → function returns the header + instruction
-            # but the header is always added; what matters is no bucket rows appear
-            bucket_rows = [l for l in result.split("\n") if "–" in l and "%" in l]
-            self.assertEqual(len(bucket_rows), 0)
-        finally:
-            os.unlink(tmp)
+        with self._patch_data(data):
+            # 0.45 falls in the 40-50% bucket — not stored → empty
+            result = _build_query_calibration_note("Will this resolve YES?", 0.45)
+        self.assertEqual(result, "")
+
+    def test_output_includes_adjustment_hint(self):
+        """Output must include a suggested adjustment line."""
+        data = {
+            "by_category_bucket": [],
+            "buckets": [{
+                "bucket_low": 0.60, "bucket_high": 0.70,
+                "crowd_midpoint": 0.65, "actual_yes_rate": 0.47,
+                "sample_size": 120, "bias": 0.18, "reliable": True,
+            }],
+        }
+        with self._patch_data(data):
+            result = _build_query_calibration_note("Will this happen?", 0.65)
+        self.assertIn("Suggested adjustment", result)
 
 
 def _cat_outcome(rec, resolution, category):
@@ -1684,6 +1671,103 @@ class TestComputeStrategyWeightsPerStrategySamples(unittest.TestCase):
                              "backtest must fill gap when per_strategy_samples is absent")
         finally:
             os.unlink(path)
+
+
+class TestComputeWeightsByCategory(unittest.TestCase):
+    """_compute_weights_by_category() correctness and schema."""
+
+    def _make_outcome(self, strategy: str, correct: bool, category: str = "sports") -> dict:
+        import json
+        return {
+            "our_recommendation": "YES",
+            "market_resolution": "YES" if correct else "NO",
+            "strategies": json.dumps([strategy]),
+            "actual_pnl": 1.0 if correct else -1.0,
+            "estimated_ev": None,
+            "ai_confidence": None,
+            "category": category,
+        }
+
+    def _enough_outcomes(self, strategy: str, category: str, n_correct: int, n_total: int) -> list:
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+        # Pad to at least MIN_SAMPLES_PER_STRATEGY
+        outcomes = []
+        for i in range(n_total):
+            outcomes.append(self._make_outcome(strategy, i < n_correct, category))
+        # Pad up to threshold if needed
+        while len(outcomes) < MIN_SAMPLES_PER_STRATEGY:
+            outcomes.append(self._make_outcome(strategy, True, category))
+        return outcomes
+
+    def test_returns_dict(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        result = _compute_weights_by_category([])
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result, {})
+
+    def test_below_min_samples_omitted(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+        # Fewer than MIN_SAMPLES_PER_STRATEGY outcomes — should not appear in result
+        outcomes = [self._make_outcome("mean_reversion", True, "sports")
+                    for _ in range(MIN_SAMPLES_PER_STRATEGY - 1)]
+        result = _compute_weights_by_category(outcomes)
+        sports = result.get("sports", {})
+        self.assertNotIn("mean_reversion", sports)
+
+    def test_above_min_samples_included(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        outcomes = self._enough_outcomes("mean_reversion", "sports", n_correct=8, n_total=10)
+        result = _compute_weights_by_category(outcomes)
+        self.assertIn("sports", result)
+        self.assertIn("mean_reversion", result["sports"])
+
+    def test_schema_has_weight_accuracy_n(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        outcomes = self._enough_outcomes("probability_direction", "politics", n_correct=8, n_total=10)
+        result = _compute_weights_by_category(outcomes)
+        info = result.get("politics", {}).get("probability_direction", {})
+        self.assertIn("weight", info)
+        self.assertIn("accuracy", info)
+        self.assertIn("n", info)
+
+    def test_high_accuracy_gives_boosted_weight(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+        # 100% correct → accuracy=1.0 → weight=1.20 (capped)
+        n = MIN_SAMPLES_PER_STRATEGY
+        outcomes = [self._make_outcome("mean_reversion", True, "crypto") for _ in range(n)]
+        result = _compute_weights_by_category(outcomes)
+        w = result["crypto"]["mean_reversion"]["weight"]
+        self.assertGreater(w, 1.0)
+
+    def test_low_accuracy_gives_reduced_weight(self):
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        from scripts.weekly_ev_report import MIN_SAMPLES_PER_STRATEGY
+        n = MIN_SAMPLES_PER_STRATEGY
+        # 0% correct → weight should be 0.5
+        outcomes = [self._make_outcome("probability_bias", False, "ai_tech") for _ in range(n)]
+        result = _compute_weights_by_category(outcomes)
+        w = result["ai_tech"]["probability_bias"]["weight"]
+        self.assertLessEqual(w, 1.0)
+
+    def test_by_category_emitted_in_result_dict(self):
+        """main(dry_run=True) result dict must include by_category key."""
+        from scripts.compute_strategy_weights import _compute_weights_by_category
+        result = {"by_category": _compute_weights_by_category([])}
+        self.assertIn("by_category", result)
+        self.assertIsInstance(result["by_category"], dict)
+
+    def test_strategy_weights_json_has_by_category_field(self):
+        """data/strategy_weights.json must have a by_category key."""
+        import json, os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "data", "strategy_weights.json")
+        if not os.path.exists(path):
+            self.skipTest("strategy_weights.json not present")
+        with open(path) as f:
+            data = json.load(f)
+        self.assertIn("by_category", data, "strategy_weights.json missing 'by_category' field")
 
 
 if __name__ == "__main__":

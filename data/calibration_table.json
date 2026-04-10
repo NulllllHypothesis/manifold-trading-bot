@@ -1,7 +1,9 @@
 {
-  "generated_at": "2026-04-07T07:55:46.384711Z",
+  "generated_at": "2026-04-10T14:01:02.496684Z",
+  "generated_at_unix": 1775818862,
   "source_db": "/Users/amirghari/Desktop/Hackathon/workspace/data/calibration.db",
-  "description": "Crowd calibration table. For each 10pp probability bucket, 'actual_yes_rate' is the historical rate at which Manifold markets in that bucket resolved YES. 'bias' > 0 means crowd overestimates. Inject this into AI prompts to correct for systematic over/under-confidence.",
+  "min_cell_samples": 15,
+  "description": "Crowd calibration table. 'buckets' = global 10pp bucket stats. 'by_category' = per-category summary. 'by_category_bucket' = per-(category, bucket) stats for query-specific AI priors. bias > 0 means crowd overestimates YES probability.",
   "buckets": [
     {
       "bucket_low": 0.0,
@@ -97,58 +99,690 @@
   "by_category": [
     {
       "category": "other",
-      "sample_size": 594,
-      "avg_crowd_prob": 0.4748,
-      "actual_yes_rate": 0.431,
-      "bias": 0.0439,
+      "sample_size": 606,
+      "avg_crowd_prob": 0.4726,
+      "actual_yes_rate": 0.429,
+      "bias": 0.0436,
       "reliable": true
     },
     {
       "category": "sports",
-      "sample_size": 227,
-      "avg_crowd_prob": 0.4621,
-      "actual_yes_rate": 0.4273,
-      "bias": 0.0348,
-      "reliable": true
-    },
-    {
-      "category": "economics",
-      "sample_size": 104,
-      "avg_crowd_prob": 0.5151,
-      "actual_yes_rate": 0.5,
-      "bias": 0.0151,
+      "sample_size": 202,
+      "avg_crowd_prob": 0.4546,
+      "actual_yes_rate": 0.4158,
+      "bias": 0.0388,
       "reliable": true
     },
     {
       "category": "politics",
-      "sample_size": 62,
-      "avg_crowd_prob": 0.4172,
-      "actual_yes_rate": 0.3548,
-      "bias": 0.0623,
+      "sample_size": 133,
+      "avg_crowd_prob": 0.48,
+      "actual_yes_rate": 0.4436,
+      "bias": 0.0364,
+      "reliable": true
+    },
+    {
+      "category": "crypto",
+      "sample_size": 61,
+      "avg_crowd_prob": 0.3565,
+      "actual_yes_rate": 0.2951,
+      "bias": 0.0614,
       "reliable": true
     },
     {
       "category": "ai_tech",
       "sample_size": 61,
-      "avg_crowd_prob": 0.4445,
+      "avg_crowd_prob": 0.4455,
       "actual_yes_rate": 0.4426,
-      "bias": 0.0019,
+      "bias": 0.0029,
       "reliable": true
     },
     {
-      "category": "crypto",
-      "sample_size": 58,
-      "avg_crowd_prob": 0.3465,
-      "actual_yes_rate": 0.2931,
-      "bias": 0.0534,
+      "category": "economics",
+      "sample_size": 46,
+      "avg_crowd_prob": 0.5164,
+      "actual_yes_rate": 0.5217,
+      "bias": -0.0054,
       "reliable": true
     },
     {
       "category": "science",
-      "sample_size": 15,
-      "avg_crowd_prob": 0.4543,
+      "sample_size": 12,
+      "avg_crowd_prob": 0.4708,
+      "actual_yes_rate": 0.4167,
+      "bias": 0.0542,
+      "reliable": true
+    }
+  ],
+  "by_category_bucket": [
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0,
+      "sample_size": 25,
+      "bias": 0.05,
+      "reliable": true
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.1,
+      "bucket_high": 0.2,
+      "crowd_midpoint": 0.15,
+      "actual_yes_rate": 0.0,
+      "sample_size": 4,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.35,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.5,
+      "sample_size": 4,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.5,
+      "sample_size": 2,
+      "bias": 0.05,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
+      "actual_yes_rate": 1.0,
+      "sample_size": 1,
+      "bias": -0.35,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 1.0,
+      "sample_size": 2,
+      "bias": -0.25,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 1.0,
+      "sample_size": 3,
+      "bias": -0.15,
+      "reliable": false
+    },
+    {
+      "category": "ai_tech",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 1.0,
+      "sample_size": 18,
+      "bias": -0.05,
+      "reliable": true
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0385,
+      "sample_size": 26,
+      "bias": 0.0115,
+      "reliable": true
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.1,
+      "bucket_high": 0.2,
+      "crowd_midpoint": 0.15,
+      "actual_yes_rate": 0.0,
+      "sample_size": 3,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 4,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.6667,
+      "sample_size": 3,
+      "bias": -0.3167,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.1667,
+      "sample_size": 6,
+      "bias": 0.2833,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.3333,
+      "sample_size": 3,
+      "bias": 0.2167,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
+      "actual_yes_rate": 0.5,
+      "sample_size": 2,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 0.3333,
+      "sample_size": 3,
+      "bias": 0.4167,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 1.0,
+      "sample_size": 2,
+      "bias": -0.15,
+      "reliable": false
+    },
+    {
+      "category": "crypto",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 1.0,
+      "sample_size": 9,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0,
+      "sample_size": 8,
+      "bias": 0.05,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.35,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.5,
+      "sample_size": 8,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.5714,
+      "sample_size": 14,
+      "bias": -0.0214,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
+      "actual_yes_rate": 0.3333,
+      "sample_size": 3,
+      "bias": 0.3167,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 1.0,
+      "sample_size": 2,
+      "bias": -0.25,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 1.0,
+      "sample_size": 1,
+      "bias": -0.15,
+      "reliable": false
+    },
+    {
+      "category": "economics",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 1.0,
+      "sample_size": 8,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0139,
+      "sample_size": 144,
+      "bias": 0.0361,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.1,
+      "bucket_high": 0.2,
+      "crowd_midpoint": 0.15,
+      "actual_yes_rate": 0.1176,
+      "sample_size": 51,
+      "bias": 0.0324,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.3,
+      "sample_size": 40,
+      "bias": -0.05,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.2449,
+      "sample_size": 49,
+      "bias": 0.1051,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.2857,
+      "sample_size": 42,
+      "bias": 0.1643,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.4286,
+      "sample_size": 49,
+      "bias": 0.1214,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
+      "actual_yes_rate": 0.4286,
+      "sample_size": 35,
+      "bias": 0.2214,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 0.6333,
+      "sample_size": 30,
+      "bias": 0.1167,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 0.9,
+      "sample_size": 40,
+      "bias": -0.05,
+      "reliable": true
+    },
+    {
+      "category": "other",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 0.9921,
+      "sample_size": 126,
+      "bias": -0.0421,
+      "reliable": true
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0,
+      "sample_size": 52,
+      "bias": 0.05,
+      "reliable": true
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.1,
+      "bucket_high": 0.2,
+      "crowd_midpoint": 0.15,
+      "actual_yes_rate": 0.0,
+      "sample_size": 10,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.0,
+      "sample_size": 3,
+      "bias": 0.35,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.5,
+      "sample_size": 2,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.0,
+      "sample_size": 2,
+      "bias": 0.55,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
       "actual_yes_rate": 0.4,
-      "bias": 0.0543,
+      "sample_size": 5,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 0.8333,
+      "sample_size": 6,
+      "bias": -0.0833,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 0.8,
+      "sample_size": 5,
+      "bias": 0.05,
+      "reliable": false
+    },
+    {
+      "category": "politics",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 1.0,
+      "sample_size": 47,
+      "bias": -0.05,
+      "reliable": true
+    },
+    {
+      "category": "science",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0,
+      "sample_size": 5,
+      "bias": 0.05,
+      "reliable": false
+    },
+    {
+      "category": "science",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "science",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.0,
+      "sample_size": 1,
+      "bias": 0.35,
+      "reliable": false
+    },
+    {
+      "category": "science",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 1.0,
+      "sample_size": 5,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.0,
+      "bucket_high": 0.1,
+      "crowd_midpoint": 0.05,
+      "actual_yes_rate": 0.0213,
+      "sample_size": 47,
+      "bias": 0.0287,
+      "reliable": true
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.1,
+      "bucket_high": 0.2,
+      "crowd_midpoint": 0.15,
+      "actual_yes_rate": 0.0,
+      "sample_size": 3,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.2,
+      "bucket_high": 0.3,
+      "crowd_midpoint": 0.25,
+      "actual_yes_rate": 0.0,
+      "sample_size": 7,
+      "bias": 0.25,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.3,
+      "bucket_high": 0.4,
+      "crowd_midpoint": 0.35,
+      "actual_yes_rate": 0.2,
+      "sample_size": 5,
+      "bias": 0.15,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.4,
+      "bucket_high": 0.5,
+      "crowd_midpoint": 0.45,
+      "actual_yes_rate": 0.3529,
+      "sample_size": 34,
+      "bias": 0.0971,
+      "reliable": true
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.5,
+      "bucket_high": 0.6,
+      "crowd_midpoint": 0.55,
+      "actual_yes_rate": 0.5246,
+      "sample_size": 61,
+      "bias": 0.0254,
+      "reliable": true
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.6,
+      "bucket_high": 0.7,
+      "crowd_midpoint": 0.65,
+      "actual_yes_rate": 0.7143,
+      "sample_size": 7,
+      "bias": -0.0643,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.7,
+      "bucket_high": 0.8,
+      "crowd_midpoint": 0.75,
+      "actual_yes_rate": 0.8,
+      "sample_size": 5,
+      "bias": -0.05,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.8,
+      "bucket_high": 0.9,
+      "crowd_midpoint": 0.85,
+      "actual_yes_rate": 0.6667,
+      "sample_size": 9,
+      "bias": 0.1833,
+      "reliable": false
+    },
+    {
+      "category": "sports",
+      "bucket_low": 0.9,
+      "bucket_high": 1.0,
+      "crowd_midpoint": 0.95,
+      "actual_yes_rate": 0.9583,
+      "sample_size": 24,
+      "bias": -0.0083,
       "reliable": true
     }
   ]

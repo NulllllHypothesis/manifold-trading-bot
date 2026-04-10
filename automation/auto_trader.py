@@ -26,15 +26,15 @@ from automation.send_telegram import send_message as _tg
 _MIN_SAMPLES_PER_CATEGORY = 8
 
 
-def _load_weights_file(root: str) -> tuple[dict, int, int]:
-    """Load strategy_weights.json. Returns (weights, sample_count, min_threshold)."""
+def _load_weights_file(root: str) -> tuple[dict, dict, int, int]:
+    """Load strategy_weights.json. Returns (weights, by_category, sample_count, min_threshold)."""
     path = os.path.join(root, "data", "strategy_weights.json")
     try:
         with open(path) as f:
             d = json.load(f)
-        return d.get("weights", {}), d.get("sample_count", 0), d.get("min_samples_threshold", 10)
+        return d.get("weights", {}), d.get("by_category", {}), d.get("sample_count", 0), d.get("min_samples_threshold", 10)
     except Exception:
-        return {}, 0, 10
+        return {}, {}, 0, 10
 
 
 def _load_category_accuracy_file(root: str) -> dict:
@@ -62,7 +62,7 @@ class AutoTrader:
         self.min_confidence = MIN_CONFIDENCE
 
         # Phase B: strategy reliability weights — scale Kelly fraction per strategy
-        self._strategy_weights, self._weights_sample_count, _ = _load_weights_file(_root)
+        self._strategy_weights, self._by_category_weights, self._weights_sample_count, _ = _load_weights_file(_root)
 
         # Phase C: category accuracy — drive adaptive exposure caps
         self._category_accuracy = _load_category_accuracy_file(_root)
@@ -102,22 +102,31 @@ class AutoTrader:
             print(f"Error loading research: {e}")
             return None
 
-    def _get_strategy_weight(self, strategies: list) -> float:
+    def _get_strategy_weight(self, strategies: list, category: str = "other") -> float:
         """
         Return the effective strategy weight for a recommendation.
+
+        Fallback chain per strategy:
+          1. by_category[category][strategy]  — most specific, needs enough category trades
+          2. global weights[strategy]         — cross-category baseline
+          3. 1.0 default
 
         Uses the maximum weight across all strategies that fired — the strongest
         reliable signal drives sizing; we don't average down good signals with
         neutral ones.
-
-        Falls back to 1.0 (standard half-Kelly) when no weight data exists or
-        all strategies are below the min-sample threshold (their stored weight
-        is already 1.0 in that case, so the fallback is implicit).
         """
-        weights = getattr(self, '_strategy_weights', {})
-        if not strategies or not weights:
+        global_weights = getattr(self, '_strategy_weights', {})
+        by_cat = getattr(self, '_by_category_weights', {})
+        cat_weights = by_cat.get(category, {})
+
+        if not strategies:
             return 1.0
-        return max((weights.get(s, 1.0) for s in strategies), default=1.0)
+
+        return max(
+            (cat_weights[s].get("weight", 1.0) if s in cat_weights else global_weights.get(s, 1.0)
+             for s in strategies),
+            default=1.0,
+        )
 
     def _effective_category_cap(self, category: str) -> int:
         """
@@ -274,8 +283,12 @@ class AutoTrader:
             # weight range 0.5–1.2 → Kelly multiplier 25%–60%.
             # Weights below min-sample threshold are stored as 1.0, so the default
             # half-Kelly (50%) applies automatically until data accumulates.
+            # Phase C: use category-specific weight when available (by_category fallback chain).
             strategies = recommendation.get('strategies', [])
-            weight = self._get_strategy_weight(strategies)
+            category = recommendation.get('category') or _infer_market_category(
+                recommendation.get('question', '')
+            )
+            weight = self._get_strategy_weight(strategies, category)
             kelly_fraction *= 0.5 * weight
             position_size = self.trader.balance * kelly_fraction
             sizing_method = f"kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}, k={kelly_fraction:.3f}, w={weight:.2f})"

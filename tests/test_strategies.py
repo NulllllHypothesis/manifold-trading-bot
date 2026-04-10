@@ -53,7 +53,8 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
     Uses 'politics' question text (category bias=6.2pp, above 4pp threshold).
     """
 
-    def _m(self, prob, question='Will Trump win the election?'):
+    def _m(self, prob, question='Will this prediction market resolve YES by end of 2026?'):
+        """Default question maps to 'other' category (no matching keywords → always fires)."""
         return _market(prob, question=question)
 
     # ── 60-70% band → NO ─────────────────────────────────────────────────────
@@ -113,9 +114,14 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         m = self._m(0.65, question='Will the Federal Reserve raise interest rates in June?')
         self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
-    def test_politics_category_fires(self):
-        """Politics markets have meaningful bias (6.2pp) — must fire."""
+    def test_politics_category_skipped(self):
+        """Politics bias dropped to ~3.6pp after reclassification — below 4pp threshold → skip."""
         m = self._m(0.65, question='Will Trump win the 2026 senate race?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_crypto_category_fires(self):
+        """Crypto markets have meaningful bias (6.1pp) — must fire."""
+        m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
         self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
 
     def test_crypto_category_fires(self):
@@ -494,6 +500,50 @@ class TestAdaptiveCategoryCapPhaseC(unittest.TestCase):
         trader = AutoTrader.__new__(AutoTrader)
         # _strategy_weights not set at all — getattr guard should kick in
         self.assertEqual(trader._get_strategy_weight(["mean_reversion"]), 1.0)
+
+    def test_strategy_weight_category_specific_overrides_global(self):
+        """by_category weight takes precedence over global weight for matching category."""
+        trader = self._make_trader()
+        trader._strategy_weights = {"probability_direction": 0.8}
+        trader._by_category_weights = {
+            "sports": {"probability_direction": {"weight": 1.2, "accuracy": 0.65, "n": 15}}
+        }
+        w = trader._get_strategy_weight(["probability_direction"], category="sports")
+        self.assertAlmostEqual(w, 1.2)
+
+    def test_strategy_weight_falls_back_to_global_for_unmatched_category(self):
+        """When category has no data for a strategy, use global weight."""
+        trader = self._make_trader()
+        trader._strategy_weights = {"mean_reversion": 0.9}
+        trader._by_category_weights = {
+            "sports": {}   # no data for mean_reversion in sports
+        }
+        w = trader._get_strategy_weight(["mean_reversion"], category="sports")
+        self.assertAlmostEqual(w, 0.9)
+
+    def test_strategy_weight_category_not_in_by_category_uses_global(self):
+        """When category is entirely absent from by_category, fall back to global."""
+        trader = self._make_trader()
+        trader._strategy_weights = {"probability_direction": 1.1}
+        trader._by_category_weights = {}
+        w = trader._get_strategy_weight(["probability_direction"], category="crypto")
+        self.assertAlmostEqual(w, 1.1)
+
+    def test_strategy_weight_max_across_cat_and_global(self):
+        """Takes max across strategies: one from category, one from global."""
+        trader = self._make_trader()
+        trader._strategy_weights = {
+            "probability_direction": 0.7,
+            "mean_reversion": 1.15,
+        }
+        trader._by_category_weights = {
+            "crypto": {"probability_direction": {"weight": 0.6, "accuracy": 0.48, "n": 12}}
+        }
+        # probability_direction: 0.6 (category wins over global 0.7)
+        # mean_reversion: 1.15 (global fallback, not in category)
+        # max = 1.15
+        w = trader._get_strategy_weight(["probability_direction", "mean_reversion"], category="crypto")
+        self.assertAlmostEqual(w, 1.15)
 
     def test_category_cap_missing_attr_falls_back_to_default(self):
         """Test that _effective_category_cap is safe even if __new__ skipped __init__."""

@@ -170,14 +170,17 @@ _STRATEGY_WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
 _DEFAULT_STRATEGY_WEIGHT = 1.0
 
 
-def _load_strategy_weights() -> dict:
-    """Load strategy weights from data/strategy_weights.json; return defaults on any error."""
+def _load_strategy_weights() -> tuple[dict, dict]:
+    """Load strategy weights from data/strategy_weights.json.
+
+    Returns (global_weights, by_category_weights); both default to {} on any error.
+    """
     try:
         with open(_STRATEGY_WEIGHTS_PATH) as f:
             data = json.load(f)
-        return data.get("weights", {})
+        return data.get("weights", {}), data.get("by_category", {})
     except Exception:
-        return {}
+        return {}, {}
 
 # Single source of truth for the trading threshold — imported from config.py.
 # auto_trader.py also imports MIN_CONFIDENCE; changing it there updates both.
@@ -262,7 +265,7 @@ class MarketResearcher:
             TradingStrategies.log_creator_disagreement_field_presence(markets)
 
             # Load strategy reliability weights once per run.
-            strategy_weights = _load_strategy_weights()
+            strategy_weights, _by_category_weights = _load_strategy_weights()
 
             recommendations = []
 
@@ -341,8 +344,15 @@ class MarketResearcher:
                 # Scale each signal's base confidence by its historical weight.
                 # Weights are 0.5–1.2; clamped to [0.0, 1.0] so they can't push
                 # a signal above 100% confidence before blending.
+                # Fallback chain: by_category[cat][strategy] → global[strategy] → 1.0
+                market_category = _infer_market_category(question)
+                cat_weights = _by_category_weights.get(market_category, {})
                 for sig in raw_signals:
-                    w = strategy_weights.get(sig['strategy'], _DEFAULT_STRATEGY_WEIGHT)
+                    strat = sig['strategy']
+                    if strat in cat_weights:
+                        w = cat_weights[strat].get("weight", _DEFAULT_STRATEGY_WEIGHT)
+                    else:
+                        w = strategy_weights.get(strat, _DEFAULT_STRATEGY_WEIGHT)
                     sig['confidence'] = round(min(1.0, sig['confidence'] * w), 4)
 
                 # ── Family deduplication ──────────────────────────────────────

@@ -112,17 +112,71 @@ def _compute_weights(outcomes: list[dict]) -> tuple[dict, dict]:
             continue
 
         acc = stats["correct"] / n
-        if acc >= 0.60:
-            w = 1.0 + (acc - 0.50) * 2   # 1.0 → 1.20 as acc goes 0.50 → 0.60+
-            w = min(w, 1.20)
-        elif acc >= 0.50:
-            w = 1.0
-        else:
-            w = max(0.5, acc / 0.50)
-
-        weights[strat] = round(w, 4)
+        weights[strat] = round(_weight_from_accuracy(acc, n, MIN_SAMPLES_PER_STRATEGY), 4)
 
     return weights, per_strategy_samples
+
+
+def _weight_from_accuracy(acc: float, n: int, min_samples: int) -> float:
+    """Convert accuracy + sample count into a weight scalar (shared formula)."""
+    if n < min_samples:
+        return _DEFAULT_WEIGHT
+    if acc >= 0.60:
+        return min(1.0 + (acc - 0.50) * 2, 1.20)
+    if acc >= 0.50:
+        return 1.0
+    return max(0.5, acc / 0.50)
+
+
+def _compute_weights_by_category(outcomes: list[dict]) -> dict:
+    """
+    Returns {category: {strategy: weight}} for all (category, strategy) pairs
+    with enough resolved trades.
+
+    Fallback chain at runtime (in auto_research.py / auto_trader.py):
+      by_category[category][strategy]  if n >= MIN_SAMPLES_PER_STRATEGY
+        → global weights[strategy]     if n >= MIN_SAMPLES_PER_STRATEGY
+          → 1.0 default
+
+    Schema per entry stored in strategy_weights.json["by_category"]:
+      { "strategy": weight, ... }  keyed by strategy name.
+      Strategies below the sample threshold are omitted (caller uses global fallback).
+    """
+    # {category: {strategy: {total, correct}}}
+    per_cat_strat: dict[str, dict[str, dict]] = {}
+
+    for o in outcomes:
+        cat = o.get("category") or "other"
+        strat_list = _parse_strategies(o.get("strategies"))
+        if not strat_list:
+            continue
+        direction_correct = o.get("our_recommendation") == o.get("market_resolution")
+        if cat not in per_cat_strat:
+            per_cat_strat[cat] = {}
+        for s in strat_list:
+            if s not in per_cat_strat[cat]:
+                per_cat_strat[cat][s] = {"total": 0, "correct": 0}
+            per_cat_strat[cat][s]["total"] += 1
+            if direction_correct:
+                per_cat_strat[cat][s]["correct"] += 1
+
+    result: dict[str, dict] = {}
+    for cat, strat_map in per_cat_strat.items():
+        cat_weights: dict[str, dict] = {}
+        for strat in _KNOWN_STRATEGIES:
+            stats = strat_map.get(strat)
+            if stats is None:
+                continue
+            n = stats["total"]
+            if n < MIN_SAMPLES_PER_STRATEGY:
+                continue   # omit; caller falls back to global
+            acc = stats["correct"] / n
+            w = round(_weight_from_accuracy(acc, n, MIN_SAMPLES_PER_STRATEGY), 4)
+            cat_weights[strat] = {"weight": w, "accuracy": round(acc, 4), "n": n}
+        if cat_weights:
+            result[cat] = cat_weights
+
+    return result
 
 
 def _compute_category_accuracy(outcomes: list[dict]) -> dict:
@@ -154,6 +208,7 @@ def _compute_category_accuracy(outcomes: list[dict]) -> dict:
 def main(dry_run: bool = False) -> None:
     outcomes = _fetch_outcomes(era="post_ev_fix")
     weights, per_strategy_samples = _compute_weights(outcomes)
+    by_category = _compute_weights_by_category(outcomes)
     cat_accuracy = _compute_category_accuracy(outcomes)
 
     result = {
@@ -162,6 +217,7 @@ def main(dry_run: bool = False) -> None:
         "min_samples_threshold": MIN_SAMPLES_PER_STRATEGY,
         "weights": weights,
         "per_strategy_samples": per_strategy_samples,
+        "by_category": by_category,
     }
 
     print(f"\nStrategy weights ({len(outcomes)} post-fix resolved trades):")
@@ -178,6 +234,15 @@ def main(dry_run: bool = False) -> None:
         else:
             note = f"<{MIN_SAMPLES_PER_STRATEGY} samples — default"
         print(f"  {strat:<28} weight={w:.4f}  [{note}]")
+
+    if by_category:
+        print(f"\nBy-category weights (min {MIN_SAMPLES_PER_STRATEGY} samples per cell):")
+        for cat, strats in sorted(by_category.items()):
+            for strat, info in sorted(strats.items()):
+                print(f"  {cat:<15} {strat:<28} weight={info['weight']:.4f}  "
+                      f"[acc={info['accuracy']*100:.0f}%  n={info['n']}]")
+    else:
+        print(f"\nBy-category weights: no data yet (need ≥{MIN_SAMPLES_PER_STRATEGY} samples per category/strategy)")
 
     print(f"\nCategory accuracy (min {MIN_SAMPLES_PER_CATEGORY} samples for adaptive cap):")
     if cat_accuracy:

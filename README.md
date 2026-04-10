@@ -37,9 +37,9 @@ manifold-trading-bot/
 │   ├── config.py                # API keys and trading parameters
 │   └── main.py                  # Interactive CLI
 │
-├── tests/                       # Test suite (210 tests)
-│   ├── test_strategies.py       # 75 unit tests (strategies, trader, AI, phases B/C)
-│   └── test_calibration.py      # 122 unit tests (calibration pipeline, weights)
+├── tests/                       # Test suite (215 tests)
+│   ├── test_strategies.py       # 81 unit tests (strategies, trader, AI, phases B/C)
+│   └── test_calibration.py      # 134 unit tests (calibration pipeline, weights)
 │
 ├── scripts/                     # Maintenance and pipeline scripts
 │   ├── resolve_positions.py     # Hourly position resolution (polls Manifold API, frees slots)
@@ -193,8 +193,8 @@ git push origin feature/your-feature
 ## Running Tests
 
 ```bash
-python3 tests/test_strategies.py    # strategies, trader, AI, phases B/C (58 tests)
-python3 tests/test_calibration.py   # calibration pipeline, weights (56 tests)
+python3 tests/test_strategies.py    # strategies, trader, AI, phases B/C (81 tests)
+python3 tests/test_calibration.py   # calibration pipeline, weights (134 tests)
 ```
 
 The pre-push git hook runs these automatically before every `git push` (when dependencies are installed).
