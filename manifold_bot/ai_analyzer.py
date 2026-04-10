@@ -155,7 +155,7 @@ Close date: {close_date}
 Additional context:
 {context}
 
-{calibration_note}
+{news_note}{calibration_note}
 
 Respond with this exact JSON structure:
 {{
@@ -400,12 +400,35 @@ def _parse_response(raw: str) -> Optional[Dict]:
         return None
 
 
-def analyze_market(market: Dict) -> Optional[Dict]:
+def _build_news_note(news_context: list) -> str:
+    """
+    Format recent headlines for injection into the AI prompt.
+
+    Returns a block like:
+        Recent news (last 7 days):
+          - "Bitcoin hits new ATH" (Reuters, 6h ago)
+          - "SEC approves spot ETF" (CoinDesk, 18h ago)
+
+    Returns "" when news_context is empty so the prompt placeholder collapses
+    cleanly without leaving a blank section.
+    """
+    if not news_context:
+        return ""
+    lines = ["Recent news (last 7 days — use this to update your probability estimate):"]
+    for title in news_context[:3]:
+        lines.append(f'  - "{title}"')
+    return "\n".join(lines) + "\n\n"
+
+
+def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optional[Dict]:
     """
     Run AI analysis on a single market.
 
     Args:
-        market: Market dict from Manifold API (must have at least 'question' and 'probability')
+        market:       Market dict from Manifold API (must have 'question' and 'probability')
+        news_context: Optional list of recent headline title strings to inject into
+                      the prompt. Fetched by auto_research.py via news_fetcher and
+                      passed through batch_analyze. Absent when NEWS_API_KEY is unset.
 
     Returns:
         Dict with keys: recommendation, confidence, estimated_true_probability,
@@ -449,6 +472,7 @@ def analyze_market(market: Dict) -> Optional[Dict]:
         liquidity=liquidity,
         close_date=close_date,
         context="\n".join(context_parts),
+        news_note=_build_news_note(news_context or []),
         calibration_note=_build_query_calibration_note(question, probability),
     )
 
@@ -489,17 +513,24 @@ def analyze_market(market: Dict) -> Optional[Dict]:
     return result
 
 
-def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_market_timeout: float = 90.0) -> Dict[str, Dict]:
+def batch_analyze(
+    markets: list,
+    max_markets: int = 20,
+    delay: float = 1.0,
+    per_market_timeout: float = 90.0,
+    news_by_id: Optional[Dict] = None,
+) -> Dict[str, Dict]:
     """
     Analyze a batch of markets.
 
     Args:
-        markets: List of market dicts
-        max_markets: Cap to avoid rate limits / long runtimes
-        delay: Seconds between calls (be polite to APIs)
+        markets:           List of market dicts
+        max_markets:       Cap to avoid rate limits / long runtimes
+        delay:             Seconds between calls (be polite to APIs)
         per_market_timeout: Max seconds to spend on a single market before skipping it.
-            Each market analysis is submitted to a ThreadPoolExecutor and cancelled
-            (skipped) if it does not complete within this deadline.
+        news_by_id:        Optional {market_id: [headline, ...]} from news_fetcher.
+                           When present, the headlines are injected into the AI prompt
+                           so the model has fresh context beyond its training cutoff.
 
     Returns:
         Dict keyed by market_id -> analysis result
@@ -520,6 +551,7 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
             break
 
         result = None
+        news_ctx = (news_by_id or {}).get(market_id)
         # Do NOT use `with ThreadPoolExecutor` here. The context manager calls
         # shutdown(wait=True) on exit — even when a TimeoutError is raised — which
         # blocks the main thread until the background thread's requests.post() call
@@ -528,7 +560,7 @@ def batch_analyze(markets: list, max_markets: int = 20, delay: float = 1.0, per_
         # Instead, shut down with wait=False so the background thread is abandoned
         # immediately after timeout and the loop moves on.
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(analyze_market, market)
+        future = executor.submit(analyze_market, market, news_ctx)
         try:
             result = future.result(timeout=per_market_timeout)
         except concurrent.futures.TimeoutError:

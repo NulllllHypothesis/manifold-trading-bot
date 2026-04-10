@@ -259,6 +259,7 @@ class TestSignalFamilies(unittest.TestCase):
             'thin_market':           'contrarian',
             'probability_bias':      'contrarian',
             'creator_disagreement':  'fundamental',
+            'news':                  'fundamental',
             'volume_spike_priority': 'filter',
         }
         self.assertEqual(TradingStrategies.SIGNAL_FAMILIES, expected)

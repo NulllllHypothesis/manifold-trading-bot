@@ -134,6 +134,7 @@ class TradingStrategies:
         'thin_market':           'contrarian',   # confirmation-only within family
         'probability_bias':      'contrarian',
         'creator_disagreement':  'fundamental',
+        'news':                  'fundamental',  # post-loop enrichment; see news_strategy()
         'volume_spike_priority': 'filter',       # priority boost, not a directional vote
     }
 
@@ -473,6 +474,98 @@ class TradingStrategies:
 
         # Both biased buckets show crowd overestimates YES → bet NO
         return "NO"
+
+    # ------------------------------------------------------------------ #
+    # News strategy (post-loop enrichment — called from auto_research.py
+    # on the top-N candidates after the main per-market loop)
+    # ------------------------------------------------------------------ #
+
+    # Words that suggest the subject of a headline is succeeding / being confirmed.
+    _NEWS_YES_WORDS: frozenset = frozenset({
+        'wins', 'win', 'won', 'confirms', 'confirmed', 'confirms',
+        'approves', 'approved', 'approval', 'signs', 'signed',
+        'passes', 'passed', 'launches', 'launched', 'announces',
+        'achieves', 'achieved', 'beats', 'beat', 'surpasses',
+        'advances', 'advance', 'record', 'breakthrough', 'success',
+        'succeeds', 'expands', 'rises', 'rising',
+    })
+
+    # Words that suggest the subject of a headline is failing / being blocked.
+    _NEWS_NO_WORDS: frozenset = frozenset({
+        'fails', 'failed', 'failure', 'cancels', 'canceled', 'cancelled',
+        'delays', 'delayed', 'denies', 'denied', 'rejects', 'rejected',
+        'rejection', 'drops', 'dropped', 'falls', 'fell', 'blocks',
+        'blocked', 'ban', 'bans', 'banned', 'crisis', 'collapses',
+        'collapsed', 'cut', 'cuts', 'declines', 'decline', 'loses',
+        'lost', 'loss', 'reversed', 'abandons', 'abandoned',
+    })
+
+    @staticmethod
+    def news_strategy(market: Dict, headlines: list) -> Optional[str]:
+        """
+        Fundamental signal based on recent news headline sentiment.
+
+        Called by auto_research.py on the top-N candidates AFTER the main
+        per-market strategy loop (not during it — fetching news for all 100
+        markets would blow the 100 req/day free-tier limit).
+
+        Direction heuristic:
+          - For each headline title, count YES_WORDS vs NO_WORDS hits.
+          - A headline "leans YES" when yes_hits > no_hits, and vice versa.
+          - If yes-leaning headlines outnumber no-leaning headlines: signal YES.
+          - If no-leaning headlines outnumber yes-leaning:             signal NO.
+          - If tied or neither:                                        return None.
+
+        This is intentionally simple — it catches clear cases (confirmed approvals,
+        obvious failures) without trying to understand market-question context.
+        Ambiguous or mixed coverage returns None and lets other signals decide.
+
+        Family: fundamental (competes with creator_disagreement for the one
+        fundamental slot in auto_research.py's family-dedup; only applied
+        post-loop as a confidence modifier rather than via the dedup path).
+
+        Confidence: 0.80 / 0.70 / 0.60 based on recency — see news_strategy_confidence().
+        """
+        if not headlines:
+            return None
+
+        yes_lean = 0
+        no_lean = 0
+        for h in headlines:
+            words = set(h.get('title', '').lower().split())
+            yes_hits = len(words & TradingStrategies._NEWS_YES_WORDS)
+            no_hits  = len(words & TradingStrategies._NEWS_NO_WORDS)
+            if yes_hits > no_hits:
+                yes_lean += 1
+            elif no_hits > yes_hits:
+                no_lean += 1
+
+        if yes_lean > no_lean:
+            return 'YES'
+        elif no_lean > yes_lean:
+            return 'NO'
+        return None
+
+    @staticmethod
+    def news_strategy_confidence(headlines: list) -> float:
+        """
+        Return confidence (0.60–0.80) based on recency of the freshest headline.
+
+        Scale:
+          < 24 h → 0.80  (breaking news — highest conviction)
+          < 72 h → 0.70  (recent news — moderate conviction)
+          else   → 0.60  (week-old news — minimum viable conviction)
+
+        Returns 0.60 when headlines is empty (safe fallback).
+        """
+        if not headlines:
+            return 0.60
+        min_age = min(h.get('age_hours', float('inf')) for h in headlines)
+        if min_age < 24:
+            return 0.80
+        elif min_age < 72:
+            return 0.70
+        return 0.60
 
     # ------------------------------------------------------------------ #
     # Utilities

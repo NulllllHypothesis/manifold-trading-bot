@@ -63,3 +63,9 @@ MAX_POSITIONS_PER_CATEGORY = 3
 # is wasted on a market the trader will reject; auto_trader.py and
 # position_swap_checker.py both enforce this at execution time.
 MIN_LIQUIDITY = 200
+
+# NewsAPI.org key for the P3 news fetcher.
+# Free tier: 100 requests/day. Get a key at https://newsapi.org/register
+# Set in .env: NEWS_API_KEY=<your-key>
+# When absent, news_fetcher.fetch_headlines() returns [] and news_strategy never fires.
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")

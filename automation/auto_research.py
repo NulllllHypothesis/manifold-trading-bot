@@ -19,7 +19,8 @@ from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies, _infer_market_category
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
-from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY
+from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY
+from manifold_bot.news_fetcher import fetch_headlines
 from scripts.position_swap_checker import run_swap_check
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -205,6 +206,11 @@ _NOT_ANALYZED = 'NOT_ANALYZED'
 # against 24h median, so the ratio is dimensionally consistent and 2x remains
 # a reasonable threshold for detecting abnormal short-term activity.
 VOLUME_SPIKE_MULTIPLIER = 2.0
+
+# Number of top candidates to enrich with news headlines.
+# Free tier: 100 req/day.  3 candidates × 24 runs = 72 max (with daily cache,
+# much fewer in practice since the same market often stays in top-3 for hours).
+_NEWS_CANDIDATES = 3
 
 class MarketResearcher:
     """Automated market research and analysis"""
@@ -429,6 +435,56 @@ class MarketResearcher:
             # Sort by confidence (highest first) before AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
+            # ── News enrichment ─────────────────────────────────────────────
+            # Fetch recent headlines for the top _NEWS_CANDIDATES (3) recs.
+            # Only runs when NEWS_API_KEY is configured; degrades gracefully
+            # (skips silently) on any network/API error.
+            #
+            # For each candidate:
+            #   - news_context: top-3 headline titles attached to rec (passed
+            #     to AI prompt for fresh context beyond the model's cutoff)
+            #   - direction agreement: +0.05 confidence boost (same logic as
+            #     thin_market confirmation) and 'news' appended to strategies
+            #   - direction disagreement: ×0.92 confidence penalty
+            #
+            # Confidence is re-clamped to [0, 1] and re-sorted afterward so
+            # news-boosted markets can move up the AI candidate queue.
+            news_by_market_id: dict = {}
+            if NEWS_API_KEY:
+                markets_by_id = {m.get('id'): m for m in markets}
+                for rec in recommendations[:_NEWS_CANDIDATES]:
+                    mid = rec['market_id']
+                    try:
+                        headlines = fetch_headlines(mid, rec['question'])
+                    except Exception as _news_err:
+                        print(f"  News fetch error for {mid}: {_news_err}")
+                        headlines = []
+                    if not headlines:
+                        continue
+
+                    # Store top-3 titles for AI prompt injection
+                    rec['news_context'] = [h['title'] for h in headlines[:3]]
+                    news_by_market_id[mid] = rec['news_context']
+
+                    mkt = markets_by_id.get(mid, {})
+                    news_dir  = TradingStrategies.news_strategy(mkt, headlines)
+                    news_conf = TradingStrategies.news_strategy_confidence(headlines)
+                    if news_dir == rec['recommendation']:
+                        # Agreement: treat like thin_market — small confidence boost
+                        rec['confidence'] = round(min(1.0, rec['confidence'] + 0.05), 3)
+                        if 'news' not in rec['strategies']:
+                            rec['strategies'].append('news')
+                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (agrees)")
+                    elif news_dir:
+                        # Disagreement: slight penalty
+                        rec['confidence'] = round(rec['confidence'] * 0.92, 3)
+                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (disagrees, penalty)")
+                    else:
+                        print(f"  News: no clear signal for {rec['question'][:60]}...")
+
+                if news_by_market_id:
+                    recommendations.sort(key=lambda x: x['confidence'], reverse=True)
+
             # AI candidate selection — 3 markets, ranked by composite score.
             #
             # Composite score = confidence + priority_boost * 0.15
@@ -514,6 +570,7 @@ class MarketResearcher:
                         max_markets=3,
                         delay=2,
                         per_market_timeout=90,
+                        news_by_id=news_by_market_id,
                     )
                     # Warn if any result came from the paid API fallback
                     for r in ai_results.values():
