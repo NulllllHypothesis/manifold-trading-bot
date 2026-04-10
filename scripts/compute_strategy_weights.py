@@ -35,12 +35,16 @@ _CATEGORY_ACCURACY_PATH = os.path.join(_ROOT, "data", "category_accuracy.json")
 
 # Known strategies — always emitted so consumers can rely on all keys being present.
 # Must match every strategy name that auto_research.py can write into the strategies list.
-# thin_market is excluded: it's a confirmation-only filter that is never the sole trigger,
-# and it is never stored as a standalone entry in bet_outcomes strategies lists.
+#
+# Excluded:
+#   volume_spike_priority — this is the filter family strategy; it is never added to
+#     active_signals (no directional vote) and therefore never appears in bet_outcomes.
+#     "volume_spike" was here as a stale entry from before the rename; removed in session 4.
+#   thin_market — confirmation-only boost; never the sole trigger; strategy weight
+#     is never looked up for it (it's not in active_signals).
 _KNOWN_STRATEGIES = [
     "probability_direction",
     "mean_reversion",
-    "volume_spike",
     "probability_bias",
     "creator_disagreement",
     "ai_analysis",

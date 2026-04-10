@@ -541,5 +541,229 @@ class TestSnapshotLogger(unittest.TestCase):
                 _write_market_snapshots(markets)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MIN_LIQUIDITY alignment
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLiquidityThresholdAlignment(unittest.TestCase):
+    """
+    auto_research.py, auto_trader.py, and position_swap_checker.py must all
+    use the same liquidity floor so no AI slot is spent on a market the trader
+    will subsequently reject.
+    """
+
+    def test_min_liquidity_in_config(self):
+        from manifold_bot.config import MIN_LIQUIDITY
+        self.assertEqual(MIN_LIQUIDITY, 200)
+
+    def test_research_imports_min_liquidity(self):
+        """auto_research.py must import MIN_LIQUIDITY (not use a hardcoded value)."""
+        import automation.auto_research as ar
+        # If the import was wrong this line would raise ImportError / AttributeError
+        self.assertIs(ar.MIN_LIQUIDITY, __import__('manifold_bot.config', fromlist=['MIN_LIQUIDITY']).MIN_LIQUIDITY)
+
+    def test_trader_imports_min_liquidity(self):
+        from automation.auto_trader import AutoTrader
+        from manifold_bot.config import MIN_LIQUIDITY
+        # Build a rec just below the threshold; should_trade_market must reject it
+        trader = AutoTrader.__new__(AutoTrader)
+        mock_pt = MagicMock()
+        mock_pt.balance = 500.0
+        mock_pt.positions = {}
+        trader.trader = mock_pt
+        trader.max_positions = 10
+        trader.max_position_size = 0.1
+        trader.min_confidence = 0.65
+        rec = {
+            'market_id': 'low_liq',
+            'confidence': 0.80,
+            'probability': 0.65,
+            'liquidity': MIN_LIQUIDITY - 1,
+            'existing_position': False,
+            'ai_recommendation': 'YES',
+            'ai_returned_skip': False,
+        }
+        self.assertFalse(trader.should_trade_market('low_liq', rec))
+
+    def test_trader_allows_at_min_liquidity(self):
+        from automation.auto_trader import AutoTrader
+        from manifold_bot.config import MIN_LIQUIDITY
+        trader = AutoTrader.__new__(AutoTrader)
+        mock_pt = MagicMock()
+        mock_pt.balance = 500.0
+        mock_pt.positions = {}
+        trader.trader = mock_pt
+        trader.max_positions = 10
+        trader.max_position_size = 0.1
+        trader.min_confidence = 0.65
+        rec = {
+            'market_id': 'ok_liq',
+            'confidence': 0.80,
+            'probability': 0.65,
+            'liquidity': MIN_LIQUIDITY,
+            'existing_position': False,
+            'ai_recommendation': 'YES',
+            'ai_returned_skip': False,
+        }
+        self.assertTrue(trader.should_trade_market('ok_liq', rec))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI timeout cooldown
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAiTimeoutCooldown(unittest.TestCase):
+    """
+    Unit tests for the AI timeout cooldown helpers in auto_research.py.
+    Verifies that markets with too many recent timeouts are excluded from
+    the AI candidate pool.
+    """
+
+    def setUp(self):
+        from automation.auto_research import (
+            _is_in_ai_cooldown,
+            _record_ai_timeout,
+            _AI_TIMEOUT_MAX_FAILS,
+            _AI_TIMEOUT_COOLDOWN_HOURS,
+        )
+        self._is_in_cooldown = _is_in_ai_cooldown
+        self._record = _record_ai_timeout
+        self._max_fails = _AI_TIMEOUT_MAX_FAILS
+        self._cooldown_hours = _AI_TIMEOUT_COOLDOWN_HOURS
+
+    def _recent_ts(self):
+        """ISO timestamp just now (well within cooldown window)."""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def _expired_ts(self):
+        """ISO timestamp older than the cooldown window."""
+        from datetime import datetime, timezone, timedelta
+        return (datetime.now(timezone.utc) - timedelta(hours=self._cooldown_hours + 1)).isoformat()
+
+    def test_no_entry_returns_false(self):
+        self.assertFalse(self._is_in_cooldown("mkt_new", {}))
+
+    def test_below_max_fails_returns_false(self):
+        cooldown = {"mkt_a": {"fails": self._max_fails - 1, "last_fail_at": self._recent_ts()}}
+        self.assertFalse(self._is_in_cooldown("mkt_a", cooldown))
+
+    def test_at_max_fails_returns_true(self):
+        cooldown = {"mkt_b": {"fails": self._max_fails, "last_fail_at": self._recent_ts()}}
+        self.assertTrue(self._is_in_cooldown("mkt_b", cooldown))
+
+    def test_above_max_fails_returns_true(self):
+        cooldown = {"mkt_c": {"fails": self._max_fails + 3, "last_fail_at": self._recent_ts()}}
+        self.assertTrue(self._is_in_cooldown("mkt_c", cooldown))
+
+    def test_record_increments_fail_count(self):
+        cooldown = {}
+        self._record(["mkt_x"], cooldown)
+        self.assertEqual(cooldown["mkt_x"]["fails"], 1)
+        self._record(["mkt_x"], cooldown)
+        self.assertEqual(cooldown["mkt_x"]["fails"], 2)
+
+    def test_record_sets_timestamp(self):
+        from datetime import datetime, timezone
+        cooldown = {}
+        self._record(["mkt_ts"], cooldown)
+        ts = cooldown["mkt_ts"]["last_fail_at"]
+        parsed = datetime.fromisoformat(ts)
+        age_secs = abs((datetime.now(timezone.utc) - parsed).total_seconds())
+        self.assertLess(age_secs, 5, "Timestamp should be within 5 seconds of now")
+
+    def test_record_multiple_markets(self):
+        cooldown = {}
+        self._record(["m1", "m2", "m3"], cooldown)
+        self.assertIn("m1", cooldown)
+        self.assertIn("m2", cooldown)
+        self.assertIn("m3", cooldown)
+
+    def test_load_cooldown_prunes_expired_entries(self):
+        """_load_ai_timeout_cooldown must drop entries older than the cooldown window."""
+        import json
+        import tempfile
+        from automation.auto_research import _load_ai_timeout_cooldown, _AI_TIMEOUT_COOLDOWN_PATH
+        stale_data = {
+            "stale_mkt": {"fails": 5, "last_fail_at": self._expired_ts()},
+            "fresh_mkt": {"fails": 2, "last_fail_at": self._recent_ts()},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(stale_data, f)
+            tmp_path = f.name
+        try:
+            with patch("automation.auto_research._AI_TIMEOUT_COOLDOWN_PATH", tmp_path):
+                result = _load_ai_timeout_cooldown()
+            self.assertNotIn("stale_mkt", result, "Expired entry should be pruned")
+            self.assertIn("fresh_mkt", result, "Recent entry should survive")
+        finally:
+            os.unlink(tmp_path)
+
+    def test_load_cooldown_returns_empty_on_missing_file(self):
+        from automation.auto_research import _load_ai_timeout_cooldown
+        with patch("automation.auto_research._AI_TIMEOUT_COOLDOWN_PATH", "/nonexistent/path.json"):
+            result = _load_ai_timeout_cooldown()
+        self.assertEqual(result, {})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Swap checker liquidity gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSwapCheckerLiquidityGate(unittest.TestCase):
+    """
+    find_best_opportunity() must reject swap targets with liquidity < MIN_LIQUIDITY
+    so that a proposed swap is never rejected by the trader at execution time.
+    """
+
+    def _research(self, recs):
+        return {"recommendations": recs}
+
+    def _rec(self, market_id, liquidity, ev=5.0, confidence=0.80):
+        return {
+            "market_id": market_id,
+            "confidence": confidence,
+            "liquidity": liquidity,
+            "recommendation": "YES",
+            "ai_recommendation": "YES",
+            "ai_returned_skip": False,
+            "estimated_ev": ev,
+        }
+
+    def test_low_liquidity_rec_rejected(self):
+        from scripts.position_swap_checker import find_best_opportunity
+        from manifold_bot.config import MIN_LIQUIDITY
+        recs = [self._rec("low_liq", liquidity=MIN_LIQUIDITY - 1)]
+        result = find_best_opportunity(self._research(recs), existing_ids=set())
+        self.assertIsNone(result)
+
+    def test_exact_min_liquidity_accepted(self):
+        from scripts.position_swap_checker import find_best_opportunity
+        from manifold_bot.config import MIN_LIQUIDITY
+        recs = [self._rec("ok_liq", liquidity=MIN_LIQUIDITY)]
+        result = find_best_opportunity(self._research(recs), existing_ids=set())
+        self.assertIsNotNone(result)
+        self.assertEqual(result["market_id"], "ok_liq")
+
+    def test_above_min_liquidity_accepted(self):
+        from scripts.position_swap_checker import find_best_opportunity
+        from manifold_bot.config import MIN_LIQUIDITY
+        recs = [self._rec("rich_liq", liquidity=MIN_LIQUIDITY + 500)]
+        result = find_best_opportunity(self._research(recs), existing_ids=set())
+        self.assertIsNotNone(result)
+
+    def test_best_ev_chosen_among_valid_liquidity(self):
+        """When multiple recs pass the gate, highest EV wins."""
+        from scripts.position_swap_checker import find_best_opportunity
+        from manifold_bot.config import MIN_LIQUIDITY
+        recs = [
+            self._rec("low_liq",  liquidity=MIN_LIQUIDITY - 1, ev=100.0),  # rejected
+            self._rec("med_liq",  liquidity=MIN_LIQUIDITY,      ev=3.0),
+            self._rec("high_liq", liquidity=MIN_LIQUIDITY + 100, ev=8.0),
+        ]
+        result = find_best_opportunity(self._research(recs), existing_ids=set())
+        self.assertEqual(result["market_id"], "high_liq")
+
+
 if __name__ == '__main__':
     unittest.main()

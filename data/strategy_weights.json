@@ -1,13 +1,19 @@
 {
-  "generated_at": "2026-04-08T16:18:38.295187Z",
+  "generated_at": "2026-04-10T00:00:00Z",
   "sample_count": 0,
   "min_samples_threshold": 10,
   "weights": {
     "probability_direction": 1.0,
     "mean_reversion": 1.0,
-    "volume_spike": 1.0,
     "probability_bias": 1.0,
     "creator_disagreement": 1.0,
     "ai_analysis": 1.0
+  },
+  "per_strategy_samples": {
+    "probability_direction": 0,
+    "mean_reversion": 0,
+    "probability_bias": 0,
+    "creator_disagreement": 0,
+    "ai_analysis": 0
   }
 }

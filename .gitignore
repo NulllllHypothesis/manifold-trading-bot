@@ -35,6 +35,10 @@ data/*.db
 /AUTOMATION_README.md
 /cron_jobs_config.json
 
+# OpenClaw regenerates this file from its own cron state on every sync.
+# The OS crontab (via automation/setup_cron_jobs.py) is the authoritative scheduler.
+automation/cron_jobs_config.json
+
 # Generated reports and PDFs
 *.pdf
 *.tex
@@ -55,6 +59,7 @@ skills/healthcheck/
 pending_swaps.json
 auto_trades.json
 market_research.json
+data/ai_timeout_cooldown.json
 
 # OpenClaw system files
 .clawhub/

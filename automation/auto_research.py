@@ -19,11 +19,70 @@ from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies, _infer_market_category
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
-from manifold_bot.config import MIN_CONFIDENCE
+from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY
 from scripts.position_swap_checker import run_swap_check
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SNAPSHOTS_DB_PATH = os.path.join(_ROOT, "data", "market_snapshots.db")
+
+# ── AI timeout cooldown ────────────────────────────────────────────────────────
+# Markets that repeatedly time out Ollama waste all 3 AI candidate slots every
+# hour.  After _AI_TIMEOUT_MAX_FAILS failures within the cooldown window, the
+# market is excluded from AI candidate selection for _AI_TIMEOUT_COOLDOWN_HOURS.
+# State is persisted in data/ai_timeout_cooldown.json (gitignored runtime file).
+_AI_TIMEOUT_COOLDOWN_PATH = os.path.join(_ROOT, "data", "ai_timeout_cooldown.json")
+_AI_TIMEOUT_COOLDOWN_HOURS = 24   # how long a market stays on cooldown
+_AI_TIMEOUT_MAX_FAILS = 2         # failures within that window before exclusion
+
+
+def _load_ai_timeout_cooldown() -> dict:
+    """
+    Load {market_id: {fails, last_fail_at}} from data/ai_timeout_cooldown.json.
+    Prunes entries older than _AI_TIMEOUT_COOLDOWN_HOURS so the file stays small.
+    Returns empty dict on any read error (first run, disk error, etc.).
+    """
+    try:
+        with open(_AI_TIMEOUT_COOLDOWN_PATH) as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_AI_TIMEOUT_COOLDOWN_HOURS)
+    pruned = {}
+    for mid, entry in raw.items():
+        try:
+            last_fail = datetime.fromisoformat(entry.get("last_fail_at", "2000-01-01T00:00:00+00:00"))
+            if last_fail > cutoff:
+                pruned[mid] = entry
+        except Exception:
+            pass  # drop malformed entries
+    return pruned
+
+
+def _save_ai_timeout_cooldown(cooldown: dict) -> None:
+    """Persist the cooldown dict.  Silently skips on write error."""
+    try:
+        os.makedirs(os.path.dirname(_AI_TIMEOUT_COOLDOWN_PATH), exist_ok=True)
+        with open(_AI_TIMEOUT_COOLDOWN_PATH, "w") as f:
+            json.dump(cooldown, f)
+    except Exception as e:
+        print(f"  Warning: could not save AI cooldown state ({e})")
+
+
+def _is_in_ai_cooldown(market_id: str, cooldown: dict) -> bool:
+    """Return True if this market has failed >= _AI_TIMEOUT_MAX_FAILS times recently."""
+    entry = cooldown.get(market_id)
+    if not entry:
+        return False
+    return entry.get("fails", 0) >= _AI_TIMEOUT_MAX_FAILS
+
+
+def _record_ai_timeout(market_ids: list, cooldown: dict) -> None:
+    """Increment fail counter for each market_id and update the timestamp."""
+    now = datetime.now(timezone.utc).isoformat()
+    for mid in market_ids:
+        entry = cooldown.setdefault(mid, {"fails": 0})
+        entry["fails"] = entry.get("fails", 0) + 1
+        entry["last_fail_at"] = now
 
 
 def _write_market_snapshots(markets: list) -> None:
@@ -218,8 +277,10 @@ class MarketResearcher:
                 if market.get('isResolved', False):
                     continue
 
-                # Skip low liquidity markets
-                if liquidity < 100:
+                # Skip low liquidity markets — threshold matches auto_trader.py (MIN_LIQUIDITY).
+                # Previously this was 100 while the trader rejected < 200, causing AI slots
+                # to be wasted on markets that could never be traded.
+                if liquidity < MIN_LIQUIDITY:
                     continue
 
                 # Skip stale markets — last bet > 72h ago AND near-zero 24h volume
@@ -383,6 +444,20 @@ class MarketResearcher:
 
             above_floor.sort(key=_composite, reverse=True)
             below_floor.sort(key=_composite, reverse=True)
+
+            # Load AI timeout cooldown and remove markets that have failed too many times.
+            # This prevents the same 2-3 markets from monopolising all AI slots every hour
+            # when Ollama consistently times out on them.
+            ai_timeout_cooldown = _load_ai_timeout_cooldown()
+            n_cooled = sum(
+                1 for r in (above_floor + below_floor)
+                if _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)
+            )
+            if n_cooled:
+                print(f"  AI cooldown: skipping {n_cooled} market(s) with >= {_AI_TIMEOUT_MAX_FAILS} recent timeouts")
+                above_floor = [r for r in above_floor if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
+                below_floor  = [r for r in below_floor  if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
+
             recent_top = (above_floor + below_floor)[:_AI_CANDIDATE_COUNT]
             top_candidate_ids = {r['market_id'] for r in recent_top}
             candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
@@ -435,6 +510,13 @@ class MarketResearcher:
                         if r.get('source') == 'deepseek_api':
                             print("  Warning: AI fallback to DeepSeek API was used — Ollama may be down. Check server.")
                             break
+                    # Record per-market failures: candidate got no result at all (not SKIP,
+                    # which is a valid response — only missing entries indicate a timeout).
+                    missing_ai = [mid for mid in top_candidate_ids if ai_results.get(mid) is None]
+                    if missing_ai:
+                        print(f"  AI no-result for {len(missing_ai)} candidate(s) — recording for cooldown")
+                        _record_ai_timeout(missing_ai, ai_timeout_cooldown)
+                    _save_ai_timeout_cooldown(ai_timeout_cooldown)
                 except TimeoutError as e:
                     print(f"  Warning: AI analysis timed out ({e}), continuing without AI scores")
                     # Restore pre-AI confidence scores to prevent partially-blended
@@ -442,6 +524,8 @@ class MarketResearcher:
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
+                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    _save_ai_timeout_cooldown(ai_timeout_cooldown)
                     ai_results = {}
                 except Exception as e:
                     print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
@@ -450,6 +534,8 @@ class MarketResearcher:
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
+                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    _save_ai_timeout_cooldown(ai_timeout_cooldown)
                     ai_results = {}
 
                 for rec in recommendations:

@@ -57,3 +57,9 @@ MAX_POSITIONS = 10
 # Prevents the bot from going all-in on one topic during a volatile week.
 # 3 out of 10 total slots per category means no single category can dominate.
 MAX_POSITIONS_PER_CATEGORY = 3
+
+# Minimum market liquidity (total pool size) required to trade.
+# Single source of truth — auto_research.py filters at scan time so no AI slot
+# is wasted on a market the trader will reject; auto_trader.py and
+# position_swap_checker.py both enforce this at execution time.
+MIN_LIQUIDITY = 200

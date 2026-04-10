@@ -31,7 +31,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.config import MIN_CONFIDENCE
+from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY
 from automation.send_telegram import send_telegram_message
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -159,6 +159,10 @@ def find_best_opportunity(research: Dict, existing_ids: set) -> Optional[Dict]:
         if rec.get('confidence', 0) < MIN_CONFIDENCE:
             continue
         if rec.get('market_id') in existing_ids:
+            continue
+        # Enforce the same liquidity floor as auto_trader.py — a swap target that
+        # would be rejected by the trader at execution time is not a valid proposal.
+        if rec.get('liquidity', 0) < MIN_LIQUIDITY:
             continue
 
         ev = rec.get('estimated_ev')

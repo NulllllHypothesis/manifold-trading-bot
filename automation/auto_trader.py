@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY
 from manifold_bot.strategies import _infer_market_category
 from automation.send_telegram import send_message as _tg
 
@@ -201,8 +201,8 @@ class AutoTrader:
             print(f"  Category cap reached: {rec_category} has {open_in_category}/{effective_cap} open positions")
             return False
 
-        # Check market liquidity
-        if recommendation.get('liquidity', 0) < 200:
+        # Check market liquidity — threshold matches auto_research.py (MIN_LIQUIDITY).
+        if recommendation.get('liquidity', 0) < MIN_LIQUIDITY:
             print(f"  Liquidity too low: ${recommendation.get('liquidity', 0):.0f}")
             return False
 
