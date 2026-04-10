@@ -496,18 +496,19 @@ Bridges reconstructed snapshots → strategy weights. Without this, M3 data neve
 #### ✅ M5 — Eval harness (done 2026-04-10)
 
 - [x] `scripts/run_eval_harness.py` — evaluates any model against 4 baselines on training_dataset.jsonl
-- [x] Baselines: crowd (0.2218 Brier, 64.6% DirAcc), always_0.5, always_0.8, random
+- [x] Baselines on held-out test split (8 examples): crowd **Brier 0.1503 / DirAcc 75.0%**, always_0.5, always_0.8, random
 - [x] Metrics: Brier score, log loss, directional accuracy, calibration curve per bucket + per category
 - [x] Promotion rule: finetuned Brier < crowd Brier AND < deepseek Brier AND DirAcc >= crowd DirAcc
 - [x] Report written to data/eval_report.json
-- [x] Crowd overestimates at 80-100% bucket (predicted 85%, actual 69%) — consistent with calibration table
+- [x] Note: earlier `--split all` run gave crowd Brier 0.2218 / DirAcc 64.6% — not a valid held-out gate; superseded by test-split numbers above
 
 #### 🟢 M6 — LoRA fine-tune llama3.2:3b
 
-- [ ] `requirements-train.txt` — `transformers`, `peft`, `datasets`, `bitsandbytes`
-- [ ] `scripts/finetune.py` — LoRA fine-tune on dataset from M4; ~8–10 GB RAM (well within 62 GB available); training time ~2–4h on CPU
-- [ ] After training: convert to GGUF, push to Ollama, evaluate via M5 harness
-- [ ] Promote to production if it clears the M5 promotion rule
+- [x] `requirements-train.txt` — `transformers`, `peft`, `datasets`, `accelerate`, `torch`
+- [x] `scripts/finetune.py` — completion-only loss masking; LoRA rank=8; adapter saved to `data/lora_adapter/`; writes `data/finetuned_preds.jsonl` keyed by `example_id`
+- [ ] Run training on server: `pip install -r requirements-train.txt && python3 scripts/finetune.py`
+- [ ] Evaluate: `python3 scripts/run_eval_harness.py --finetuned-predictions data/finetuned_preds.jsonl --split test`
+- [ ] Promote to production (GGUF → Ollama) only if Brier < 0.1503 AND DirAcc >= 75.0%
 
 ---
 
@@ -596,6 +597,6 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
 | Web dashboard | 🟢 P5 | convenience only |
 | SQLite storage | 🟢 P6 | housekeeping |
-| Dataset formatter | 🟡 M4 | probability estimation format, not YES/NO classification |
-| Eval harness | 🔴 M5 | Brier score, 4 baselines; required before trusting fine-tuning |
-| LoRA fine-tune llama3.2:3b | 🟢 M6 | only after M5 clears; promote only if beats crowd + DeepSeek |
+| Dataset formatter | ✅ M4 | 127 rows (T-7/14/30), example_id key, 80/10/10 split; data/training_dataset.jsonl (2026-04-10) |
+| Eval harness | ✅ M5 | 4 baselines; crowd Brier 0.1503 / DirAcc 75.0% on test split; data/eval_report.json (2026-04-10) |
+| LoRA fine-tune llama3.2:3b | 🟢 M6 | offline first: train → finetuned_preds.jsonl → M5 gate; deploy only if clears |

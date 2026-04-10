@@ -1,0 +1,18 @@
+# M6 — LoRA fine-tuning dependencies
+# Install with: pip install -r requirements-train.txt
+#
+# CPU-only server (i5-1340P, 62 GB RAM) — no CUDA required.
+# Training runs in fp32 on CPU.
+
+# Core HuggingFace stack
+transformers>=4.40.0
+peft>=0.10.0
+datasets>=2.18.0
+accelerate>=0.29.0
+
+# Serialisation / utilities
+torch>=2.2.0
+sentencepiece>=0.2.0
+protobuf>=3.20.0
+
+# numpy, scipy — pulled in transitively by torch/transformers
