@@ -34,26 +34,45 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # ── Category inference ────────────────────────────────────────────────────────
-# Mirrors the keyword logic in scripts/harvest_resolved.py._infer_category so
-# probability_bias_strategy can skip well-calibrated categories.
+# Single source of truth for category → keyword mapping.
+# scripts/harvest_resolved.py imports _infer_market_category from here so that
+# calibration data category labels always match live-trading labels.
 
 _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     'crypto':    ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'blockchain',
-                  'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin'],
+                  'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin',
+                  'doge', 'dogecoin', 'xrp', 'ripple'],
     'politics':  ['trump', 'biden', 'election', 'congress', 'senate', 'president',
                   'democrat', 'republican', 'vote', 'policy', 'legislation',
-                  'supreme court', 'governor', 'parliament'],
-    'ai_tech':   ['ai', 'gpt', 'llm', 'openai', 'anthropic', 'claude', 'gemini',
+                  'supreme court', 'governor', 'parliament',
+                  'war', 'ceasefire', 'military', 'nato', 'ukraine', 'russia',
+                  'gaza', 'israel', 'iran', 'harris', 'political', 'sanction',
+                  'tariff', 'geopolit'],
+    'ai_tech':   [' ai ', 'gpt', 'llm', 'openai', 'anthropic', 'claude', 'gemini',
                   'machine learning', 'artificial intelligence', 'neural', 'deepmind',
-                  'chatgpt', 'language model'],
+                  'chatgpt', 'language model', 'deepseek', 'chatbot', 'mistral',
+                  'grok', 'xai'],
     'sports':    ['nba', 'nfl', 'mlb', 'nhl', 'fifa', 'world cup', 'olympics',
                   'championship', 'tennis', 'golf', 'soccer', 'football',
-                  'basketball', 'baseball', 'premier league'],
+                  'basketball', 'baseball', 'premier league',
+                  # Space-bounded so we match whole words only:
+                  # ' win ' avoids Windows/winning; ' game ' avoids GameStop/gaming;
+                  # ' team ' avoids steam; ' match '/' score '/' league '/' player '
+                  # avoid mismatches in economics/science questions.
+                  # _infer_market_category pads q with spaces so these also match
+                  # at the start/end of a sentence.
+                  ' win ', ' team ', ' match ', ' game ', ' score ', ' league ', ' player ',
+                  'tournament', 'bundesliga', 'la liga', 'serie a',
+                  'champions league', 'europa league', 'ufc', 'mma', 'boxing',
+                  'formula 1', 'f1', 'wimbledon', 'super bowl', 'world series'],
     'economics': ['gdp', 'inflation', 'federal reserve', 'fed rate', 'interest rate',
                   'recession', 'stock market', 'nasdaq', 'sp500', 's&p', 'cpi',
-                  'unemployment', 'treasury'],
+                  'unemployment', 'treasury', 'stock', 'economy', 'dow', 'dollar',
+                  'euro', 'trade deficit', 'budget deficit', 'debt ceiling'],
     'science':   ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
-                  'cancer', 'physics', 'biology', 'crispr', 'fusion'],
+                  'cancer', 'physics', 'biology', 'crispr', 'fusion',
+                  'earthquake', 'hurricane', 'temperature', 'science', 'research',
+                  'drug approval', 'clinical trial'],
 }
 
 # Category-level bias loaded from data/calibration_table.json at import time.
@@ -91,8 +110,13 @@ _MIN_BIAS_TO_TRADE = 0.04
 
 
 def _infer_market_category(question: str) -> str:
-    """Return the category inferred from market question text."""
-    q = question.lower()
+    """Return the category inferred from market question text.
+
+    The search string is padded with a leading and trailing space so that
+    space-bounded keywords (e.g. ' win ', ' game ') also match when the word
+    appears at the very start or end of the question.
+    """
+    q = ' ' + question.lower() + ' '
     for category, keywords in _CATEGORY_KEYWORDS.items():
         if any(kw in q for kw in keywords):
             return category

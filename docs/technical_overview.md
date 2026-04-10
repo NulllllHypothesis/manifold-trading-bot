@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-10 (M2 audit, M3 snapshot reconstruction, offline backtest pipeline, per_strategy_samples fix, automated Sunday ML cron chain)* — 122 tests in test_calibration.py, 58 in test_strategies.py.
+*Last updated: 2026-04-10 (architecture consistency pass: liquidity alignment, AI cooldown, category inference single-source-of-truth, "other" category uncapping)* — 122 tests in test_calibration.py, 75 in test_strategies.py.
 
 ---
 
@@ -94,6 +94,7 @@ Every hour at :00 UTC
 │    • no re-entry on OPEN pos    │
 │    • category cap (Phase C):    │  3 default → 1 if accuracy<50%
 │      adaptive per own history   │  needs ≥8 resolved trades
+│      "other" always uncapped    │  catch-all bucket, positions uncorrelated
 │  - Market validation guard:     │  abort if resolved/closed
 │    fetches live market first    │
 │  - Kelly sizing (Phase B):      │  kelly = 0.5 × strategy_weight
@@ -290,7 +291,9 @@ There's a singleton at the bottom — `api_client = ManifoldAPI()` — that the 
 ---
 
 #### `manifold_bot/strategies.py`
-**What it does:** The 6 trading strategies and Kelly sizing. This is where the bot decides whether a market is worth betting on and which way.
+**What it does:** The 6 trading strategies, Kelly sizing, and **category inference**. This is where the bot decides whether a market is worth betting on and which way.
+
+`_infer_market_category(question)` is the **single source of truth** for category classification. `scripts/harvest_resolved.py` imports it directly so calibration DB labels always match live-trading labels. The function pads the search string with spaces (`' ' + q + ' '`) so space-bounded keywords like `' win '` or `' ai '` work correctly at sentence boundaries and don't false-match substrings (e.g. `' game '` doesn't match "GameStop", `' team '` doesn't match "steam", `' ai '` doesn't match "raise").
 
 **Strategy 1 — Probability Direction** (confidence 0.65)
 Bet with momentum if the market leans strongly and has had recent activity (last bet < 48h). Skips the 45–55% coinflip zone.
@@ -361,6 +364,8 @@ Is this mispriced? Should we bet YES, NO, or skip?
 ```
 
 The strategy performance note (`_build_performance_note()`) is injected alongside the calibration table. It is gated — returns empty string until `MIN_SAMPLES_PER_STRATEGY = 10` resolved trades exist per strategy, so the prompt stays clean while the system is accumulating data.
+
+**⚠ Known architectural issue — double-counting:** Strategy weights currently influence three separate layers: (1) stat signal confidence scaling in `auto_research.py`, (2) the AI prompt via `_build_performance_note()`, and (3) Kelly sizing in `auto_trader.py`. The same historical reliability signal is counted three times. Similarly, crowd calibration data is both injected into the AI prompt (global table) and drives `probability_bias_strategy` — the same prior applied twice. The planned fix is: (a) remove weights from the AI prompt — they belong only in stat/sizing layers; (b) replace the global calibration table with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)` so the AI sees context relevant to the current market, not broad history. This also means moving toward `by_category` strategy weights so the system learns "mean_reversion is reliable in politics but unreliable in crypto" rather than one global number.
 
 What it gets back:
 ```json
@@ -481,7 +486,7 @@ If `schema_version < 2` (i.e. AI pass was skipped or aborted), prints a Telegram
 | AI veto | SKIP | If AI returned SKIP, blocked regardless of confidence — checked first |
 | Min confidence | 65% | Only trade if the strategy signal is strong enough |
 | Max positions | 10 | Never hold more than 10 open bets at once |
-| Max per category | 3 | No more than 3 open bets in the same topic (crypto/politics/sports/etc) |
+| Max per category | 3 | No more than 3 open bets in the same topic (crypto/politics/sports/etc). Exception: "other" is uncapped at `MAX_POSITIONS` because positions in the catch-all bucket are uncorrelated by construction. |
 | Max position size | 10% of balance | Don't bet more than 10% of total cash on one trade |
 | Min liquidity | $200 | Don't trade illiquid markets (hard to exit) |
 | No re-entry | — | Blocks any new bet on a market with an existing OPEN position (live check, not research flag) |
@@ -764,7 +769,23 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 - ✅ **Ollama timeout fix** — `FIRST_TOKEN_TIMEOUT` raised 40s→90s (cold model load on this hardware takes ~40s); `keep_alive` 2h→4h.
 - ✅ **Test suite: 114 tests** — added `TestAdaptiveCategoryCapPhaseC` (8 tests), `TestSnapshotLogger` (2 tests), `TestComputeCategoryAccuracy` (4 tests including end-to-end category column check).
 
-**Next steps, in priority order:**
+**Completed (2026-04-10 session 3 — architecture consistency):**
+
+- ✅ **Liquidity threshold alignment** — `MIN_LIQUIDITY = 200` added to `config.py` as single source of truth; all three consumers (`auto_research.py`, `auto_trader.py`, `position_swap_checker.py`) import it. Previously research filtered at 100 and trader filtered at 200 — AI slots were spent on markets that would be rejected at trade time.
+- ✅ **AI timeout cooldown** — markets that trigger repeated Ollama timeouts get a 24h cooldown (`data/ai_timeout_cooldown.json`, gitignored). Prevents the same market from consuming AI budget every hour during model loading failures.
+- ✅ **Category inference — single source of truth** — `_infer_market_category()` in `strategies.py` is now the canonical implementation. `harvest_resolved.py` imports it directly (removed 30-line duplicate). Calibration DB labels now always match live-trading labels. Keyword list expanded (war/conflict → politics, generic sports terms with word-boundary matching, ai_tech, economics, science). Word-boundary fix: search string padded with spaces so `' game '` doesn't match "GameStop", `' team '` doesn't match "steam", `' ai '` doesn't match "raise".
+- ✅ **"other" category uncapped** — `_effective_category_cap("other")` now returns `self.max_positions` instead of `MAX_POSITIONS_PER_CATEGORY`. "other" is a catch-all; positions in it are uncorrelated by construction so the concentration limit was wrong. Specific categories still enforce the 3-position cap.
+- ✅ **Stale `"volume_spike"` key removed** — `_KNOWN_STRATEGIES` in `compute_strategy_weights.py` and committed `data/strategy_weights.json` cleaned up (key was renamed to `volume_spike_priority` in session 1 but the stale entry persisted).
+- ✅ **`data/category_accuracy.json` seeded** — file was never generated locally; `_load_category_accuracy_file()` silently returned `{}`, keeping Phase C adaptive caps permanently dormant. Seeded with valid empty structure.
+- ✅ **`automation/cron_jobs_config.json` gitignored** — OpenClaw background sync regenerates this file on every sync, stomping manually-added entries. Permanently fixed by removing from git tracking.
+- ✅ **Test suite: 210 tests** — 17 new tests across `TestLiquidityThresholdAlignment`, `TestAiTimeoutCooldown`, `TestSwapCheckerLiquidityGate`, new keyword coverage in `TestInferCategory`, and `TestAdaptiveCategoryCapPhaseC` extended with "other" uncap behavior.
+
+**Known architectural issue (planned next):**
+
+**Double-counting in stat/AI/sizing layers** — Strategy weights currently influence three layers: (1) stat signal confidence in research, (2) AI prompt via `_build_performance_note()`, (3) Kelly sizing. Same historical signal triple-counted. Crowd calibration is also both in the AI prompt and in `probability_bias_strategy`. Planned fix:
+- Remove weights from AI prompt — reasoning layer should be independent of historical stat reliability.
+- Replace global calibration table in AI prompt with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)`.
+- Extend `compute_strategy_weights.py` to emit `by_category` weights with runtime fallback: `weight(strategy, category)` → `weight(strategy)` → `1.0`.
 
 **P3 — News fetcher** — structured news API integration as a `fundamental` family signal (`manifold_bot/news_fetcher.py`); keywords extracted from market question, queries NewsAPI.org free tier.
 

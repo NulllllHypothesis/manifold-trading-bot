@@ -288,6 +288,7 @@ class TestOpenPositionGuard(unittest.TestCase):
         mock_pt = MagicMock()
         mock_pt.balance = 500.0
         mock_pt.positions = open_positions or {}
+        mock_pt.max_positions = 10
         trader.trader = mock_pt
         return trader
 
@@ -502,6 +503,26 @@ class TestAdaptiveCategoryCapPhaseC(unittest.TestCase):
         # _category_accuracy not set at all — getattr guard should kick in
         self.assertEqual(trader._effective_category_cap("crypto"), MAX_POSITIONS_PER_CATEGORY)
 
+    def test_other_category_uncapped(self):
+        """'other' returns self.max_positions (AutoTrader attr), not per-category cap."""
+        from manifold_bot.config import MAX_POSITIONS_PER_CATEGORY
+        trader = self._make_trader()   # _make_trader sets trader.max_positions = 10
+        trader._category_accuracy = {}
+        cap = trader._effective_category_cap("other")
+        self.assertEqual(cap, 10)
+        self.assertGreater(cap, MAX_POSITIONS_PER_CATEGORY,
+                           "other cap must exceed per-category cap (10 > 3)")
+
+    def test_other_category_uncapped_ignores_accuracy(self):
+        """'other' must be uncapped even if accuracy data says it's a poor category."""
+        from automation.auto_trader import _MIN_SAMPLES_PER_CATEGORY
+        trader = self._make_trader()
+        trader._category_accuracy = {
+            "other": {"accuracy": 0.20, "sample_count": _MIN_SAMPLES_PER_CATEGORY + 5}
+        }
+        # Despite bad accuracy, 'other' is catch-all — never penalised
+        self.assertEqual(trader._effective_category_cap("other"), 10)
+
 
 class TestSnapshotLogger(unittest.TestCase):
     """M1: _write_market_snapshots() writes rows and is best-effort."""
@@ -592,6 +613,7 @@ class TestLiquidityThresholdAlignment(unittest.TestCase):
         mock_pt = MagicMock()
         mock_pt.balance = 500.0
         mock_pt.positions = {}
+        mock_pt.max_positions = 10
         trader.trader = mock_pt
         trader.max_positions = 10
         trader.max_position_size = 0.1

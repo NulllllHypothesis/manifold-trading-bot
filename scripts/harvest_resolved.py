@@ -34,43 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import ManifoldAPI
 from manifold_bot.config import MANIFOLD_API_KEY
+from manifold_bot.strategies import _infer_market_category as _infer_category
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "calibration.db")
-
-
-def _infer_category(question: str) -> str:
-    """
-    Infer a broad topic category from the question text using keyword matching.
-
-    Categories:
-      crypto    — Bitcoin, Ethereum, DeFi, NFT, blockchain
-      politics  — elections, presidents, legislation, parties
-      ai_tech   — AI models, LLMs, OpenAI, Anthropic, tech companies
-      sports    — games, tournaments, championships, team names
-      economics — markets, inflation, interest rates, GDP
-      science   — climate, space, medicine, research outcomes
-      other     — anything that doesn't match a more specific bucket
-
-    This is intentionally rough — it only needs to be good enough to reveal
-    whether calibration bias differs across broad topic areas.
-    """
-    q = question.lower()
-    if any(w in q for w in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'defi', 'nft', 'blockchain', 'solana', 'doge']):
-        return 'crypto'
-    if any(w in q for w in ['election', 'president', 'senate', 'congress', 'vote', 'democrat', 'republican', 'trump', 'biden', 'harris', 'political', 'legislation', 'parliament']):
-        return 'politics'
-    if any(w in q for w in ['gpt', 'llm', 'openai', 'anthropic', 'gemini', 'claude', 'deepseek', 'artificial intelligence', ' ai ', 'machine learning', 'neural', 'chatbot']):
-        return 'ai_tech'
-    if any(w in q for w in ['nba', 'nfl', 'nhl', 'mlb', 'soccer', 'football', 'basketball', 'baseball', 'tennis', 'golf', 'championship', 'tournament', 'match', 'game', 'win', 'score', 'league', 'team', 'player', 'season']):
-        return 'sports'
-    if any(w in q for w in ['stock', 'market', 'economy', 'inflation', 'gdp', 'fed', 'interest rate', 'recession', 'dow', 's&p', 'nasdaq', 'dollar', 'euro']):
-        return 'economics'
-    if any(w in q for w in ['climate', 'temperature', 'earthquake', 'hurricane', 'nasa', 'space', 'vaccine', 'drug', 'study', 'research', 'science']):
-        return 'science'
-    return 'other'
 
 
 def init_db(conn: sqlite3.Connection):

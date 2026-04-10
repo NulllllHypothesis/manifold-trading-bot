@@ -124,10 +124,17 @@ class AutoTrader:
         Return the position cap for a category, reduced to 1 if own trade history
         shows < 50% directional accuracy with sufficient sample size.
 
+        "other" is always uncapped (uses max_positions) because it is a catch-all
+        bucket: positions in it are uncorrelated by construction, so the standard
+        per-category concentration limit is not meaningful here.
+
         Phase C: adaptive caps based on per-category resolved trade history.
         Below _MIN_SAMPLES_PER_CATEGORY the default cap (MAX_POSITIONS_PER_CATEGORY)
         is always used — never penalise a category on too-small a sample.
         """
+        if category == 'other':
+            return self.max_positions
+
         cat_accuracy = getattr(self, '_category_accuracy', {})
         info = cat_accuracy.get(category)
         if info is None:

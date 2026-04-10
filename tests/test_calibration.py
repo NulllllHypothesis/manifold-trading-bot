@@ -124,6 +124,40 @@ class TestInferCategory(unittest.TestCase):
         self.assertEqual(_infer_category("BITCOIN price prediction"), "crypto")
         self.assertEqual(_infer_category("ELECTION results 2028"), "politics")
 
+    def test_war_conflict_is_politics(self):
+        # War/conflict terms added to politics — previously fell through to 'other'
+        self.assertEqual(_infer_category("Will the ceasefire hold in Gaza?"), "politics")
+        self.assertEqual(_infer_category("Will Russia escalate the war in Ukraine?"), "politics")
+        self.assertEqual(_infer_category("Will NATO invoke Article 5?"), "politics")
+
+    def test_generic_sports_terms(self):
+        # Generic match/win/team/score terms added — previously fell through to 'other'
+        self.assertEqual(_infer_category("Will Arsenal win the match against Sporting Lisboa?"), "sports")
+        self.assertEqual(_infer_category("Who will score the most goals this season?"), "sports")
+        self.assertEqual(_infer_category("Which team wins the Champions League?"), "sports")
+
+    def test_deepseek_is_ai_tech(self):
+        self.assertEqual(_infer_category("Will DeepSeek R2 beat GPT-5 on benchmarks?"), "ai_tech")
+        self.assertEqual(_infer_category("Will the Grok chatbot gain 10M users?"), "ai_tech")
+
+    def test_harvest_uses_strategies_implementation(self):
+        # _infer_category in harvest_resolved is now an alias for _infer_market_category
+        # in strategies — both should return identical results for the same input.
+        from manifold_bot.strategies import _infer_market_category
+        questions = [
+            "Will Bitcoin hit $100k?",
+            "Will Trump win in 2028?",
+            "Will GPT-5 launch?",
+            "Will Arsenal win the match?",
+            "Will US GDP grow 3%?",
+            "Will NASA launch?",
+            "Will Alice beat Bob?",
+            "Will the ceasefire hold in Gaza?",
+        ]
+        for q in questions:
+            self.assertEqual(_infer_category(q), _infer_market_category(q),
+                             f"Mismatch for: {q!r}")
+
 
 # ── Group 2: parse_market ──────────────────────────────────────────────────────
 
