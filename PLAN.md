@@ -100,18 +100,20 @@ Note: Position swap check (`f426953c`) was a separate `:40` cron — **disabled*
 
 ---
 
-## Current Trading State (as of 2026-04-08)
+## Current Trading State (as of 2026-04-10)
 
-- **Paper balance:** ~$275
-- **Open positions:** 8/10
+- **Paper balance:** ~$232 (heavy early losses from duplicate bets; throttled at $5/trade until weights signal real edge)
+- **Open positions:** 11/10 (auto_trader.py blocks new trades; awaiting resolution)
+- **MAX_BET_AMOUNT:** $5 — throttled while backtest pipeline builds signal. Restore to $25 once `probability_bias` weight clears 1.0 (expected after 2026-04-13 Sunday harvest).
 - **Auto-trader confidence threshold:** 65%
-- **Max positions per category:** 3 (enforced in `should_trade_market()`)
-- **Strategy weights:** all 1.0 (no post-fix resolved trades yet — accumulating; weights update automatically once ≥10 trades per strategy resolve)
+- **Max positions per category:** 3 (enforced in `should_trade_market()`; reduces to 1 if category accuracy < 50% with ≥8 samples)
+- **Strategy weights:** all 1.0 (6 live resolved trades — below 10-sample gate; `probability_bias` backtest shows 72% accuracy on 25 samples, 5 short of 30-sample gate)
+- **Reconstructed snapshots:** 127 rows in `market_snapshots.db` (source='reconstructed') from 267 usable markets
 - **Trade logging:** `auto_trades.json` (all trades include `estimated_ev`, `category`, `question`)
 - **Active branch:** `main`
 - **Agent auto-reviewer:** DISABLED — caused file truncation bugs on 3/4 PRs. Human review only.
 - **Telegram bot:** Live — `/portfolio`, `/positions`, `/scan`, `/autotrader on/off`. Address bot: `@hackathon_26_bot /portfolio`
-- **Ollama:** `deepseek-r1:14b` on server; if stuck (700%+ CPU): `kill $(pgrep -f "ollama serve") && nohup ollama serve > /tmp/ollama.log 2>&1 &`
+- **Ollama:** `llama3.2:3b` on server (switched 2026-04-09); keep_alive 4h; FIRST_TOKEN_TIMEOUT 90s. If stuck (700%+ CPU): `kill $(pgrep -f "ollama runner") && nohup ollama serve > /tmp/ollama.log 2>&1 &`
 
 ---
 
@@ -333,35 +335,34 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
   - Gated: returns empty string if sample count < `MIN_SAMPLES_PER_STRATEGY` (no noise while accumulating)
   - Degrades gracefully if file absent
 
-> Cron to add: `weekly-strategy-weights` — Sundays 03:00 UTC (after harvest). Runs `compute_strategy_weights.py` to refresh weights from newly resolved trades.
+> Cron registered: `compute_strategy_weights.py` — Mondays 07:30 UTC (live weights). `backtest_from_snapshots.py` — Sundays 03:30 UTC (backtest fills gaps). Both write to `data/strategy_weights.json`.
 
 ---
 
-## Execution Plan — Next 2–3 Sessions (decided 2026-04-09)
+## Execution Plan — Status as of 2026-04-10
 
 **Context:** Live infra is strong. The adaptation pieces (strategy weights, category accuracy) are scaffolding fed by sparse data — no resolved live trades yet. The bot is losing because the feedback loop is too weak to tell us what actually works. Expanding live complexity before fixing the measurement system is the wrong move.
 
-### Session 1 (current): Risk throttle + M2 audit + M3 reconstruction
+### ✅ Session 1 (2026-04-09): Risk throttle + M2 audit + M3 reconstruction — DONE
 
-1. **Risk throttle** — `MAX_BET_AMOUNT` $100 → $5. Bot keeps running (M1 snapshots keep accumulating), but can't blow remaining balance while M2/M3 are in progress. One-line change.
+1. **Risk throttle** — `MAX_BET_AMOUNT` $100 → $5. Bot keeps running (M1 snapshots accumulate), but can't blow remaining balance. ✅
+2. **M2 audit** — 267/1121 usable markets (YELLOW gate). ✅
+3. **M3 reconstruction** — 127 reconstructed snapshots. 3 code review bugs fixed. ✅
 
-2. **M2 audit** (`scripts/audit_resolved_markets.py`) — query the 1,121 resolved markets already in `calibration.db` and answer:
-   - Category distribution — is it balanced or 80% "other"?
-   - Near-close contamination — what % have `probability_close > 0.85` or `< 0.15`? (These are useless for training — the outcome was already obvious.)
-   - Bettor-count distribution — how many markets are too thin (< 10 bettors) to trust?
-   - Usable market count — markets that pass all three filters
-   - Decision gate: if < 200 usable markets, reconsider M3 scope before building it
+### ✅ Session 2 (2026-04-10): Backtest pipeline + automation — DONE
 
-3. **M3 reconstruction** (`scripts/reconstruct_snapshots.py`) — for each usable resolved market, fetch bet history from Manifold API (`/v0/bets?contractId=<id>`) and reconstruct probability at T-7d, T-14d, T-30d before close. Write synthetic snapshots into `data/market_snapshots.db` alongside live ones, tagged `source='reconstructed'`.
+- Built `backtest_from_snapshots.py` — bridges M3 snapshots into strategy weights.
+- Fixed `per_strategy_samples` gap — live weights can now correctly override backtest once gate clears.
+- `probability_bias`: 72% accuracy / 25 samples. 5 short of 30-sample gate.
+- `mean_reversion`: 0 signals — structurally incompatible with M2 quality filter.
+- **Decision gate result:** Weights did NOT shift from 1.0 this run (5 samples short). Re-evaluate after 2026-04-13 harvest.
+- Automated the Sunday M2→M3→backtest chain (02:30/03:00/03:30 UTC crontab).
 
-   This gives ~3× more training examples than live snapshots alone and, crucially, examples at **decision-time** (30 days before close) rather than near-close.
+### Session 3 (next, after 2026-04-13 harvest):
 
-### Session 2: Decision gate after M2 runs
-
-- If strategy weights shift meaningfully from defaults after running `compute_strategy_weights.py` on reconstructed data → restore `MAX_BET_AMOUNT` to $25 and continue live with real signal.
-- If weights stay ≈ 1.0 → investigate why before P3.
-
-### Session 3: P3 (news fetcher) or M4 (dataset formatter) depending on gate outcome
+- If `probability_bias` clears 30-sample gate → weight becomes 1.20 automatically → restore `MAX_BET_AMOUNT` to $25
+- If still below gate → investigate whether M3 needs more resolved markets (harvest again, wait one more week)
+- P3 (news fetcher) or M4 (dataset formatter) can start in parallel — neither blocks the weight decision
 
 ---
 
@@ -440,22 +441,32 @@ The single highest-leverage infrastructure investment. Without it, any training 
 - [x] After 2–3 months: join against `resolved_markets` for ML training pairs
 - [ ] After 2–3 months: join against `resolved_markets` to get `(snapshot_at_T, actual_resolution)` pairs for training
 
-#### 🟡 M2 — Audit the 1121 resolved_markets rows
+#### ✅ M2 — Audit the 1121 resolved_markets rows — DONE (2026-04-09)
 
-Before building anything on top of that data, understand what's in it. One script, one hour.
+- [x] `scripts/audit_resolved_markets.py` — three quality filters: near-close contamination (>85%/<15%), thin markets (<10 bettors), category skew
+- [x] Result: 267/1121 usable markets (55% near-close excluded, 41% thin excluded) → YELLOW gate
+- [x] Outputs `data/m2_audit.json` with `usable_market_ids` list consumed by M3
+- [x] Automated: runs every Sunday 02:30 UTC after harvest
 
-- [ ] Category distribution — is it balanced or 80% "other"?
-- [ ] Snapshot timing — are these near-close (final probability) or earlier? If near-close, training signal is weak
-- [ ] Bettor count distribution — how many markets are too thin to trust?
-- [ ] Output: a short report so decisions about M3–M6 are data-driven
+#### ✅ M3 — Reconstruct earlier snapshots from bet history — DONE (2026-04-09)
 
-#### 🟡 M3 — Reconstruct earlier snapshots from bet history
+- [x] `scripts/reconstruct_snapshots.py` — fetches full bet history per market via `/v0/bets`, calls `prob_at_time()` to find probability at T-7d/T-14d/T-30d before close
+- [x] Writes `source='reconstructed'` rows to `market_snapshots.db` with `days_before_close` and `outcome` columns
+- [x] Idempotent — skips already-reconstructed markets; re-runs accumulate new data only
+- [x] Fix 3 (2026-04-09): API errors now reported as `api_error`, not silently collapsed into `no_bets`
+- [x] First run: 267 markets → 127 snapshot rows written, 674 windows skipped (markets too short-lived)
+- [x] Automated: runs every Sunday 03:00 UTC after M2
 
-For each of the 1121 markets, fetch bet history via Manifold API and find the probability at T-7d, T-14d, T-30d before close. Transforms near-close snapshots into training data that matches live trading conditions.
+#### ✅ Offline Backtest Pipeline — DONE (2026-04-09/10)
 
-- [ ] `scripts/reconstruct_snapshots.py` — fetch `/v0/market/{id}/bets`, walk backwards to find probability at target time windows, write to `data/market_snapshots.db`
-- [ ] Gate on markets with ≥10 bettors (thin markets produce noisy labels)
-- [ ] Depends on M2 audit to know which time windows are meaningful
+Bridges reconstructed snapshots → strategy weights. Without this, M3 data never reached `strategy_weights.json` (which only reads live `bet_outcomes`).
+
+- [x] `scripts/backtest_from_snapshots.py` — loads `source='reconstructed'` rows, runs `mean_reversion` and `probability_bias` (skips `probability_direction` — `volume24h` is NULL for historical data), computes accuracy → weight using same formula as live system
+- [x] Merge rule: live wins when `per_strategy_samples ≥ 10`; backtest fills gap when `≥ 30` samples; else default 1.0
+- [x] Fix 4 (2026-04-10): `compute_strategy_weights.py` now emits `per_strategy_samples` in `strategy_weights.json` so the live-over-backtest handoff actually fires
+- [x] Fix 1 (2026-04-09): `_ensure_bet_outcomes_schema()` prevents `OperationalError: no such column: category` on older sandbox DBs
+- [x] First backtest result: `probability_bias` 72% accuracy / 25 samples (5 short of gate — will clear after 2026-04-13 harvest)
+- [x] Automated: runs every Sunday 03:30 UTC after M3
 
 #### 🟡 M4 — Dataset formatter
 
@@ -543,26 +554,28 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
-| Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 173 tests total |
+| Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 122 test_calibration + 58 test_strategies = 180 tests |
 | Telegram bot commands | ✅ Done | real Bot API; /portfolio /positions /scan /autotrader on/off; no duplicate sends; positions show real titles |
 | Auto-notify on resolution | ✅ Done | `_notify_resolution()` in `paper_trader.py`; fires on every resolution; never blocks |
 | /autotrader on/off | ✅ Done | flag file in `auto_trader.py`; telegram handlers; two OpenClaw skills |
 | Sandbox reproducibility | ✅ Fixed | `auto_research_fast.py` removed; experiment files cleaned; duplicate trading job removed |
 | Category exposure caps | ✅ Done | `MAX_POSITIONS_PER_CATEGORY=3`; enforced in `should_trade_market()`; category stored on trade record; breakdown in daily summary |
-| Weighted scoring Phase A + D | ✅ Done | `compute_strategy_weights.py` (JSON parse fixed, all 6 strategies); weights applied to signals in `auto_research.py`; performance note in AI prompt |
-| Local model switch (llama3.2:3b) | ✅ Done | 9.3 tok/s vs 0.7 tok/s; keep_alive 2h; cold-start timeout 40s |
+| Weighted scoring Phase A + D | ✅ Done | `compute_strategy_weights.py` (JSON parse fixed, all 6 strategies, per_strategy_samples emitted); weights applied to signals in `auto_research.py`; performance note in AI prompt |
+| Local model switch (llama3.2:3b) | ✅ Done | FIRST_TOKEN_TIMEOUT 40→90s; keep_alive 2h→4h (2026-04-09) |
 | AI call tracking | ✅ Done | source, latency_ms, ollama_timed_out in llm_calls.jsonl |
 | Code quality (13 issues) | ✅ Done | crash fix, dead code removed, pandas removed, paths absolute, imports cleaned |
 | Weighted scoring Phase B + C | ✅ Done | dynamic Kelly scaling from weights; per-category accuracy → adaptive caps (2026-04-09) |
 | Register weekly-strategy-weights cron | ✅ Done | OS crontab Mondays 07:30 UTC (2026-04-09) |
-| Hourly snapshot logger | ✅ Done | `_write_market_snapshots()` in auto_research.py → market_snapshots.db (2026-04-09) |
-| Local model switch (llama3.2:3b) | ✅ Done | FIRST_TOKEN_TIMEOUT 40→90s; keep_alive 2h→4h (2026-04-09) |
+| Hourly snapshot logger (M1) | ✅ Done | `_write_market_snapshots()` in auto_research.py → market_snapshots.db (2026-04-09) |
+| bet_outcomes schema migration fix | ✅ Done | `_ensure_bet_outcomes_schema()` prevents OperationalError on older DBs (2026-04-09) |
+| M2 — Audit resolved_markets corpus | ✅ Done | 267/1121 usable; YELLOW gate; data/m2_audit.json (2026-04-09) |
+| M3 — Reconstruct decision-time snapshots | ✅ Done | 127 rows in market_snapshots.db; api_error vs no_bets fix (2026-04-09) |
+| Offline backtest pipeline | ✅ Done | backtest_from_snapshots.py; probability_bias 72%/25 samples; automated Sunday chain (2026-04-10) |
+| per_strategy_samples in strategy_weights.json | ✅ Done | live-over-backtest handoff wired (2026-04-10) |
 | News fetcher | 🟡 P3 | NewsAPI.org free tier; fundamental family signal |
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
 | Web dashboard | 🟢 P5 | convenience only |
 | SQLite storage | 🟢 P6 | housekeeping |
-| Audit 1121 resolved_markets | 🟡 M2 | category skew, snapshot timing check |
-| Reconstruct earlier snapshots | 🟡 M3 | bet history API; training data at decision-time not close-time |
 | Dataset formatter | 🟡 M4 | probability estimation format, not YES/NO classification |
 | Eval harness | 🔴 M5 | Brier score, 4 baselines; required before trusting fine-tuning |
 | LoRA fine-tune llama3.2:3b | 🟢 M6 | only after M5 clears; promote only if beats crowd + DeepSeek |

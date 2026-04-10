@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-09 (Phase B+C Kelly/category-accuracy, M1 snapshot logger, Ollama timeout fix, Phase C data-flow bug fixed)* — 114 tests total.
+*Last updated: 2026-04-10 (M2 audit, M3 snapshot reconstruction, offline backtest pipeline, per_strategy_samples fix, automated Sunday ML cron chain)* — 122 tests in test_calibration.py, 58 in test_strategies.py.
 
 ---
 
@@ -170,6 +170,82 @@ Every hour at :00 UTC
 │  - Rebuilds calibration_table   │
 │    .json for next AI cycle      │
 └─────────────────────────────────┘
+        │  (Sundays 02:30 UTC — M2)
+        ▼
+┌─────────────────────────────────┐
+│  audit_resolved_markets.py      │
+│  - Inspects all resolved markets│
+│    for 3 failure modes:         │
+│    1. near-close contamination  │
+│       (prob >85% or <15%)       │
+│    2. thin markets (<10 bettors)│
+│    3. category skew             │
+│  - Outputs usable_market_ids    │
+│    to data/m2_audit.json        │
+│  - Decision gate: YELLOW if     │
+│    ≥200 usable (M3 viable)      │
+└─────────────────────────────────┘
+        │  (Sundays 03:00 UTC — M3)
+        ▼
+┌─────────────────────────────────┐
+│  reconstruct_snapshots.py runs  │
+│  - Reads usable IDs from        │
+│    data/m2_audit.json           │
+│  - For each market, fetches     │
+│    full bet history via         │
+│    Manifold /v0/bets API        │
+│  - Calls prob_at_time() to find │
+│    probability at T-7d, T-14d,  │
+│    T-30d before market closed   │
+│  - Writes source='reconstructed'│
+│    rows to market_snapshots.db  │
+│  - Skips already-done markets   │
+│    (idempotent re-runs)         │
+│  - Reports api_error separately │
+│    from no_bets (Fix 3)         │
+└─────────────────────────────────┘
+        │  (Sundays 03:30 UTC — backtest)
+        ▼
+┌─────────────────────────────────┐
+│  backtest_from_snapshots.py     │
+│  - Loads reconstructed rows     │
+│    (source='reconstructed') +   │
+│    joins category from          │
+│    resolved_markets             │
+│  - Runs mean_reversion and      │
+│    probability_bias on each     │
+│    snapshot where outcome known │
+│    (probability_direction skipped│
+│    — volume24h NULL for history)│
+│  - Computes accuracy → weight   │
+│    (same formula as live):      │
+│    acc≥0.60 → 1.0+(acc-0.5)×2  │
+│    acc<0.50 → max(0.5,acc/0.5)  │
+│  - Merge rule per strategy:     │
+│    live ≥10 trades → use live   │
+│    backtest ≥30 → fill gap      │
+│    else → default 1.0           │
+│  - Updates strategy_weights.json│
+│    (backtest source only)       │
+└─────────────────────────────────┘
+        │  (Mondays 07:30 UTC — live weights)
+        ▼
+┌─────────────────────────────────┐
+│  compute_strategy_weights.py    │
+│  - Reads bet_outcomes (live     │
+│    resolved paper trades)       │
+│  - Computes per-strategy        │
+│    direction accuracy           │
+│  - Writes weights +             │
+│    per_strategy_samples to      │
+│    strategy_weights.json        │
+│  - per_strategy_samples is the  │
+│    handoff signal: once ≥10     │
+│    live trades exist for a      │
+│    strategy, live weight wins   │
+│    over backtest on next Sunday │
+│  - Git commits the file         │
+└─────────────────────────────────┘
 ```
 
 ---
@@ -190,7 +266,7 @@ MANIFOLD_API_KEY = os.environ.get("MANIFOLD_API_KEY", "")
 MANIFOLD_API_BASE = "https://api.manifold.markets"
 INITIAL_BALANCE = 1000
 MIN_BET_AMOUNT = 1
-MAX_BET_AMOUNT = 100
+MAX_BET_AMOUNT = 5   # throttled — see comment in file
 MIN_CONFIDENCE = 0.65
 MAX_POSITIONS_PER_CATEGORY = 3
 ```
@@ -508,7 +584,33 @@ Log of every trade the bot has executed. Every record includes `estimated_ev` (t
 #### `data/calibration.db` (gitignored)
 SQLite database with two tables:
 - `resolved_markets` — 1,121+ historical Manifold markets with `probability_close`, `outcome`, `category`
-- `bet_outcomes` — one row per resolved position: `estimated_ev`, `actual_pnl`, `ev_error`, `strategies`
+- `bet_outcomes` — one row per resolved position: `estimated_ev`, `actual_pnl`, `ev_error`, `strategies`, `category`, `era`
+
+#### `data/market_snapshots.db` (gitignored)
+SQLite database with a single `market_snapshots` table. Two row types:
+- `source='live'` — written by `auto_research.py` every hour (~100 rows/run). M1 pipeline. Fields: `market_id`, `question`, `probability`, `volume24h`, `bettors`, `liquidity`, `snapshot_at`.
+- `source='reconstructed'` — written by `reconstruct_snapshots.py` (M3). Fields include `days_before_close` (7/14/30) and `outcome` (YES/NO). These are synthetic snapshots computed from bet history: they represent what the market *looked like* at decision time, not at close.
+
+#### `data/m2_audit.json` (gitignored)
+Output of `audit_resolved_markets.py` (M2). Contains:
+- Quality stats: near-close %, thin market %, category distribution
+- `usable_market_ids` list — the IDs that passed all filters and are worth M3 reconstruction
+- `decision_gate`: GREEN / YELLOW / RED
+
+#### `data/strategy_weights.json` (committed)
+Written by both `compute_strategy_weights.py` (Monday live run) and `backtest_from_snapshots.py` (Sunday backtest run). Schema:
+```json
+{
+  "weights": {"mean_reversion": 1.0, "probability_bias": 1.0, ...},
+  "per_strategy_samples": {"mean_reversion": 6, ...},
+  "generated_at": "...",
+  "sample_count": 6
+}
+```
+`per_strategy_samples` is the handoff field: once a strategy clears 10 live trades, the Monday run promotes it from `source='backtest'` to `source='live'` automatically.
+
+#### `data/backtest_report.json` (gitignored)
+Full output of the most recent `backtest_from_snapshots.py` run. Contains per-strategy accuracy stats, weights computed, merge decisions, and number of snapshots used.
 
 #### `data/calibration_table.json` (committed)
 Crowd bias correction table generated weekly by `analyze_calibration.py`. Loaded by `ai_analyzer.py` at import time and injected into every AI prompt. Key finding: **+18pp overconfidence in the 60-70% probability bucket**.
@@ -541,6 +643,40 @@ This is now handled correctly by family deduplication. They belong to **differen
 ### Current state — Bot at Max Capacity
 
 The bot runs up to 10 open positions. All new trades require AI agreement (schema_version=2). Re-entry on a market with an existing OPEN position is blocked by a live position check in `should_trade_market()` — this guard reads the live portfolio state, not the potentially-stale `existing_position` flag in `market_research.json` (the 2czul2Rync duplicate-bet bug is fixed and regression-tested). Use the smart-swap mechanism to replace underperforming positions when all slots are full.
+
+### ✅ Fixed — Strategy Weights Loop Broken (feedback loop repair, 2026-04-09/10)
+
+**The problem:** Live paper trades take months to resolve. With only 6 resolved trades total (none per strategy), `compute_strategy_weights.py` returned 1.0 for every strategy forever. The bot was flying blind with no signal on what actually worked.
+
+**Three bugs fixed:**
+
+**Fix 1 — DB schema crash on sandbox**: `_fetch_outcomes()` in `weekly_ev_report.py` queried the `category` column without running a migration first. Sandbox DBs created before the column was added crashed with `OperationalError: no such column: category`. Fixed: `_ensure_bet_outcomes_schema()` now runs before any SELECT, adding missing columns silently.
+
+**Fix 2 — M3 not feeding weight loop (architectural gap)**: The M3 reconstruction script implied it would update strategy weights, but `compute_strategy_weights.py` only reads `bet_outcomes` (live trades). Reconstructed snapshots never touched weights. Fixed: `scripts/backtest_from_snapshots.py` is the bridge — it reads `source='reconstructed'` rows from `market_snapshots.db`, runs strategies against them (outcomes known), computes accuracy → weights, and merges with live data using the priority rule above.
+
+**Fix 3 — API failures swallowed as `no_bets`**: `fetch_bets_for_market()` wrapped all HTTP calls in a try/except that silently converted network errors into empty bet lists. A market that returned a 500 error looked identical to a market with no bet history. Fixed: exceptions now propagate; `reconstruct_market()` catches them as `reason="api_error"` so the summary shows separate counters for `api_errors` vs `no_bets`.
+
+**Fix 4 — `per_strategy_samples` never written**: `_compute_weights()` computed per-strategy sample counts internally but only returned the weight scalars. `merge_weights()` in `backtest_from_snapshots.py` read `per_strategy_samples` from `strategy_weights.json` to decide when to promote live over backtest — but since the field was never written, live data could never win. Fixed: `_compute_weights()` now returns `(weights, per_strategy_samples)` and `main()` writes both fields to `strategy_weights.json`.
+
+### ✅ Fixed — M2/M3 Pipeline (2026-04-09/10)
+
+**M2 audit result (first run):**
+- 1,121 resolved markets in corpus
+- 55% near-close (>85% or <15%) — excluded as training signal was already obvious
+- 41% thin markets (<10 bettors) — excluded as crowd too small to trust
+- **267 usable markets** → YELLOW gate (viable, proceed with M3)
+
+**M3 reconstruction result (first run, 267 markets):**
+- 127 snapshot rows written to `market_snapshots.db` (source='reconstructed')
+- 674 windows skipped (`all_windows_empty` — market opened and closed within 30 days, no bet history at T-30/T-14)
+- 0 API errors
+
+**Backtest result:**
+- `mean_reversion`: 0 signals — M2's quality filter removes near-extreme-probability markets which are exactly the ones `mean_reversion` needs (>85% or <15%). Structural incompatibility; can only be evaluated from live `bet_outcomes`.
+- `probability_bias`: 25 samples, **72% accuracy** (18/25 correct). 5 samples short of the 30-sample gate. Weight would be 1.20 (maximum boost) if it cleared. Will clear after next Sunday harvest adds new resolved markets.
+
+**Automated from next Sunday 2026-04-13:**
+M2→M3→backtest runs automatically every Sunday night after the harvest (02:30/03:00/03:30 UTC). No manual intervention needed.
 
 ---
 
