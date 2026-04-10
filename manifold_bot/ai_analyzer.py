@@ -78,49 +78,6 @@ def _build_calibration_note() -> str:
         return ""
 
 
-_STRATEGY_WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "data" / "strategy_weights.json"
-
-
-def _build_performance_note() -> str:
-    """
-    Build a compact prompt block summarising per-strategy reliability weights.
-
-    Tells the AI which statistical strategies have been historically accurate
-    so it can calibrate how much to trust the stat signal when blending.
-
-    Returns empty string if the weights file is absent or has no data yet.
-    """
-    if not _STRATEGY_WEIGHTS_PATH.exists():
-        return ""
-    try:
-        with open(_STRATEGY_WEIGHTS_PATH) as f:
-            data = json.load(f)
-    except Exception:
-        return ""
-
-    weights = data.get("weights", {})
-    sample_count = data.get("sample_count", 0)
-    threshold = data.get("min_samples_threshold", 10)
-
-    if not weights or sample_count < threshold:
-        return ""
-
-    lines = [f"Strategy reliability (from {sample_count} resolved trades):"]
-    for strat, w in sorted(weights.items()):
-        if w >= 1.10:
-            note = "↑ above-average accuracy"
-        elif w <= 0.80:
-            note = "↓ below-average accuracy"
-        else:
-            note = "≈ average accuracy"
-        lines.append(f"  {strat}: weight={w:.2f}  ({note})")
-    lines.append(
-        "Higher-weight strategies have historically called direction correctly more often. "
-        "Give their signal more weight when they agree with your analysis."
-    )
-    return "\n".join(lines)
-
-
 # Built once at import time. Each cron process picks up the latest table.
 _CALIBRATION_NOTE_MAX_LEN = 2000
 try:
@@ -134,10 +91,12 @@ try:
 except (json.JSONDecodeError, KeyError):
     _CALIBRATION_NOTE = ''
 
-try:
-    _PERFORMANCE_NOTE = _build_performance_note()
-except Exception:
-    _PERFORMANCE_NOTE = ''
+# Strategy weights are intentionally NOT injected into the AI prompt.
+# They belong only in the stat-scoring layer (auto_research.py) and the
+# sizing layer (auto_trader.py). Injecting them here would count the same
+# historical reliability signal a third time: once in signal confidence,
+# once in the AI's reasoning, and once in Kelly sizing.
+# See docs/technical_overview.md — "Known architectural issue: double-counting".
 
 # Maximum size for llm_calls.jsonl before rotation (100 MB)
 LLM_LOG_MAX_BYTES = 100 * 1024 * 1024
@@ -181,8 +140,6 @@ Additional context:
 {context}
 
 {calibration_note}
-
-{performance_note}
 
 Respond with this exact JSON structure:
 {{
@@ -477,7 +434,6 @@ def analyze_market(market: Dict) -> Optional[Dict]:
         close_date=close_date,
         context="\n".join(context_parts),
         calibration_note=_CALIBRATION_NOTE,
-        performance_note=_PERFORMANCE_NOTE,
     )
 
     # Try Ollama first (free), then DeepSeek API.

@@ -353,19 +353,12 @@ Crowd calibration (measured over 1,000+ resolved Manifold markets):
 Use these corrections: if a market is at 65%, history says treat it
 as ~47% YES. Adjust your estimated_true_probability accordingly.
 
-Strategy reliability (from N resolved trades):
-  probability_direction: weight=1.00  (≈ average accuracy)
-  mean_reversion: weight=1.00  (≈ average accuracy)
-  ...
-Higher-weight strategies have historically called direction correctly
-more often. Give their signal more weight when they agree.
-
 Is this mispriced? Should we bet YES, NO, or skip?
 ```
 
-The strategy performance note (`_build_performance_note()`) is injected alongside the calibration table. It is gated — returns empty string until `MIN_SAMPLES_PER_STRATEGY = 10` resolved trades exist per strategy, so the prompt stays clean while the system is accumulating data.
+Strategy weights are **not** injected into the AI prompt. They belong only in the stat-scoring layer (`auto_research.py`) and the sizing layer (`auto_trader.py`). Injecting them into the AI would count the same historical reliability signal a third time — the AI should reason independently about whether the market is mispriced.
 
-**⚠ Known architectural issue — double-counting:** Strategy weights currently influence three separate layers: (1) stat signal confidence scaling in `auto_research.py`, (2) the AI prompt via `_build_performance_note()`, and (3) Kelly sizing in `auto_trader.py`. The same historical reliability signal is counted three times. Similarly, crowd calibration data is both injected into the AI prompt (global table) and drives `probability_bias_strategy` — the same prior applied twice. The planned fix is: (a) remove weights from the AI prompt — they belong only in stat/sizing layers; (b) replace the global calibration table with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)` so the AI sees context relevant to the current market, not broad history. This also means moving toward `by_category` strategy weights so the system learns "mean_reversion is reliable in politics but unreliable in crypto" rather than one global number.
+**Remaining calibration double-count (planned fix):** Crowd calibration is still both in the AI prompt (global table) and drives `probability_bias_strategy` independently. The planned fix is to replace the global calibration table in the AI prompt with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)` — so the AI sees what history says about *this kind* of market rather than broad averages. A longer-term improvement is `by_category` strategy weights so the system learns "mean_reversion is reliable in politics but unreliable in crypto" rather than one global scalar.
 
 What it gets back:
 ```json
@@ -688,7 +681,7 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 ## Part 5 — What's Next
 
 **Done:**
-- ✅ AI integration (local Ollama `deepseek-r1:14b`, DeepSeek API fallback)
+- ✅ AI integration (local Ollama `llama3.2:3b`, DeepSeek API fallback)
 - ✅ Volume spike avg fixed (median of fetched markets)
 - ✅ Confidence blending with floor/cap system
 - ✅ Schema versioning + guard (`auto_trader.py` refuses pre-AI research)
@@ -780,12 +773,11 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 - ✅ **`automation/cron_jobs_config.json` gitignored** — OpenClaw background sync regenerates this file on every sync, stomping manually-added entries. Permanently fixed by removing from git tracking.
 - ✅ **Test suite: 210 tests** — 17 new tests across `TestLiquidityThresholdAlignment`, `TestAiTimeoutCooldown`, `TestSwapCheckerLiquidityGate`, new keyword coverage in `TestInferCategory`, and `TestAdaptiveCategoryCapPhaseC` extended with "other" uncap behavior.
 
-**Known architectural issue (planned next):**
+**Remaining architectural issue (planned next):**
 
-**Double-counting in stat/AI/sizing layers** — Strategy weights currently influence three layers: (1) stat signal confidence in research, (2) AI prompt via `_build_performance_note()`, (3) Kelly sizing. Same historical signal triple-counted. Crowd calibration is also both in the AI prompt and in `probability_bias_strategy`. Planned fix:
-- Remove weights from AI prompt — reasoning layer should be independent of historical stat reliability.
-- Replace global calibration table in AI prompt with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)`.
-- Extend `compute_strategy_weights.py` to emit `by_category` weights with runtime fallback: `weight(strategy, category)` → `weight(strategy)` → `1.0`.
+- ✅ Strategy weights removed from AI prompt — weights now only in stat-scoring (auto_research.py) and sizing (auto_trader.py) layers.
+- ⏳ Crowd calibration still global — AI sees a broad table; planned fix is query-specific prior `(category, probability_bucket, crowd_bias, n_samples)`.
+- ⏳ Strategy weights still global — planned `by_category` weights: `weight(strategy, category)` → `weight(strategy)` → `1.0` fallback.
 
 **P3 — News fetcher** — structured news API integration as a `fundamental` family signal (`manifold_bot/news_fetcher.py`); keywords extracted from market question, queries NewsAPI.org free tier.
 

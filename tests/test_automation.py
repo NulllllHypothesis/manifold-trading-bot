@@ -174,10 +174,10 @@ def main():
     if passed == total:
         print("\n🎉 ALL TESTS PASSED! Ready for cron job setup.")
         print("\nNext steps:")
-        print("1. Review the cron job config: automation/cron_jobs_config.json")
-        print("2. Create cron jobs: openclaw cron add --file automation/cron_jobs_config.json")
-        print("3. Verify: openclaw cron list")
-        print("4. Monitor: tail -f ~/.openclaw/logs/gateway.log")
+        print("1. Print the crontab block: python3 automation/setup_cron_jobs.py")
+        print("2. Paste into crontab: crontab -e  (on the server)")
+        print("3. Verify: crontab -l")
+        print("4. Monitor: tail -f /tmp/research.log")
     else:
         print("\n⚠️  SOME TESTS FAILED. Review errors before setting up cron jobs.")
 

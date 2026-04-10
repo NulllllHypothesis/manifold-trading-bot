@@ -27,8 +27,7 @@ manifold-trading-bot/
 │   ├── auto_trader.py           # Automated trade executor with risk controls
 │   ├── daily_summary.py         # Daily P&L report generator
 │   ├── send_telegram.py         # Telegram delivery
-│   ├── setup_cron_jobs.py       # Utility to (re)create OpenClaw cron jobs
-│   └── cron_jobs_config.json    # Cron job definitions
+│   └── setup_cron_jobs.py       # Prints OS crontab block — paste into crontab -e on the server
 │
 ├── manifold_bot/                # Core Python package
 │   ├── manifold_api.py          # Manifold Markets API client
@@ -38,9 +37,9 @@ manifold-trading-bot/
 │   ├── config.py                # API keys and trading parameters
 │   └── main.py                  # Interactive CLI
 │
-├── tests/                       # Test suite (114 tests)
-│   ├── test_strategies.py       # 58 unit tests (strategies, trader, AI, phases B/C)
-│   └── test_calibration.py      # 56 unit tests (calibration pipeline, weights)
+├── tests/                       # Test suite (210 tests)
+│   ├── test_strategies.py       # 75 unit tests (strategies, trader, AI, phases B/C)
+│   └── test_calibration.py      # 122 unit tests (calibration pipeline, weights)
 │
 ├── scripts/                     # Maintenance and pipeline scripts
 │   ├── resolve_positions.py     # Hourly position resolution (polls Manifold API, frees slots)
