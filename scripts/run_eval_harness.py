@@ -35,9 +35,14 @@ A fine-tuned model is promoted only if:
 
 Predictions file format
 -----------------------
-One JSON per line:  {"market_id": "...", "prediction": 0.37}
-market_ids must be a superset of the test split in training_dataset.jsonl.
-Missing market_ids get a default prediction of 0.5.
+One JSON per line:  {"example_id": "...", "prediction": 0.37}
+example_id is the stable per-snapshot key emitted by build_training_dataset.py:
+  format: "{market_id}__{source}__{days_before_close}"
+  e.g.  "abc123__reconstructed__7"
+Missing example_ids get a default prediction of 0.5.
+
+Do NOT key by market_id — the same market can appear at T-7, T-14, and T-30,
+and all three snapshots must be scored independently.
 
 Usage
 -----
@@ -95,7 +100,7 @@ def load_dataset(path: str, split: str = "test") -> list[dict]:
 
 
 def load_predictions(path: str) -> dict[str, float]:
-    """Load a predictions file → {market_id: prediction}."""
+    """Load a predictions file → {example_id: prediction}."""
     if not path or not os.path.exists(path):
         return {}
     preds = {}
@@ -105,7 +110,7 @@ def load_predictions(path: str) -> dict[str, float]:
             if not line:
                 continue
             obj = json.loads(line)
-            preds[obj["market_id"]] = float(obj["prediction"])
+            preds[obj["example_id"]] = float(obj["prediction"])
     return preds
 
 
@@ -181,7 +186,7 @@ def calibration_curve(predictions: list[float], true_probs: list[float],
 
 def _predictions_for(examples: list[dict], pred_map: dict[str, float],
                      default: float = 0.5) -> list[float]:
-    return [pred_map.get(ex["market_id"], default) for ex in examples]
+    return [pred_map.get(ex["example_id"], default) for ex in examples]
 
 
 def _random_predictions(examples: list[dict], seed: int = _RANDOM_SEED) -> list[float]:

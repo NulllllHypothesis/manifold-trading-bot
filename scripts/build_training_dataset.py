@@ -186,9 +186,12 @@ def load_examples(
         if min_bettors and bettors is not None and bettors < min_bettors:
             continue
 
-        # Skip near-close snapshots from the live logger (days_before_close=0 or None
-        # for live rows means the market was already at/near resolution — same convergence
-        # problem as using probability_close. Keep only explicit decision-time windows.
+        # Live snapshots are skipped when days_before_close is None or 0.
+        # The live logger currently writes days_before_close=None for every row
+        # (auto_research.py does not compute it at snapshot time). Until the logger
+        # is updated to compute days_before_close from the market's closeTime, live
+        # rows with no explicit decision-time window cannot safely be included —
+        # near-close prices converge toward the outcome and would inflate accuracy.
         if source == "live" and (days_before_close is None or days_before_close < 1):
             continue
 
@@ -196,11 +199,17 @@ def load_examples(
         true_prob = 1.0 if outcome == "YES" else 0.0
         split     = _split(market_id)
 
+        # Stable per-snapshot identity. market_id is not unique when the same market
+        # appears at multiple decision-time windows (T-7/T-14/T-30). M5 predictions
+        # files must key by example_id so each snapshot is scored independently.
+        example_id = f"{market_id}__{source}__{days_before_close}"
+
         prompt     = _build_prompt(question or "", category, probability,
                                    days_before_close or 7, bettors)
         completion = _build_completion(true_prob)
 
         examples.append({
+            "example_id":       example_id,
             "market_id":        market_id,
             "question":         question or "",
             "category":         category,

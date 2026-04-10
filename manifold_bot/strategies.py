@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # calibration data category labels always match live-trading labels.
 
 _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
-    'crypto':    ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'blockchain',
+    'crypto':    ['bitcoin', 'btc', 'ethereum', 'crypto', 'blockchain',
                   'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin',
                   'doge', 'dogecoin', 'xrp', 'ripple'],
     'politics':  ['trump', 'biden', 'election', 'congress', 'senate', 'president',
