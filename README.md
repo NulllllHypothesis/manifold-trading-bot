@@ -37,9 +37,10 @@ manifold-trading-bot/
 │   ├── config.py                # API keys and trading parameters
 │   └── main.py                  # Interactive CLI
 │
-├── tests/                       # Test suite (215 tests)
+├── tests/                       # Test suite (296 tests)
 │   ├── test_strategies.py       # 81 unit tests (strategies, trader, AI, phases B/C)
-│   └── test_calibration.py      # 134 unit tests (calibration pipeline, weights)
+│   ├── test_calibration.py      # 136 unit tests (calibration pipeline, weights, by_category)
+│   └── test_swap.py             # 66 unit tests (position swap, EV regression)
 │
 ├── scripts/                     # Maintenance and pipeline scripts
 │   ├── resolve_positions.py     # Hourly position resolution (polls Manifold API, frees slots)
@@ -170,7 +171,7 @@ Six strategies across four signal families. At most one directional signal per f
 
 After statistical scoring, the top candidates are sent to a local AI (`llama3.2:3b` via Ollama, DeepSeek API as fallback). The AI reads the actual market question and estimates the true probability. Statistical and AI confidence are blended — AI can boost by up to 10pp or penalise down to 40% of the stat score.
 
-**Kelly Criterion** — position sizing scales with the AI's estimated edge. Half-Kelly used to reduce variance, further scaled by a per-strategy reliability weight (0.5–1.2) updated weekly from resolved trade outcomes. Falls back to confidence-scaled sizing when no AI estimate is available.
+**Kelly Criterion** — position sizing scales with the AI's estimated edge. Half-Kelly used to reduce variance, further scaled by a per-strategy reliability weight (0.5–1.2) updated weekly from resolved trade outcomes. Weights are looked up per `(strategy, category)` first, falling back to the global per-strategy weight, then to 1.0. Falls back to confidence-scaled sizing when no AI estimate is available.
 
 ## Development Workflow
 
@@ -194,7 +195,8 @@ git push origin feature/your-feature
 
 ```bash
 python3 tests/test_strategies.py    # strategies, trader, AI, phases B/C (81 tests)
-python3 tests/test_calibration.py   # calibration pipeline, weights (134 tests)
+python3 tests/test_calibration.py   # calibration pipeline, weights, by_category (136 tests)
+python3 tests/test_swap.py          # position swap, EV regression (66 tests)
 ```
 
 The pre-push git hook runs these automatically before every `git push` (when dependencies are installed).

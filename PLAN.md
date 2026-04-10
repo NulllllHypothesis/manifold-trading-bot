@@ -125,7 +125,7 @@ Pick whatever interests you. Create a branch, build it, open a PR.
 
 ### ✅ AI Integration — DONE (branch: feature/ai-analyzer, PR #2)
 
-- [x] `manifold_bot/ai_analyzer.py` — calls local Ollama (`deepseek-r1:14b`) first, falls back to DeepSeek API
+- [x] `manifold_bot/ai_analyzer.py` — calls local Ollama (`llama3.2:3b`) first, falls back to DeepSeek API
   - Returns: `{ "recommendation": "YES/NO/SKIP", "confidence": 0.0-1.0, "estimated_true_probability": 0.0-1.0, "reasoning": "...", "risk_factors": "..." }`
 - [x] Wired into `auto_research.py` — AI runs on top 3 candidates per hourly cycle (`_AI_CANDIDATE_COUNT = 3`)
   - If AI agrees AND stat ≥ 0.65: `0.4 × stat + 0.6 × AI`, capped at `stat + 0.10` (max 10pp boost)
@@ -133,7 +133,7 @@ Pick whatever interests you. Create a branch, build it, open a PR.
   - If AI disagrees: confidence scaled down by `0.4 + (1 - ai_conf) × 0.4` — certain AI disagreement keeps only 40%
 - [x] Fixed volume spike `avg_volume` — now uses **median** of fetched markets (mean was skewed by outliers)
 - [x] 24 tests in `tests/test_ai.py` — all passing (includes full blending logic coverage)
-- [x] Ollama confirmed running on server: `deepseek-r1:14b` loaded, ~60s/response on CPU (capped to 3 markets — worst case 270s < 300s cron limit)
+- [x] Ollama confirmed running on server: `llama3.2:3b` loaded, ~5-10s/response on CPU (capped to 3 markets — worst case ~30s well within 300s cron limit)
 - [x] `MIN_CONFIDENCE` moved to `config.py` — single source of truth for trading threshold across trader + researcher
 - [x] DeepSeek API fallback: explicit `delay=2` at call site, `per_market_timeout=90` to prevent hung calls
 - [x] Schema version written dynamically — v2 only if AI pass completed; v1 if aborted (blocks trading)
@@ -329,11 +329,10 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
 - [x] `data/strategy_weights.json` — committed; all 1.0 right now (0 post-fix resolutions yet); auto-updates once trades accumulate
 - [x] `automation/auto_research.py` — loads weights once per run; applies to each raw signal's base confidence before family dedup; clamped to [0.0, 1.0]
 
-**Phase D — Self-performance note in AI prompt**
+**Phase D — Self-performance note in AI prompt — REMOVED (2026-04-10)**
 
-- [x] `manifold_bot/ai_analyzer.py` — `_build_performance_note()` reads `strategy_weights.json`; formats compact prompt block; injected into `ANALYSIS_PROMPT` alongside calibration table
-  - Gated: returns empty string if sample count < `MIN_SAMPLES_PER_STRATEGY` (no noise while accumulating)
-  - Degrades gracefully if file absent
+- [x] ~~`_build_performance_note()`~~ removed from `ai_analyzer.py`. Caused triple-counting: strategy weights already applied in stat confidence scaling (`auto_research.py`) and Kelly sizing (`auto_trader.py`). Telling the AI "mean_reversion has 56% accuracy" adds no independent signal — it just biases the same prior the stat layer already acted on.
+- Replaced by: `_build_query_calibration_note(question, probability)` — infers category from the question text, looks up the `(category, bucket)` cell in `calibration_table.json`, returns a single-sentence prior: "Politics markets in the 60-70% bucket resolved YES 54% of the time (n=142, bias=+6.2pp)." Tells the AI what to expect from THIS type of market — directly actionable, not historical noise.
 
 > Cron registered: `compute_strategy_weights.py` — Mondays 07:30 UTC (live weights). `backtest_from_snapshots.py` — Sundays 03:30 UTC (backtest fills gaps). Both write to `data/strategy_weights.json`.
 
@@ -358,11 +357,30 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
 - **Decision gate result:** Weights did NOT shift from 1.0 this run (5 samples short). Re-evaluate after 2026-04-13 harvest.
 - Automated the Sunday M2→M3→backtest chain (02:30/03:00/03:30 UTC crontab).
 
-### Session 3 (next, after 2026-04-13 harvest):
+### ✅ Session 3 (2026-04-10): Phase B+C + Category Architecture — DONE
 
-- If `probability_bias` clears 30-sample gate → weight becomes 1.20 automatically → restore `MAX_BET_AMOUNT` to $25
-- If still below gate → investigate whether M3 needs more resolved markets (harvest again, wait one more week)
-- P3 (news fetcher) or M4 (dataset formatter) can start in parallel — neither blocks the weight decision
+- Phase B: dynamic Kelly scaling from strategy weights (`kelly_fraction = 0.5 × weight`)
+- Phase C: per-category accuracy → adaptive caps (cap → 1 when accuracy < 50% with ≥8 samples)
+- Category single-source-of-truth: `_infer_market_category()` in `strategies.py` canonical; `harvest_resolved.py` imports alias
+- "other" category uncapped: `_effective_category_cap("other")` returns `max_positions`
+
+### ✅ Session 4 (2026-04-10): Category Fixes + Double-Counting Documented — DONE
+
+- Fixed category data flow in Phase C (snapshot isolation, correct category propagation)
+- Word-boundary matching in `_infer_market_category()` to avoid false matches ("Windows" ≠ "win")
+- Documented double-counting of strategy weights across stat/AI/Kelly layers
+- 210 tests passing
+
+### ✅ Session 5 (2026-04-10): Double-Counting Fix + by_category Weights — DONE
+
+- Removed `_build_performance_note()` from AI prompt — weights belong in stat/sizing layers only
+- Added `_build_query_calibration_note(question, probability)`: query-specific prior looks up `(category, bucket)` cell, falls back to global
+- `compute_strategy_weights.py` now emits `by_category` weights; fallback chain: `by_category[cat][strat]` → `global[strat]` → `1.0`
+- `_get_strategy_weight(strategies, category)` rewritten with `max()` generator (fixes silent suppression of penalty weights < 1.0)
+- Trade log records category-inferred weight at trade time (accurate audit)
+- Fixed bias direction wording: positive → "overestimates", negative → "underestimates", zero → "well calibrated"
+- Fixed `test_swap.py` 8 pre-existing failures: added `liquidity` to helper, amounts fixed to `MAX_BET_AMOUNT`
+- 296 tests total (81 test_strategies + 136 test_calibration + 66 test_swap + 7 test_manifold + 6 test_automation)
 
 ---
 
@@ -554,7 +572,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Calibration & feedback loop | ✅ Done | Harvest 1,121 markets → bias table → AI prompt injection → bet_outcomes → weekly EV report |
 | Smart position swap | ✅ Done | EV-based swap with Telegram approval — merged PR #9 |
 | Signal family architecture | ✅ Done | momentum/contrarian/fundamental/filter; deduplication; volume_spike_priority as float filter |
-| Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 122 test_calibration + 58 test_strategies = 180 tests |
+| Code quality (candidate count, priority_boost, test_manifold, duplicate-bet guard) | ✅ Done | 136 test_calibration + 81 test_strategies + 66 test_swap = 283 tests |
 | Telegram bot commands | ✅ Done | real Bot API; /portfolio /positions /scan /autotrader on/off; no duplicate sends; positions show real titles |
 | Auto-notify on resolution | ✅ Done | `_notify_resolution()` in `paper_trader.py`; fires on every resolution; never blocks |
 | /autotrader on/off | ✅ Done | flag file in `auto_trader.py`; telegram handlers; two OpenClaw skills |
@@ -572,6 +590,12 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | M3 — Reconstruct decision-time snapshots | ✅ Done | 127 rows in market_snapshots.db; api_error vs no_bets fix (2026-04-09) |
 | Offline backtest pipeline | ✅ Done | backtest_from_snapshots.py; probability_bias 72%/25 samples; automated Sunday chain (2026-04-10) |
 | per_strategy_samples in strategy_weights.json | ✅ Done | live-over-backtest handoff wired (2026-04-10) |
+| Phase D removal (weights from AI prompt) | ✅ Done | `_build_performance_note()` removed; eliminates triple-counting (2026-04-10) |
+| Query-specific calibration prior | ✅ Done | `_build_query_calibration_note()` replaces global 10-row table in AI prompt (2026-04-10) |
+| by_category strategy weights | ✅ Done | `compute_strategy_weights.py` emits `by_category`; fallback chain in `auto_research.py` + `auto_trader.py` (2026-04-10) |
+| test_swap.py pre-existing failures | ✅ Done | liquidity gate + MAX_BET_AMOUNT fix; all 66 passing (2026-04-10) |
+| Bias direction wording in AI prompt | ✅ Done | positive/negative/zero branches in `_build_query_calibration_note()` (2026-04-10) |
+| Category-aware trade log | ✅ Done | `strategy_weight_at_trade_time` now uses category-inferred weight (2026-04-10) |
 | News fetcher | 🟡 P3 | NewsAPI.org free tier; fundamental family signal |
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
 | Web dashboard | 🟢 P5 | convenience only |

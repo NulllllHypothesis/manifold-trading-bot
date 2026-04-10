@@ -164,8 +164,9 @@ manifold-trading-bot/
 │   └── category_accuracy.json   # per-category direction accuracy
 │
 ├── tests/
-│   ├── test_strategies.py       # 58 unit tests (strategies, trader, AI, phases B/C)
-│   └── test_calibration.py      # 56 unit tests (calibration pipeline, weights)
+│   ├── test_strategies.py       # 81 unit tests (strategies, trader, AI, phases B/C)
+│   ├── test_calibration.py      # 136 unit tests (calibration pipeline, weights, by_category)
+│   └── test_swap.py             # 66 unit tests (position swap, EV regression)
 │
 ├── docs/
 │   ├── AUTOMATION_README.md     # this file

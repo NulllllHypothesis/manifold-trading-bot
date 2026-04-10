@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-10 (architecture consistency pass: liquidity alignment, AI cooldown, category inference single-source-of-truth, "other" category uncapping)* — 122 tests in test_calibration.py, 75 in test_strategies.py.
+*Last updated: 2026-04-10 (sessions 4–5: category inference single-source-of-truth, "other" uncapping, double-counting fixes, by_category strategy weights, query-specific calibration prior, test_swap.py fixes)* — 136 tests in test_calibration.py, 81 in test_strategies.py, 66 in test_swap.py (296 total).
 
 ---
 
