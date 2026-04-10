@@ -222,11 +222,18 @@ These were identified by analyzing all 439 Telegram messages (Mar 28-30).
 
 | Layer | Script | Schedule | Output |
 |---|---|---|---|
-| Market research | `automation/auto_research.py` | Every hour at :00 UTC | `market_research.json` |
-| Trade execution | `automation/auto_trader.py` | Every hour at :15 UTC | Updates `manifold_bot/paper_trading_state.json`, `auto_trades.json` |
-| Daily report | `automation/daily_summary.py` | Daily at 19:00 UTC | Telegram message |
+| Market research | `automation/auto_research.py` | Hourly :00 UTC | `market_research.json` |
+| Position resolution | `scripts/resolve_positions.py` | Hourly :10 UTC | updates state, Telegram if resolved |
+| Trade execution | `automation/auto_trader.py` | Hourly :20 UTC | updates `paper_trading_state.json` |
+| Daily report | `automation/daily_summary.py` | Daily 19:00 UTC | Telegram message |
+| Calibration harvest | `scripts/harvest_resolved.py` + `analyze_calibration.py` | Sundays 02:00 UTC | `data/calibration.db`, `calibration_table.json` |
+| M2 re-audit | `scripts/audit_resolved_markets.py` | Sundays 02:30 UTC | `data/m2_audit.json` |
+| M3 reconstruction | `scripts/reconstruct_snapshots.py` | Sundays 03:00 UTC | `data/market_snapshots.db` (reconstructed rows) |
+| Backtest weights | `scripts/backtest_from_snapshots.py` | Sundays 03:30 UTC | `data/strategy_weights.json` (backtest-sourced) |
+| EV accuracy report | `scripts/weekly_ev_report.py --telegram` | Mondays 07:00 UTC | Telegram message |
+| Strategy weights | `scripts/compute_strategy_weights.py` | Mondays 07:30 UTC | `data/strategy_weights.json` (live-sourced), git commit |
 
-Risk parameters (in auto_trader.py): max 5 positions, 10% per trade, 65% min confidence, 6h cooldown.
+Risk parameters: max 10 positions, max 3 per category, 65% min confidence, MAX_BET_AMOUNT=$5 (throttled — restore to $25 once strategy weights diverge from 1.0).
 
 ## Beads Tracking
 

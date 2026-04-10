@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-04-09T11:35:42.867088",
+  "created_at": "2026-04-09T19:25:06.127604",
   "jobs": {
     "market-research-hourly": {
       "name": "Manifold Market Research",
@@ -114,6 +114,72 @@
         "channel": "telegram",
         "to": "-5240775171",
         "bestEffort": true
+      },
+      "enabled": true
+    },
+    "weekly-m2-audit": {
+      "name": "Weekly M2 Re-audit",
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 2 * * 0",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/audit_resolved_markets.py --quiet"
+        ],
+        "timeoutSeconds": 60
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true
+    },
+    "weekly-m3-reconstruct": {
+      "name": "Weekly M3 Snapshot Reconstruction",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * 0",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/reconstruct_snapshots.py"
+        ],
+        "timeoutSeconds": 600
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true
+    },
+    "weekly-backtest-weights": {
+      "name": "Weekly Backtest → Strategy Weights",
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 3 * * 0",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "exec",
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /home/hackathon/.openclaw/workspace && python3 scripts/backtest_from_snapshots.py"
+        ],
+        "timeoutSeconds": 120
+      },
+      "sessionTarget": "isolated",
+      "delivery": {
+        "mode": "none"
       },
       "enabled": true
     },
