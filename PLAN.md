@@ -486,12 +486,12 @@ Bridges reconstructed snapshots → strategy weights. Without this, M3 data neve
 - [x] First backtest result: `probability_bias` 72% accuracy / 25 samples (5 short of gate — will clear after 2026-04-13 harvest)
 - [x] Automated: runs every Sunday 03:30 UTC after M3
 
-#### 🟡 M4 — Dataset formatter
+#### ✅ M4 — Dataset formatter (done 2026-04-10)
 
-- [ ] `scripts/build_training_dataset.py` — joins `market_snapshots.db` + `resolved_markets` into training examples
-- [ ] Input fields: question, category, crowd_prob_at_snapshot, days_to_close, unique_bettors, liquidity
-- [ ] Target: `estimated_true_probability` (float) + derived `direction` (YES/NO/SKIP based on edge vs threshold) + short rationale template
-- [ ] Train for probability estimation, not YES/NO classification — binary cross-entropy against resolution IS probability calibration training
+- [x] `scripts/build_training_dataset.py` — joins M3 reconstructed snapshots + resolved_markets → training JSONL
+- [x] Input fields: question, category, crowd_prob_at_snapshot, days_to_close, unique_bettors, liquidity
+- [x] Target: `true_probability` (1.0/0.0) + `prompt`/`completion` for M6 LoRA
+- [x] 127 examples (T-7/14/30 decision-time only, no near-close leakage); 95 train / 24 val / 8 test; output: `data/training_dataset.jsonl`
 
 #### 🔴 M5 — Eval harness (required before trusting any fine-tuned model)
 
