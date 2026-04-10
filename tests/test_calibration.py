@@ -598,6 +598,36 @@ class TestBuildQueryCalibrationNote(unittest.TestCase):
             result = _build_query_calibration_note("Will this happen?", 0.65)
         self.assertIn("Suggested adjustment", result)
 
+    def test_positive_bias_says_overestimates(self):
+        """Positive bias → 'crowd overestimates YES'."""
+        data = {
+            "by_category_bucket": [],
+            "buckets": [{
+                "bucket_low": 0.60, "bucket_high": 0.70,
+                "crowd_midpoint": 0.65, "actual_yes_rate": 0.47,
+                "sample_size": 120, "bias": 0.18, "reliable": True,
+            }],
+        }
+        with self._patch_data(data):
+            result = _build_query_calibration_note("Will this happen?", 0.65)
+        self.assertIn("overestimates", result)
+        self.assertNotIn("underestimates", result)
+
+    def test_negative_bias_says_underestimates(self):
+        """Negative bias → 'crowd underestimates YES', no contradictory 'overestimates'."""
+        data = {
+            "by_category_bucket": [],
+            "buckets": [{
+                "bucket_low": 0.90, "bucket_high": 1.00,
+                "crowd_midpoint": 0.95, "actual_yes_rate": 1.00,
+                "sample_size": 30, "bias": -0.05, "reliable": True,
+            }],
+        }
+        with self._patch_data(data):
+            result = _build_query_calibration_note("Will this happen?", 0.95)
+        self.assertIn("underestimates", result)
+        self.assertNotIn("overestimates", result)
+
 
 def _cat_outcome(rec, resolution, category):
     return {

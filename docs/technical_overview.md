@@ -333,7 +333,7 @@ Composite score: `confidence + priority_boost × 0.15`. Top 3 by composite score
 **What it does:** Sends a market question to a local AI model and asks whether it's mispriced. Also logs every LLM call to `logs/llm_calls.jsonl` for future distillation/training.
 
 Two backends, tried in order:
-1. **Ollama** at `localhost:11434` — runs `deepseek-r1:14b` locally on the server. Free, no API cost, ~70–80 seconds per market on CPU.
+1. **Ollama** at `localhost:11434` — runs `llama3.2:3b` locally on the server. Free, no API cost, ~5–10 seconds per market on CPU.
 2. **DeepSeek API** — fallback only if Ollama is unreachable. Uses `DEEPSEEK_API_KEY` already on the server.
 
 What it sends to the AI (simplified):
@@ -344,21 +344,18 @@ Volume: $5,200
 Liquidity: $1,400
 Close date: 2027-01-01
 
-Crowd calibration (measured over 1,000+ resolved Manifold markets):
-  Bucket      Crowd says  Actual YES rate  Bias
-    0– 10%     5%          1%            +4pp
-   ...
-   60– 70%    65%         47%            +18pp ← MOST BIASED
-   ...
-Use these corrections: if a market is at 65%, history says treat it
-as ~47% YES. Adjust your estimated_true_probability accordingly.
+Historical prior for this market (category: politics, 70–80% bucket):
+  Past Manifold markets like this: 48 resolved
+  Crowd said ~75%, actually resolved YES 68.2% → crowd overestimates YES by +6.8pp
+  Suggested adjustment: treat the current 72% as closer to 65.2%.
+  Adjust your estimated_true_probability accordingly before deciding YES/NO/SKIP.
 
 Is this mispriced? Should we bet YES, NO, or skip?
 ```
 
-Strategy weights are **not** injected into the AI prompt. They belong only in the stat-scoring layer (`auto_research.py`) and the sizing layer (`auto_trader.py`). Injecting them into the AI would count the same historical reliability signal a third time — the AI should reason independently about whether the market is mispriced.
+Strategy weights are **not** injected into the AI prompt. They belong only in the stat-scoring layer (`auto_research.py`) and the sizing layer (`auto_trader.py`). Injecting them would count the same historical reliability signal a third time — the AI should reason independently about whether the market is mispriced.
 
-**Remaining calibration double-count (planned fix):** Crowd calibration is still both in the AI prompt (global table) and drives `probability_bias_strategy` independently. The planned fix is to replace the global calibration table in the AI prompt with a query-specific prior `(category, probability_bucket, crowd_bias, n_samples)` — so the AI sees what history says about *this kind* of market rather than broad averages. A longer-term improvement is `by_category` strategy weights so the system learns "mean_reversion is reliable in politics but unreliable in crypto" rather than one global scalar.
+The AI now receives a **query-specific calibration prior** (`_build_query_calibration_note()`) instead of the old global 10-row table. Lookup order: `(category, probability_bucket)` cell with `n ≥ 15` → global bucket → no note. This eliminates the old calibration double-count: the AI sees only what history says about *this kind* of market, not a broad table that mostly describes unrelated markets. The `probability_bias_strategy` in `strategies.py` still reads the same calibration data independently — those are two separate uses of the same source, not double-counting.
 
 What it gets back:
 ```json
@@ -750,7 +747,7 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 
 - ✅ **Category exposure caps** — `MAX_POSITIONS_PER_CATEGORY=3` in `config.py`; enforced in `should_trade_market()`; `category` stored on every trade record; `🗂 BY CATEGORY` breakdown in daily summary
 - ✅ **Weighted scoring Phase A** — `compute_strategy_weights.py` reads `bet_outcomes` (post_ev_fix era), computes direction accuracy per strategy, writes `data/strategy_weights.json`; weights (0.5–1.2) applied to raw signal confidence before family dedup in `auto_research.py`. Bug fixed: strategies stored as JSON array — now parsed correctly with `_parse_strategies()`. All 6 active strategies covered.
-- ✅ **Weighted scoring Phase D** — `_build_performance_note()` in `ai_analyzer.py`; injected into `ANALYSIS_PROMPT` alongside calibration table; gated until ≥10 samples per strategy
+- ~~**Weighted scoring Phase D**~~ — `_build_performance_note()` was removed (session 4). Injecting strategy weights into the AI prompt was double-counting: the weights already scale stat confidence in `auto_research.py` and Kelly fraction in `auto_trader.py`. Removed to fix the triple-count.
 - ✅ **Telegram dedup fix** — `telegram_bot.py:main()` no longer prints to stdout (OpenClaw was also forwarding stdout, causing every reply to arrive twice)
 - ✅ **Positions show real titles** — `/positions` does 3-tier lookup: stored `question` field → research data → Manifold API fetch for old trades
 

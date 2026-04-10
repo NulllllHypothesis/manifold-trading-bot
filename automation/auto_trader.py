@@ -426,6 +426,9 @@ class AutoTrader:
 
             # Log trade
             strategies = recommendation.get('strategies', [])
+            trade_category = recommendation.get('category') or _infer_market_category(
+                recommendation.get('question', '')
+            )
             self.log_trade({
                 'market_id': market_id,
                 'question': recommendation['question'],
@@ -436,7 +439,7 @@ class AutoTrader:
                 'estimated_ev': estimated_ev,
                 'timestamp': datetime.now().isoformat(),
                 'strategies': strategies,
-                'strategy_weight_at_trade_time': self._get_strategy_weight(strategies),
+                'strategy_weight_at_trade_time': self._get_strategy_weight(strategies, trade_category),
                 'reasoning': reasoning,
                 'balance_after': self.trader.balance
             })

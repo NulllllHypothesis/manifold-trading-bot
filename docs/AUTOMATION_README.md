@@ -139,7 +139,7 @@ manifold-trading-bot/
 │   ├── auto_trader.py
 │   ├── daily_summary.py
 │   ├── send_telegram.py
-│   └── cron_jobs_config.json
+│   └── setup_cron_jobs.py
 │
 ├── manifold_bot/        # Core Python package
 │   ├── manifold_api.py

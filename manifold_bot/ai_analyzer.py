@@ -98,10 +98,17 @@ def _build_query_calibration_note(question: str, probability: float) -> str:
     adj     = round(prob_pct * 100 - bias, 1)
     source  = f"category: {category}" if "category" in cell else "global average"
 
+    if bias > 0:
+        bias_direction = f"crowd overestimates YES by {bias:+.1f}pp"
+    elif bias < 0:
+        bias_direction = f"crowd underestimates YES by {abs(bias):.1f}pp"
+    else:
+        bias_direction = "crowd is well calibrated (0pp bias)"
+
     lines = [
         f"Historical prior for this market ({source}, {int(bucket_low*100)}–{int(bucket_high*100)}% bucket):",
         f"  Past Manifold markets like this: {n} resolved",
-        f"  Crowd said ~{crowd:.0f}%, actually resolved YES {yes_pct:.1f}% → crowd overestimates by {bias:+.1f}pp",
+        f"  Crowd said ~{crowd:.0f}%, actually resolved YES {yes_pct:.1f}% → {bias_direction}",
         f"  Suggested adjustment: treat the current {prob_pct*100:.0f}% as closer to {adj:.1f}%.",
         f"  Adjust your estimated_true_probability accordingly before deciding YES/NO/SKIP.",
     ]
