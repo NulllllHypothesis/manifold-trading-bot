@@ -65,14 +65,37 @@ REPORT_PATH    = os.path.join(ROOT_DIR, "data", "simulation_report.json")
 # Minimum samples for simulation weight to override the 1.0 default.
 SIM_MIN_SAMPLES = 25
 
-# Strategies to simulate — ones whose signals can be computed from resolved_markets.
+# Strategies to simulate — all three are run and reported for visibility.
 SIM_STRATEGIES = [
     "probability_direction",
     "mean_reversion",
     "probability_bias",
 ]
 
-# Fake far-future close time so mean_reversion's near-close guard doesn't fire.
+# Strategies reported but NOT applied to strategy_weights.json.
+#
+# probability_direction and mean_reversion both have live guards that filter
+# markets based on recency, volume, and time-to-close. The simulation bypasses
+# those guards (volume24Hours=10, lastBetTime=None, closeTime=far future) because
+# resolved_markets doesn't carry that data — but that means we're measuring
+# "what did the market know at near-close" rather than "how would the strategy
+# behave at decision time."
+#
+# Concretely:
+#   probability_direction 89.7%: final price converged to outcome — trivially high
+#   mean_reversion        1.7%:  fighting the converged final price — trivially low
+#
+# These numbers are measurement artifacts, not strategy accuracy. Applying them
+# as Kelly inputs would be a mistake. They need decision-time snapshot data
+# (M3 → backtest_from_snapshots.py) to be evaluated correctly.
+#
+# probability_bias has no recency/volume guards. Its signal (bucket-level crowd
+# overestimation) is equally valid at close time and at decision time, so it IS
+# safe to apply from this simulation.
+_INFORMATIONAL_ONLY = frozenset({"probability_direction", "mean_reversion"})
+
+# Fake far-future close time so mean_reversion's near-close guard doesn't fire
+# when running in informational/display mode.
 _FAR_FUTURE_MS = int((datetime.now(timezone.utc) + timedelta(days=365)).timestamp() * 1000)
 
 
@@ -170,9 +193,15 @@ def _accuracy_to_weight(accuracy: float) -> float:
 
 
 def compute_sim_weights(sim_results: dict[str, dict]) -> dict[str, float]:
-    """Convert simulation accuracy to weight scalars for strategies that cleared SIM_MIN_SAMPLES."""
+    """
+    Convert simulation accuracy to weight scalars for strategies that:
+    1. Cleared SIM_MIN_SAMPLES, and
+    2. Are not in _INFORMATIONAL_ONLY (guards bypassed → numbers are artifacts)
+    """
     weights = {}
     for strat, stats in sim_results.items():
+        if strat in _INFORMATIONAL_ONLY:
+            continue
         n = stats["total"]
         acc = stats["accuracy"]
         if n < SIM_MIN_SAMPLES or acc is None:
@@ -257,7 +286,10 @@ def main(dry_run: bool = False, min_bettors: int = 3) -> None:
         n    = stats["total"]
         acc  = stats["accuracy"]
         w    = sim_weights.get(strat)
-        if n < SIM_MIN_SAMPLES:
+        if strat in _INFORMATIONAL_ONLY:
+            note  = "informational only — guards bypassed, not applied"
+            w_str = "  (n/a)"
+        elif n < SIM_MIN_SAMPLES:
             note  = f"< {SIM_MIN_SAMPLES} samples"
             w_str = "  1.0000"
         elif acc is None:
@@ -275,15 +307,17 @@ def main(dry_run: bool = False, min_bettors: int = 3) -> None:
     merged = merge_into_weights_file(sim_weights, dry_run=dry_run)
     if merged:
         final_weights = merged.get("weights", {})
+        sim_applied = set() if dry_run else set(sim_weights.keys())
         for strat, w in sorted(final_weights.items()):
             live_n = merged.get("per_strategy_samples", {}).get(strat, 0)
             if live_n >= MIN_SAMPLES_PER_STRATEGY:
                 source = "live"
-            elif strat in sim_weights:
+            elif strat in sim_applied:
                 source = "simulation"
             else:
                 source = "default"
-            print(f"  {strat:28} {w:.4f}  [{source}]")
+            suffix = "  [dry-run: not written]" if dry_run and strat in sim_weights else ""
+            print(f"  {strat:28} {w:.4f}  [{source}]{suffix}")
 
     # Write report
     report = {
