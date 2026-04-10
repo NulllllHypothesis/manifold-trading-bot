@@ -186,6 +186,12 @@ def load_examples(
         if min_bettors and bettors is not None and bettors < min_bettors:
             continue
 
+        # Skip near-close snapshots from the live logger (days_before_close=0 or None
+        # for live rows means the market was already at/near resolution — same convergence
+        # problem as using probability_close. Keep only explicit decision-time windows.
+        if source == "live" and (days_before_close is None or days_before_close < 1):
+            continue
+
         category = cat_map.get(market_id) or _infer_market_category(question or "")
         true_prob = 1.0 if outcome == "YES" else 0.0
         split     = _split(market_id)
