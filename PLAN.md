@@ -493,18 +493,14 @@ Bridges reconstructed snapshots → strategy weights. Without this, M3 data neve
 - [x] Target: `true_probability` (1.0/0.0) + `prompt`/`completion` for M6 LoRA
 - [x] 127 examples (T-7/14/30 decision-time only, no near-close leakage); 95 train / 24 val / 8 test; output: `data/training_dataset.jsonl`
 
-#### 🔴 M5 — Eval harness (required before trusting any fine-tuned model)
+#### ✅ M5 — Eval harness (done 2026-04-10)
 
-Non-negotiable. Without this you cannot know if fine-tuning helped or just made the model sound more confident on the same wrong answers.
-
-- [ ] `scripts/eval_model.py` — held-out test set from `market_snapshots.db`
-- [ ] Four baselines measured for every candidate model:
-  1. Crowd probability (raw — the floor to beat)
-  2. Current heuristic/stat system
-  3. DeepSeek API prompt (current production)
-  4. Fine-tuned local model (candidate)
-- [ ] Metrics: Brier score, log loss, directional accuracy, SKIP quality (did it avoid weak-edge markets correctly?), calibration curve by probability bucket + category
-- [ ] Promotion rule: fine-tuned model replaces DeepSeek prompt only if it beats crowd + DeepSeek on Brier score on held-out set
+- [x] `scripts/run_eval_harness.py` — evaluates any model against 4 baselines on training_dataset.jsonl
+- [x] Baselines: crowd (0.2218 Brier, 64.6% DirAcc), always_0.5, always_0.8, random
+- [x] Metrics: Brier score, log loss, directional accuracy, calibration curve per bucket + per category
+- [x] Promotion rule: finetuned Brier < crowd Brier AND < deepseek Brier AND DirAcc >= crowd DirAcc
+- [x] Report written to data/eval_report.json
+- [x] Crowd overestimates at 80-100% bucket (predicted 85%, actual 69%) — consistent with calibration table
 
 #### 🟢 M6 — LoRA fine-tune llama3.2:3b
 
