@@ -414,14 +414,14 @@ Phase A is live. Phase B+C closes the Kelly sizing loop using data already in `b
 
 - [x] OS crontab: Mondays 07:30 UTC — runs `compute_strategy_weights.py`, commits `data/strategy_weights.json` + `data/category_accuracy.json`
 
-#### 🟡 P3 — News Fetcher
+#### ✅ P3 — News Fetcher (done 2026-04-10)
 
 Adds real current-event awareness to the fundamental family. Addresses the knowledge cutoff problem — markets about near-future events need fresh context, not a frozen training corpus.
 
-- [ ] `manifold_bot/news_fetcher.py` — extracts keywords from market question, queries NewsAPI.org (free tier, no cost)
-- [ ] Returns: recent headlines with publication date
-- [ ] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60–0.80 based on headline recency and relevance
-- [ ] Wire into `auto_research.py` — only on top 20 candidates per cycle to stay within time budget
+- [x] `manifold_bot/news_fetcher.py` — extracts keywords from market question, queries NewsAPI.org (free tier, no cost)
+- [x] Returns: recent headlines with publication date
+- [x] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60–0.80 based on headline recency and relevance
+- [x] Wire into `auto_research.py` — top 3 candidates per cycle (72 max req/day on free tier); recency-scaled confidence modifier
 
 #### 🟡 P4 — Whale Tracking
 
@@ -596,7 +596,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | test_swap.py pre-existing failures | ✅ Done | liquidity gate + MAX_BET_AMOUNT fix; all 66 passing (2026-04-10) |
 | Bias direction wording in AI prompt | ✅ Done | positive/negative/zero branches in `_build_query_calibration_note()` (2026-04-10) |
 | Category-aware trade log | ✅ Done | `strategy_weight_at_trade_time` now uses category-inferred weight (2026-04-10) |
-| News fetcher | 🟡 P3 | NewsAPI.org free tier; fundamental family signal |
+| News fetcher | ✅ Done | top-3 post-loop enrichment; recency-scaled modifier; 36 tests; `NEWS_API_KEY` in `.env` (2026-04-10) |
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
 | Web dashboard | 🟢 P5 | convenience only |
 | SQLite storage | 🟢 P6 | housekeeping |

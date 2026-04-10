@@ -469,16 +469,21 @@ class MarketResearcher:
                     mkt = markets_by_id.get(mid, {})
                     news_dir  = TradingStrategies.news_strategy(mkt, headlines)
                     news_conf = TradingStrategies.news_strategy_confidence(headlines)
+                    # Scale news impact by recency: fresh (0.80) → full effect,
+                    # recent (0.70) → half, old (0.60) → zero.
+                    # Note: "news" is intentionally NOT added to rec['strategies'].
+                    # It has no learned weight in strategy_weights.json, so adding it
+                    # would cause _get_strategy_weight to default to 1.0 and silently
+                    # cancel any penalty weights on the other strategies in the list.
+                    recency_factor = (news_conf - 0.60) / 0.20  # 0.0 → 1.0
                     if news_dir == rec['recommendation']:
-                        # Agreement: treat like thin_market — small confidence boost
-                        rec['confidence'] = round(min(1.0, rec['confidence'] + 0.05), 3)
-                        if 'news' not in rec['strategies']:
-                            rec['strategies'].append('news')
-                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (agrees)")
+                        boost = round(0.05 * recency_factor, 3)
+                        rec['confidence'] = round(min(1.0, rec['confidence'] + boost), 3)
+                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (agrees +{boost})")
                     elif news_dir:
-                        # Disagreement: slight penalty
-                        rec['confidence'] = round(rec['confidence'] * 0.92, 3)
-                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (disagrees, penalty)")
+                        penalty = round(1.0 - 0.08 * recency_factor, 3)
+                        rec['confidence'] = round(rec['confidence'] * penalty, 3)
+                        print(f"  News [{news_conf:.0%}] {rec['question'][:60]}... → {news_dir} (disagrees ×{penalty})")
                     else:
                         print(f"  News: no clear signal for {rec['question'][:60]}...")
 
