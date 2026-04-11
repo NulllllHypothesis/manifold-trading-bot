@@ -47,82 +47,179 @@ def _market(prob, question='Will something happen?', volume24=10.0,
 # probability_bias_strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+import manifold_bot.strategies as _strat_module
+
+
+class _CalibrationPatch:
+    """
+    Context manager that swaps in deterministic calibration data for
+    probability_bias_strategy tests. Without this the tests depend on
+    whatever calibration_table.json happens to exist on disk, which
+    differs between laptop and server.
+    """
+    def __init__(self, category_bias: dict, by_category_bucket: list):
+        self._category_bias = category_bias
+        self._buckets       = by_category_bucket
+        self._saved_cat     = None
+        self._saved_bucket  = None
+
+    def __enter__(self):
+        self._saved_cat    = _strat_module._CATEGORY_BIAS
+        self._saved_bucket = _strat_module._BY_CATEGORY_BUCKET
+        _strat_module._CATEGORY_BIAS     = self._category_bias
+        _strat_module._BY_CATEGORY_BUCKET = self._buckets
+        return self
+
+    def __exit__(self, *args):
+        _strat_module._CATEGORY_BIAS     = self._saved_cat
+        _strat_module._BY_CATEGORY_BUCKET = self._saved_bucket
+
+
+def _cell(category, bucket_low, bias, n=50, reliable=True):
+    return {
+        "category":    category,
+        "bucket_low":  bucket_low,
+        "bucket_high": bucket_low + 0.10,
+        "bias":        bias,
+        "sample_size": n,
+        "reliable":    reliable,
+        "crowd_midpoint":  bucket_low + 0.05,
+        "actual_yes_rate": max(0.0, min(1.0, (bucket_low + 0.05) - bias)),
+    }
+
+
 class TestProbabilityBiasStrategy(unittest.TestCase):
     """
-    Tests for calibration-backed probability_bias_strategy.
-    Uses 'politics' question text (category bias=6.2pp, above 4pp threshold).
+    Op5 tests for probability_bias_strategy with deterministic calibration data.
+
+    The strategy now uses per-(category, bucket) bias when reliable data exists,
+    and falls back to the category-level aggregate. _MIN_BIAS_TO_TRADE = 0.025.
+    These tests inject known calibration cells so they do not depend on the
+    calibration_table.json file on disk.
     """
 
+    # Category biases used across most tests. 'other' is +5pp (fires),
+    # 'ai_tech' is +0.3pp (skipped), 'economics' is +1pp (skipped),
+    # 'politics' is +0.7pp (skipped under the 2.5pp gate).
+    _CAT_BIAS = {
+        'other':         0.050,
+        'sports':        0.035,
+        'politics':      0.007,
+        'crypto':        0.040,
+        'ai_tech':       0.003,
+        'economics':     0.010,
+        'science':       0.030,
+        'gaming':        0.000,
+        'entertainment': 0.000,
+        'business':      0.000,
+    }
+
+    # Per-bucket cells. Two strongly biased (crowd overestimates YES) and one
+    # strongly underbiased (crowd underestimates YES — strategy should return YES).
+    _BUCKETS = [
+        _cell('other',  0.60, +0.10),  # strong positive bias — bet NO
+        _cell('other',  0.30, +0.08),  # also positive — bet NO
+        _cell('other',  0.20, -0.06),  # strong negative bias — bet YES
+        _cell('crypto', 0.60, +0.09),  # bet NO
+    ]
+
+    def setUp(self):
+        # Every test runs with the same deterministic calibration state.
+        self._patch = _CalibrationPatch(self._CAT_BIAS, self._BUCKETS)
+        self._patch.__enter__()
+
+    def tearDown(self):
+        self._patch.__exit__()
+
     def _m(self, prob, question='Will this prediction market resolve YES by end of 2026?'):
-        """Default question maps to 'other' category (no matching keywords → always fires)."""
+        """Default question maps to 'other' category."""
         return _market(prob, question=question)
 
-    # ── 60-70% band → NO ─────────────────────────────────────────────────────
+    # ── Per-bucket path: positive-bias bucket → NO ──────────────────────────
 
-    def test_60pct_returns_no(self):
+    def test_per_bucket_60pct_positive_bias_returns_no(self):
         self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.60)), "NO")
 
-    def test_65pct_returns_no(self):
-        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.65)), "NO")
-
-    def test_699pct_returns_no(self):
-        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.699)), "NO")
-
-    def test_70pct_boundary_excluded(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.70)))
-
-    # ── 30-40% band → NO ─────────────────────────────────────────────────────
-
-    def test_30pct_returns_no(self):
+    def test_per_bucket_30pct_positive_bias_returns_no(self):
         self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.30)), "NO")
 
-    def test_35pct_returns_no(self):
-        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.35)), "NO")
+    def test_per_bucket_65pct_inside_60_70_bucket_returns_no(self):
+        """0.65 falls into the same 60–70% bucket as 0.60."""
+        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.65)), "NO")
 
-    def test_399pct_returns_no(self):
-        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.399)), "NO")
+    # ── Per-bucket path: negative-bias bucket → YES ─────────────────────────
 
-    def test_40pct_boundary_excluded(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.40)))
+    def test_per_bucket_negative_bias_returns_yes(self):
+        """
+        New Op5 behaviour: a bucket with strong negative bias means the crowd
+        underestimates YES, so the strategy should bet YES (not None).
+        """
+        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.20)), "YES")
 
-    # ── Well-calibrated zones → None ─────────────────────────────────────────
+    # ── Category fallback when bucket has no cell ───────────────────────────
 
-    def test_50pct_no_signal(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.50)))
+    def test_category_fallback_other_fires(self):
+        """
+        0.80 has no matching per-bucket cell for 'other', so the strategy
+        falls back to the category aggregate (+0.050 > 0.025) and fires NO.
+        """
+        m = self._m(0.80)  # 80-90% bucket has no cell in fixture
+        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
 
-    def test_80pct_no_signal(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.80)))
+    def test_category_fallback_ai_tech_skipped(self):
+        """AI/tech aggregate bias 0.003 is below 0.025 threshold → skip."""
+        m = self._m(0.65, question='Will GPT-5 be released by end of 2026?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
-    def test_20pct_no_signal(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.20)))
+    def test_category_fallback_economics_skipped(self):
+        """Economics aggregate bias 0.010 is below 0.025 threshold → skip."""
+        m = self._m(0.65, question='Will the Federal Reserve raise interest rates in June?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
-    def test_55pct_no_signal(self):
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.55)))
+    def test_category_fallback_politics_skipped(self):
+        """Politics aggregate bias 0.007 is below 0.025 threshold → skip."""
+        m = self._m(0.65, question='Will Trump win the 2026 senate race?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_category_fallback_crypto_fires(self):
+        """Crypto aggregate bias 0.040 clears threshold → fire NO."""
+        m = self._m(0.80, question='Will Bitcoin hit $150k by December 2026?')
+        # 80% bucket has no cell for crypto in the fixture, so aggregate is used
+        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
+
+    # ── Small-sample cells fall back ────────────────────────────────────────
+
+    def test_unreliable_cell_falls_back_to_category(self):
+        """
+        A bucket cell with sample_size < _MIN_BUCKET_SAMPLES (15) must NOT be
+        used directly. The strategy falls back to the category aggregate.
+        """
+        small_cell = _cell('other', 0.60, +0.50, n=3, reliable=True)  # huge bias but tiny n
+        with _CalibrationPatch({'other': 0.050}, [small_cell]):
+            # cell should be ignored due to n<15, aggregate 0.050 should fire
+            self.assertEqual(
+                TradingStrategies.probability_bias_strategy(self._m(0.60)),
+                "NO",
+            )
+
+    def test_not_reliable_cell_falls_back_to_category(self):
+        """A cell marked reliable=False must also be skipped."""
+        bad_cell = _cell('other', 0.60, +0.50, n=100, reliable=False)
+        with _CalibrationPatch({'other': 0.050}, [bad_cell]):
+            self.assertEqual(
+                TradingStrategies.probability_bias_strategy(self._m(0.60)),
+                "NO",
+            )
+
+    # ── Missing data ────────────────────────────────────────────────────────
 
     def test_missing_probability_defaults_no_signal(self):
         self.assertIsNone(TradingStrategies.probability_bias_strategy({'question': ''}))
 
-    # ── Category filtering ────────────────────────────────────────────────────
-
-    def test_ai_tech_category_skipped(self):
-        """AI/tech markets are well-calibrated (bias ~0.19pp) — must be skipped."""
-        m = self._m(0.65, question='Will GPT-5 be released by end of 2026?')
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
-
-    def test_economics_category_skipped(self):
-        """Economics markets are well-calibrated (bias ~1.51pp) — must be skipped."""
-        m = self._m(0.65, question='Will the Federal Reserve raise interest rates in June?')
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
-
-    def test_politics_category_skipped(self):
-        """Politics bias dropped to ~3.6pp after reclassification — below 4pp threshold → skip."""
-        m = self._m(0.65, question='Will Trump win the 2026 senate race?')
-        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
-
-    def test_crypto_category_fires(self):
-        """Crypto markets have meaningful bias (5.3pp) — must fire."""
-        m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
-        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
+    def test_empty_calibration_skips(self):
+        """With no calibration data at all the strategy must be silent."""
+        with _CalibrationPatch({}, []):
+            self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.60)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -134,9 +134,12 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
 # Falls back to the values recorded at the last manual calibration run so the
 # strategy still works on a fresh checkout before calibration data is generated.
 #
-# New v2 categories (gaming / entertainment / business) start at 0.0 so
-# probability_bias_strategy cannot fire on them until reclassify_categories.py
-# has been run and analyze_calibration.py has computed real bias values.
+# Op5 note (2026-04-11): the fallback values below are the PRE category-v2
+# biases. After the v2 reclassify moved markets between categories, every
+# live bias value dropped (e.g. politics: 0.0623 → 0.0068, crypto: 0.0534 →
+# 0.0395). These fallbacks are only used on a fresh checkout where the live
+# calibration_table.json doesn't exist yet; the real runtime values come from
+# _load_calibration_data() below.
 _CATEGORY_BIAS_FALLBACK: Dict[str, float] = {
     'other':         0.0439,
     'sports':        0.0348,
@@ -151,24 +154,64 @@ _CATEGORY_BIAS_FALLBACK: Dict[str, float] = {
 }
 
 
-def _load_category_bias() -> Dict[str, float]:
-    """Return category→bias mapping from calibration_table.json, or fallback dict."""
+def _load_calibration_data() -> tuple[Dict[str, float], list]:
+    """Return (category_bias, by_category_bucket_rows) from calibration_table.json.
+
+    by_category_bucket gives the per-(category, 10% bucket) bias — this is more
+    precise than the category-level aggregate and is what probability_bias_strategy
+    now prefers when available.
+    """
     try:
         _cal = Path(__file__).resolve().parent.parent / "data" / "calibration_table.json"
         data = json.loads(_cal.read_text())
-        loaded = {row['category']: row['bias'] for row in data.get('by_category', [])}
-        if loaded:
-            return loaded
+        cat_bias = {row['category']: row['bias'] for row in data.get('by_category', [])}
+        bucket_rows = data.get('by_category_bucket', []) or []
+        if cat_bias:
+            return cat_bias, bucket_rows
     except Exception:
         pass
-    return _CATEGORY_BIAS_FALLBACK.copy()
+    return _CATEGORY_BIAS_FALLBACK.copy(), []
 
 
-_CATEGORY_BIAS: Dict[str, float] = _load_category_bias()
+_CATEGORY_BIAS, _BY_CATEGORY_BUCKET = _load_calibration_data()
 
-# Minimum category-level bias required for probability_bias to fire.
-# ai_tech (0.19pp) and economics (1.51pp) are below this and will be skipped.
-_MIN_BIAS_TO_TRADE = 0.04
+# Minimum bias required for probability_bias to fire.
+#
+# Op5 (2026-04-11): lowered from 0.04 → 0.025 based on the post-v2 calibration
+# distribution. At 0.04, only gaming (0.1501, n=17) passed the gate so the
+# strategy was effectively dead. At 0.025, crypto/sports/science/other all
+# clear at the category level, and three additional per-bucket cells unlock
+# (sports 0-10%, other 0-10%, other 40-50%).
+_MIN_BIAS_TO_TRADE = 0.025
+
+# Minimum sample size for a per-bucket calibration cell to be used directly.
+# Cells smaller than this fall back to the category-level bias aggregate.
+_MIN_BUCKET_SAMPLES = 15
+
+
+def _bucket_bias_for(category: str, probability: float) -> Optional[float]:
+    """Look up the per-bucket bias for a (category, 10% bucket) cell.
+
+    Returns None if:
+      - there is no cell matching (category, bucket)
+      - the cell is not marked reliable
+      - the cell has fewer than _MIN_BUCKET_SAMPLES samples
+
+    When None, probability_bias_strategy falls back to the coarser
+    _CATEGORY_BIAS[category] aggregate.
+    """
+    if not _BY_CATEGORY_BUCKET:
+        return None
+    prob_pct = max(0.0, min(1.0, probability))
+    bucket_idx = min(int(prob_pct * 10), 9)
+    bucket_low = bucket_idx * 0.10
+    for cell in _BY_CATEGORY_BUCKET:
+        if (cell.get("category") == category
+                and abs(cell.get("bucket_low", -1) - bucket_low) < 0.001
+                and cell.get("reliable")
+                and (cell.get("sample_size") or 0) >= _MIN_BUCKET_SAMPLES):
+            return cell.get("bias")
+    return None
 
 
 def _infer_market_category(question: str) -> str:
@@ -356,17 +399,18 @@ class TradingStrategies:
 
         Confidence: 0.75 (strongest signal — creator has asymmetric information).
 
-        NOTE: The Manifold API field `resolutionProbability` is only present on
-        some market types and is frequently absent or null on open markets.  If
-        this strategy never fires in practice, verify that the field is actually
-        being returned by logging `creator_hits` in auto_research.py:
-
-            creator_hits = sum(1 for m in markets if m.get('resolutionProbability') is not None)
-            print(f"[creator_disagreement] resolutionProbability present in {creator_hits}/{len(markets)} markets")
-
-        If creator_hits is consistently 0, the field name may differ in the API
-        response (e.g. nested under a sub-object) and this strategy will never
-        fire, making its 0.75 confidence weight misleading.
+        SILENT-BY-DESIGN (Op5, 2026-04-11):
+        Op3 counter evidence (2026-04-11 11:39 UTC): raw_fires=0/100 in first
+        production run. The auto_research.py one-per-run probe already tells
+        us why: `resolutionProbability present in 5/100 markets`. Only ~5% of
+        open markets have the field populated at all, so fire rate is
+        structurally capped at ~5% × (fraction with a ≥15pp gap). This is
+        sparse-by-design, not a bug. Do NOT widen the 15pp gap or loosen the
+        guard — the strategy's value comes from ONLY firing on strong creator
+        disagreement, and widening would drown the signal in noise. If the
+        24-hour fire rate stays at exactly zero over a week of counter data,
+        consider demoting the strategy's 0.75 confidence to avoid bloating the
+        family-dedup weighting.
         """
         probability = market.get('probability', 0.5)
         resolution_prob = market.get('resolutionProbability')
@@ -472,6 +516,22 @@ class TradingStrategies:
         since (1 − 0.70) / 2 = 0.15).
 
         Confidence: 0.65.
+
+        CONFIRMATION-ONLY (Op5, 2026-04-11):
+        Op3 counters show thin_market raw_fires=0 in the first production
+        run. That is expected: auto_research.py wires thin_market as a
+        confirmation-only signal — it adds a +0.03 boost to an existing
+        contrarian/fundamental signal when it agrees, but never votes
+        independently. So thin_market can only "fire" in counters when:
+          1. It matches the pool-imbalance guard, AND
+          2. A contrarian/fundamental signal of the same direction also
+             fires on the same market.
+        In the first production run there were only 3 contrarian signals
+        total and none of them were matching thin-market imbalances, so
+        thin_market_confirmations=0 is the correct output. This is NOT a
+        bug — do not "fix" by making thin_market vote independently,
+        because then we'd be stacking correlated imbalance signals with
+        the contrarian family and breaking the family-dedup invariant.
         """
         pool = market.get('pool')
         if not isinstance(pool, dict):
@@ -494,48 +554,57 @@ class TradingStrategies:
     @staticmethod
     def probability_bias_strategy(market: Dict) -> Optional[str]:
         """
-        Exploit systematic crowd overconfidence — but only in categories where
-        the bias is empirically reliable.
+        Exploit systematic crowd overconfidence — using per-(category, bucket)
+        calibration data when available, with a category-level aggregate fallback.
 
-        Calibration findings (data/calibration_table.json):
-          60–70% bucket: crowd says ~65%, actual YES rate is ~47% → bias +18pp
-          30–40% bucket: crowd says ~35%, actual YES rate is ~24% → bias +11pp
+        Lookup order (most-specific first):
+          1. (category, 10%-bucket) cell with sample_size ≥ _MIN_BUCKET_SAMPLES
+             and reliable=True  →  use cell bias directly.
+          2. category aggregate in _CATEGORY_BIAS                    →  fallback.
 
-        However, the bias is NOT uniform across market categories.  By category:
-          ai_tech:   +0.19pp — crowd is near-perfectly calibrated → SKIP
-          economics: +1.51pp — well-calibrated → SKIP
-          sports:    +3.48pp — mild bias, below threshold → SKIP
-          politics:  +6.23pp — meaningful bias → FIRE
-          crypto:    +5.34pp — meaningful bias → FIRE
-          other:     +4.39pp — meaningful bias → FIRE
-          science:   +5.43pp — meaningful bias → FIRE
+        A market fires if the chosen bias is ≥ _MIN_BIAS_TO_TRADE AND the
+        current probability falls in a bucket with the same sign of bias.
+        The direction is set by the sign of the bias:
+          bias > 0  →  crowd overestimates YES  →  bet NO
+          bias < 0  →  crowd underestimates YES →  bet YES
 
-        Applying a universal NO in the 60-70% range on an AI/tech or economics market
-        is a mistake: the crowd there tends to be correct.  This strategy now checks
-        category first and skips markets where the data says the crowd is reliable.
-
-        Threshold: _MIN_BIAS_TO_TRADE = 4pp.  Categories below this are skipped.
+        Op5 changes (2026-04-11):
+          - Removed the hardcoded two-bucket filter (60-70% and 30-40%).
+            Any 10% bucket with reliable calibration data now qualifies.
+          - Switched the primary lookup from category-level aggregate to
+            per-(category, bucket) cell — the calibration table already
+            contains this more precise data, we just weren't using it.
+          - Lowered _MIN_BIAS_TO_TRADE from 0.04 → 0.025 to match the
+            post-v2-reclassify bias distribution.
 
         Family: contrarian.  Confidence: 0.70.
         """
-        probability = market.get('probability', 0.5)
-
-        # Check price bucket first — only the two strongly biased ranges
-        if not (0.60 <= probability < 0.70 or 0.30 <= probability < 0.40):
+        # Missing probability field → treat as malformed market, do not trade.
+        probability = market.get('probability')
+        if probability is None:
             return None
 
-        # Check category — skip well-calibrated topics
         category = _infer_market_category(market.get('question', ''))
-        cat_bias = _CATEGORY_BIAS.get(category, _CATEGORY_BIAS['other'])
-        if cat_bias < _MIN_BIAS_TO_TRADE:
+
+        # Primary lookup: per-(category, bucket) bias.
+        bias = _bucket_bias_for(category, probability)
+        source = "bucket"
+
+        # Fallback: category-level aggregate.
+        if bias is None:
+            bias = _CATEGORY_BIAS.get(category, _CATEGORY_BIAS.get('other', 0.0))
+            source = "category"
+
+        if abs(bias) < _MIN_BIAS_TO_TRADE:
             logger.debug(
-                "probability_bias: skipping %s market (category=%s, bias=%.4f < threshold %.4f)",
-                market.get('id', '?'), category, cat_bias, _MIN_BIAS_TO_TRADE,
+                "probability_bias: skipping %s (%s=%s, bias=%.4f < threshold %.4f)",
+                market.get('id', '?'), source, category, bias, _MIN_BIAS_TO_TRADE,
             )
             return None
 
-        # Both biased buckets show crowd overestimates YES → bet NO
-        return "NO"
+        # Positive bias → crowd overestimates YES → bet NO.
+        # Negative bias → crowd underestimates YES → bet YES.
+        return "NO" if bias > 0 else "YES"
 
     # ------------------------------------------------------------------ #
     # News strategy (post-loop enrichment — called from auto_research.py

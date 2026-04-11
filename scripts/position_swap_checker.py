@@ -44,6 +44,20 @@ PENDING_SWAPS_FILE = WORKSPACE / "pending_swaps.json"
 MAX_POSITIONS = 10       # must match AutoTrader.max_positions
 SWAP_EXPIRY_HOURS = 4    # proposals expire after this many hours
 
+# Op5 (2026-04-11): minimum EV cushion beyond the realised loss that a swap
+# must clear before we're willing to execute it.
+#
+# Why not zero: the 2026-04-11 11:40 run produced a technically-valid swap
+# where close loss was $0.30 and open exec EV was $0.51 — net $0.21 of edge
+# for crystallising a $0.30 loss and giving up an existing position. Op2
+# correctly passed it (exec EV > loss) but the margin was too thin to be
+# worth the churn, and we ended up dismissing it manually.
+#
+# $1.00 is chosen as one round of MIN_BET_AMOUNT — smaller and there's no
+# actual breathing room above noise; larger and we'll reject many valid
+# but modest opportunities. Tune after more production data.
+SWAP_MIN_MARGIN = 1.00
+
 
 # ── Core maths ─────────────────────────────────────────────────────────────────
 
@@ -338,10 +352,15 @@ def run_swap_check() -> int:
         # really capture if we executed the swap right now.
         best_ev = _swap_ev(best) or 0.0
 
-        if best_ev <= loss:
+        # Op5: require a minimum cushion above the loss. Technically valid
+        # but tiny-margin swaps (e.g. $0.51 exec EV vs $0.30 loss = $0.21
+        # net edge) aren't worth the churn of crystallising and re-opening.
+        required = loss + SWAP_MIN_MARGIN
+        if best_ev < required:
             print(
-                f"  {weakest['market_id']}: best exec EV ${best_ev:.2f} does not justify "
-                f"${loss:.2f} loss — skipping this pair."
+                f"  {weakest['market_id']}: best exec EV ${best_ev:.2f} below "
+                f"${loss:.2f} loss + ${SWAP_MIN_MARGIN:.2f} margin = ${required:.2f} "
+                f"— skipping this pair."
             )
             continue
 

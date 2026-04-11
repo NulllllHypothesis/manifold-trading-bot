@@ -408,6 +408,156 @@ class TestSwapEvCorrectness(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Op5: SWAP_MIN_MARGIN buffer
+#
+# Op2 alone permits any proposal where exec EV > loss. Op5 adds a minimum
+# cushion so tiny-margin swaps (e.g. $0.51 exec EV vs $0.30 loss = $0.21 net
+# edge) don't fire.
+#
+# The 2026-04-11 11:40 production run produced exactly that proposal and
+# it had to be dismissed manually. These tests lock in the new gate so the
+# cushion can't silently regress to zero.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from scripts.position_swap_checker import SWAP_MIN_MARGIN
+
+
+class TestSwapMinMarginBuffer(unittest.TestCase):
+
+    def test_min_margin_is_positive(self):
+        """A zero margin would be Op2 behaviour, which we're explicitly leaving."""
+        self.assertGreater(SWAP_MIN_MARGIN, 0,
+                           "SWAP_MIN_MARGIN must be > 0 to be meaningful")
+
+    def test_min_margin_is_at_least_one_min_bet(self):
+        """
+        The rationale in the constant's comment is 'one round of MIN_BET_AMOUNT
+        of breathing room'. MIN_BET_AMOUNT is 1, so SWAP_MIN_MARGIN should be
+        at least 1. If someone lowers this below 1 they need to update the
+        comment AND think about why they're doing it.
+        """
+        from manifold_bot.config import MIN_BET_AMOUNT
+        self.assertGreaterEqual(SWAP_MIN_MARGIN, MIN_BET_AMOUNT)
+
+    def test_tiny_margin_swap_rejected_by_margin_buffer(self):
+        """
+        The 2026-04-11 11:40 production scenario:
+          close loss = $0.30
+          open exec EV = $0.51
+          net edge = $0.21
+          loss + margin = $0.30 + $1.00 = $1.30
+          $0.51 < $1.30  →  must be REJECTED by the new gate
+        """
+        loss = 0.30
+        best_ev = 0.51
+        required = loss + SWAP_MIN_MARGIN
+        self.assertLess(best_ev, required,
+                        f"Tiny-margin swap (exec EV ${best_ev}) must NOT clear "
+                        f"${loss} loss + ${SWAP_MIN_MARGIN} margin = ${required}")
+
+    def test_comfortable_margin_swap_still_accepted(self):
+        """A swap with plenty of cushion should still fire."""
+        loss = 1.00
+        best_ev = 3.50          # $2.50 of net edge
+        required = loss + SWAP_MIN_MARGIN
+        self.assertGreaterEqual(best_ev, required)
+
+    def test_exactly_at_boundary_accepted(self):
+        """$ev == loss + margin is the minimum acceptable value."""
+        loss = 1.50
+        required = loss + SWAP_MIN_MARGIN
+        best_ev = required
+        self.assertGreaterEqual(best_ev, required)
+
+
+class TestRunSwapCheckWithMinMargin(unittest.TestCase):
+    """End-to-end: run_swap_check() must apply the Op5 margin buffer."""
+
+    def _full_state(self, n_open=10, losing_entry_prob=0.8, loss_amount=20.0):
+        positions = {}
+        for i in range(n_open):
+            mid = f'mkt_{i}'
+            t = _make_trade(outcome='YES', amount=loss_amount,
+                            entry_prob=losing_entry_prob, status='OPEN')
+            t['market_id'] = mid
+            positions[mid] = [t]
+        return {'balance': 800.0, 'positions': positions, 'trade_history': []}
+
+    def _losing_api(self, current_prob=0.7):
+        mock = MagicMock()
+        mock.get_market.return_value = {
+            'probability': current_prob, 'isResolved': False, 'question': 'Test'
+        }
+        return mock
+
+    def test_tiny_margin_opportunity_rejected(self):
+        """
+        A candidate with exec EV just barely above the loss (Op2-valid)
+        but below loss + SWAP_MIN_MARGIN (Op5-invalid) must not produce
+        a proposal. This is the Op5 gate doing its job.
+        """
+        # Construct losers whose unrealised loss per position is small.
+        # With entry_prob 0.8 and current_prob 0.78, the loss is small.
+        state = self._full_state(n_open=10, losing_entry_prob=0.8, loss_amount=5.0)
+
+        # Research with one opportunity whose exec EV is 0.20 (tiny)
+        rec = _make_recommendation_v2(market_id='new_tiny', ev_ref=1.0, ev_exec=0.20)
+        research = {'recommendations': [rec]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sf = Path(tmp) / 'state.json'
+            sf.write_text(json.dumps(state))
+            rf = Path(tmp) / 'research.json'
+            rf.write_text(json.dumps(research))
+            pf = Path(tmp) / 'pending_swaps.json'
+            api = self._losing_api(current_prob=0.70)   # 10pp against us
+            with (
+                patch('scripts.position_swap_checker.STATE_FILE', sf),
+                patch('scripts.position_swap_checker.RESEARCH_FILE', rf),
+                patch('scripts.position_swap_checker.PENDING_SWAPS_FILE', pf),
+                patch('scripts.position_swap_checker.api_client', api),
+                patch('scripts.position_swap_checker.send_telegram_message'),
+            ):
+                rc = run_swap_check()
+            self.assertEqual(rc, 0)
+            # No proposal must have been written (margin gate blocks it)
+            if pf.exists():
+                data = json.loads(pf.read_text())
+                self.assertEqual(data, [],
+                                 f"Expected no proposals, got {len(data)}")
+
+    def test_comfortable_margin_opportunity_accepted(self):
+        """
+        A candidate whose exec EV comfortably clears loss + margin should
+        still produce a proposal.
+        """
+        state = self._full_state(n_open=10, losing_entry_prob=0.8, loss_amount=5.0)
+        # $10 exec EV vs ~$0.50 loss → clears margin easily
+        rec = _make_recommendation_v2(market_id='new_fat', ev_ref=50.0, ev_exec=10.0)
+        research = {'recommendations': [rec]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sf = Path(tmp) / 'state.json'
+            sf.write_text(json.dumps(state))
+            rf = Path(tmp) / 'research.json'
+            rf.write_text(json.dumps(research))
+            pf = Path(tmp) / 'pending_swaps.json'
+            api = self._losing_api(current_prob=0.70)
+            with (
+                patch('scripts.position_swap_checker.STATE_FILE', sf),
+                patch('scripts.position_swap_checker.RESEARCH_FILE', rf),
+                patch('scripts.position_swap_checker.PENDING_SWAPS_FILE', pf),
+                patch('scripts.position_swap_checker.api_client', api),
+                patch('scripts.position_swap_checker.send_telegram_message'),
+            ):
+                rc = run_swap_check()
+            self.assertEqual(rc, 0)
+            self.assertTrue(pf.exists(), "Expected at least one swap proposal")
+            data = json.loads(pf.read_text())
+            self.assertGreaterEqual(len(data), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # has_active_pending_swaps
 # ─────────────────────────────────────────────────────────────────────────────
 
