@@ -423,13 +423,12 @@ Adds real current-event awareness to the fundamental family. Addresses the knowl
 - [x] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60–0.80 based on headline recency and relevance
 - [x] Wire into `auto_research.py` — top 3 candidates per cycle (72 max req/day on free tier); recency-scaled confidence modifier
 
-#### ✅ Op1 — Operational unblock (clear pending swap queue)
+#### ✅ Op1 — Operational unblock (done 2026-04-11)
 
-The bot was jammed: `11/10` positions, one pending swap blocking all further swap proposals (see [position_swap_checker.py:284](scripts/position_swap_checker.py#L284)). Fresh proposals can't be generated while any pending entry exists, so this is always step 0 when the swap loop gets stuck.
+The bot was jammed: `11/10` positions, one pending swap blocking all further swap proposals. Dismissed manually; swap loop unblocked. The 11th ghost position (`ZLCUqRRE85`, no question text) remains by user instruction.
 
-- [ ] Approve or dismiss the active pending swap: `python3 scripts/execute_swap.py --id N [--dismiss]`
-- [ ] Verify the swap loop resumes on the next `:20` cron cycle
-- [ ] Confirm trader can open new positions after the book drops below `10/10`
+- [x] Dismiss stale pending swap
+- [x] Verify swap loop resumes on next `:20` cron cycle
 
 #### ✅ Op2 — Swap EV correctness (done 2026-04-11, commit `d7a97b8`)
 
@@ -438,64 +437,105 @@ The bot was jammed: `11/10` positions, one pending swap blocking all further swa
 - [x] `auto_research.py` — writes BOTH `estimated_ev_ref` ($25) AND `estimated_ev_exec` (`MAX_BET_AMOUNT`) on every recommendation; legacy `estimated_ev` kept as alias for ref
 - [x] `position_swap_checker.py` — new `_swap_ev()` helper prefers exec and falls back to legacy field; `find_best_opportunity` ranks by exec EV; `ev > loss` gate uses exec EV
 - [x] `tests/test_swap.py` — 8 new tests in `TestSwapEvCorrectness`, including explicit WTI regression guard
+- [x] **Verified in production 2026-04-11 11:40 UTC:** rejected a `USpnpA6Idq` swap with message "best exec EV $0.51 does not justify $2.63 loss"
 
-#### 🔴 Op3 — Strategy observability
+#### ✅ Op3 — Strategy observability (done 2026-04-11, commit `6580c7d`)
 
-Right now live recommendations are mono-strategy (`9/9` driven by `probability_direction` at `0.65`), but we can't tell whether that's because base confidences are mistuned or because the other strategies simply aren't firing at all. Before retuning anything, add counters.
+Per-run counters across research + trader. Evidence-first operation before Op5 retune.
 
-**Research counters** ([automation/auto_research.py](automation/auto_research.py))
-- [ ] markets fetched from Manifold API
-- [ ] markets skipped by reason: resolved, low liquidity, stale, cooldown, AI-timeout-cooldown
-- [ ] raw fires by strategy: `probability_direction`, `mean_reversion`, `probability_bias`, `creator_disagreement`, `thin_market`
-- [ ] family-dedup survivors by family (momentum / contrarian / fundamental)
-- [ ] thin-market confirmations applied
-- [ ] tie/no-edge drops (no YES/NO majority after dedup)
-- [ ] AI flow: eligible / analysed / `SKIP` / timeout / agree / disagree
-- [ ] final recommendation mix: by strategy set, by category
+**Research counters** ([automation/auto_research.py](automation/auto_research.py) → `data/research_counters.jsonl`)
+- [x] markets fetched / skipped by reason (resolved, low_liquidity, stale)
+- [x] raw fires by strategy (5 directional strategies)
+- [x] family dedup winners (momentum / contrarian / fundamental)
+- [x] thin-market confirmations, no-signal drops, tied-vote drops
+- [x] AI flow (eligible / cooled_down / analyzed / agree / disagree / skip / no_result)
+- [x] final mix by strategy-set and by category
 
-**Trader counters** ([automation/auto_trader.py](automation/auto_trader.py))
-- [ ] recommendations loaded from research file
-- [ ] rejected by reason: AI veto, low confidence, existing OPEN position, max positions, category cap, liquidity, no Kelly edge, too-small size
-- [ ] tradable after filters
-- [ ] executed trades
-- [ ] top ranked opportunities by EV at execution time
+**Trader counters** ([automation/auto_trader.py](automation/auto_trader.py) → `data/trader_counters.jsonl`)
+- [x] recs loaded, rejections by reason (9 keys), passed filter, top-5 by exec EV, trades executed
+- [x] `_trade_rejection_reason()` returns string key; `should_trade_market()` kept as bool wrapper
 
-**Exposure**
-- [ ] human-readable end-of-run summary block in the normal cron log
-- [ ] optional small JSON artifact per run (`data/research_counters.jsonl` / `data/trader_counters.jsonl`) for trend analysis later
-- [ ] tests in `tests/test_automation.py` (or a focused new file) that the counters survive a normal run and correctly tally the core rejection reasons
+**Tests** — [tests/test_observability.py](tests/test_observability.py) 31 tests, including the schema v2 invariant (see below).
+
+#### ✅ Op3.1 — Schema v2 zero-candidate fix (done 2026-04-11, commit `88b8999`)
+
+**Production bug caught by reviewer:** when every above-floor rec was on AI-timeout cooldown, `candidate_markets` became empty, the inner `if candidate_markets:` block never ran, recs were missing the `ai_was_candidate` field, and `save_research()` fell back to `schema_version=1`. That halted the trader for the rest of the cycle.
+
+- [x] Initialize AI metadata defaults on every rec BEFORE the candidate pass
+- [x] 6 new tests covering `TestSchemaV2Invariant` + `TestAnalyzeMarketsZeroCandidatePath`
 
 #### ✅ Op4 — Live snapshot quality (`days_before_close`) (done 2026-04-11)
 
 Forward path + historical backfill for the live snapshot training pipeline.
 
 - [x] `auto_research.py::_write_market_snapshots()` — computes `days_before_close` from each market's `closeTime` at snapshot time; clamps already-closed observations to 0; `None` when `closeTime` missing or malformed
-- [x] `scripts/backfill_days_before_close.py` — one-off backfill for existing NULL live rows; fast local lookup via `resolved_markets.close_date`, optional `--no-api` mode, idempotent (`WHERE days_before_close IS NULL`)
-- [x] `scripts/build_training_dataset.py` — live rows picked up via `_snap_live_to_window()`: one row kept per `(market_id, window)` where `window ∈ {7, 14, 30}` with `±1` day tolerance, earliest snapshot per window wins
-- [x] `tests/test_days_before_close.py` — 30 tests covering the math floor, already-closed clamping, missing/malformed `closeTime`, `_load_resolved_close_ms_map`, end-to-end backfill with idempotency, `_snap_live_to_window` bucketing, and live-row filtering in `load_examples()`
-- [x] Server backfill run: **4384 of 4605 rows populated** (95.2%); 221 unresolvable (deleted markets); ~72s wall time via Manifold API with 0.2s delay
-- [x] Training dataset rebuilt: still 127 rows (all reconstructed) because **0 of 16 qualifying live markets have resolved yet** — Op4 is pre-positioning data so that when those markets do resolve, they flow through to M4/M5/M6 automatically
+- [x] `scripts/backfill_days_before_close.py` — one-off backfill for existing NULL live rows; fast local lookup via `resolved_markets.close_date`, optional `--no-api` mode, idempotent
+- [x] `scripts/build_training_dataset.py::_snap_live_to_window()` — bucket to nearest window `{7, 14, 30}` within ±1 day tolerance, earliest snapshot per window wins
+- [x] `tests/test_days_before_close.py` — 30 tests
+- [x] **Server backfill: 4384 of 4605 rows populated (95.2%)** in ~72s
+- [x] Training dataset rebuilt: still 127 rows because **0 of 16 qualifying live markets have resolved yet** — Op4 is pre-positioning data
 
-**Expected future effect:** as the 4500 backfilled live rows slide through the T-7/14/30 windows and their markets resolve, the dataset will grow week-over-week without any further code changes. The live logger now persistently captures what it needs.
+**Expected future effect:** as the 4500 backfilled live rows slide through the T-7/14/30 windows and their markets resolve, the dataset grows week-over-week without code changes.
 
-#### 🟢 Op5 — Strategy mix retune
+#### ✅ Op5 — Strategy guard retune (done 2026-04-11, commit `762c43d`)
 
-Deferred until Op3 has produced real counter data (min. 24–48 h of cron runs). The goal is to decide, with evidence, whether the live mono-strategy behaviour is caused by:
+**Not** a base-confidence retune. Op3 counter evidence showed three strategies were silent at the guard level, so retuning confidences would have been pointless.
 
-- base confidences being too close together (`probability_direction` always wins dedup), or
-- other strategies genuinely never firing at their guards (`mean_reversion` close-time gate, `probability_bias` bucket filter, `creator_disagreement` sparse field), or
-- family dedup collapsing correlated signals before they can contribute.
+**probability_bias — per-bucket lookup + lowered threshold**
+- [x] `_load_calibration_data()` loads both category aggregates AND per-(category, bucket) cells from `calibration_table.json` at import time
+- [x] New `_bucket_bias_for(category, probability)` helper returns per-bucket bias when cell has `sample_size ≥ _MIN_BUCKET_SAMPLES (15)` and `reliable=True`
+- [x] `probability_bias_strategy()` tries per-bucket first, falls back to category aggregate
+- [x] Removed the hardcoded 60-70% / 30-40% bucket filter — any bucket with reliable calibration data now qualifies
+- [x] `_MIN_BIAS_TO_TRADE` lowered from `0.04` → `0.025` based on post-v2 bias distribution
+- [x] Negative-bias cells now produce `YES` (crowd underestimates) instead of None
+- [x] Missing `probability` field → None (was: defaulted to 0.5)
 
-Without observability this is guessing. Do not retune base confidences in `auto_research.py:320-343` before the counters say which of the three is actually happening.
+**Documented silent-by-design**
+- [x] `creator_disagreement`: docstring now explains that `resolutionProbability` only populated on ~5% of markets — 0 fires is structural
+- [x] `thin_market`: docstring now explains it's confirmation-only, can only "fire" when matching another contrarian/fundamental signal
+
+**Swap margin buffer**
+- [x] `scripts/position_swap_checker.py::SWAP_MIN_MARGIN = $1.00`
+- [x] Gate in `run_swap_check()` now requires `best_ev ≥ loss + SWAP_MIN_MARGIN`
+- [x] Rejection message prints both numbers for auditability
+
+**Tests** — Reworked `TestProbabilityBiasStrategy` with deterministic `_CalibrationPatch` context manager (12 tests) + new `TestSwapMinMarginBuffer` (5) + `TestRunSwapCheckWithMinMargin` (2). All 266 tests passing.
+
+**Diagnostic:** [`scripts/analyze_strategy_coverage.py`](scripts/analyze_strategy_coverage.py) — read-only, reports 24h fire rates + which categories/cells unlock at a proposed threshold. Used to pick the `0.025` threshold before coding.
+
+**Production verification** (2026-04-11 15:55 UTC, first run post-Op5):
+
+| Metric | Pre-Op5 (11:39) | Post-Op5 (15:55) |
+|---|---:|---:|
+| `probability_bias` raw fires | 0 | **18** |
+| `probability_direction` raw fires | 10 | 11 |
+| `mean_reversion` raw fires | 3 | 3 |
+| `contrarian` dedup winners | 3 | 18 |
+| `no_active_signals` | 29 | **18** |
+| `final_recommendations` | 7 | 19 |
+| `ai_eligible` | 7 | 19 |
+| Strategy mix shapes | 1 | **3** |
+
+**Op5 follow-up observation (for Op7):** in the post-Op5 run, Ollama `ai_skip=3/3` — every bias rec the AI analysed was vetoed. This suggests per-(category, bucket) bias applied to `other` markets near the 50-60% bucket may be over-firing on markets where the underlying "other" historical bias doesn't apply (e.g. Daily Coinflip markets at exactly 50% are 50/50 by construction). The AI veto is correctly catching these. **Not an Op5 regression** — the strategy mix is finally diverse, it just means category-level `other` aggregate is too heterogeneous to be a useful prior. Op7 candidate: filter out markets whose question text flags them as structurally uncorrelated with category bias (coinflip, roll, random, etc.) OR exclude `other` from the per-bucket lookup entirely.
 
 #### 🟢 Op6 — M6 training run
 
-Deferred until Op3 + Op4 land. The M6 scaffolding ([scripts/finetune.py](scripts/finetune.py)) and the promotion gate (crowd Brier 0.1503 / DirAcc 75.0% on the held-out test split) are already in place, so this is "push a button when the data is ready." Reasons to wait:
+Deferred until dataset grows via Op4's live accumulation path. The M6 scaffolding ([scripts/finetune.py](scripts/finetune.py)) and the promotion gate (crowd Brier 0.1503 / DirAcc 75.0% on the held-out test split) are already in place. Reasons to wait:
 
-- the dataset is still small (127 rows) and 70%+ `other` even after category v2
+- the dataset is still 127 rows after reclassify + Op4 (weekly growth expected)
 - test split is only 8 examples → a "passing" run would be hard to trust
-- Op4 should multiply the dataset size once `days_before_close` lands
-- Op3 will reveal whether the live system even needs a fine-tuned veto, or whether the problem is upstream in the signal layer
+- Op5 has finally unblocked the signal layer; if the signal mix produces enough tradable opportunities, a fine-tuned veto may turn out to be unnecessary
+
+#### 🟢 Op7 — Bias over-firing on heterogeneous `other` markets
+
+Follow-up to Op5 identified in the 15:55 post-Op5 run. The `other` category is a catch-all — its aggregate bias is an average over politics/celebrity/coinflip/research markets that share nothing except "failed to match any keyword". Applying that aggregate to a random coinflip market is semantically wrong.
+
+Candidates to consider:
+- Exclude `other` from the per-bucket lookup (keep `other` for aggregate fallback only)
+- Add a "structural noise" filter on question text (coinflip, random, roll, d20, etc.)
+- Require per-bucket bias cells to have BOTH high `sample_size` AND reasonable homogeneity (standard deviation of bias across sub-populations)
+
+Op7 should follow 24-48h of Op3 counter data showing AI veto rates by category.
 
 #### 🟡 P4 — Whale Tracking
 
