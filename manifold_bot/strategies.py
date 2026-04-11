@@ -91,7 +91,8 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
                       # Others (mlb/nhl/ufc/fifa/f1) have low substring risk and are
                       # left unpadded so bracketed tokens like "[F1 China]" still match.
                       ' nba ', ' nfl ', ' mma ',
-                      'mlb', 'nhl', 'fifa', 'ufc', 'f1',
+                      'mlb', 'nhl', 'fifa', 'ufc', 'f1', 'ncaa', 'cricket',
+                      'tour de france', 'tour of flanders', 'giro d',
                       'world cup', 'olympics', 'championship', 'tennis', 'golf',
                       'soccer', 'football', 'basketball', 'baseball', 'premier league',
                       # Space-bounded so we match whole words only:
@@ -107,7 +108,8 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     'science':       ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
                       'cancer', 'physics', 'biology', 'crispr', 'fusion',
                       'earthquake', 'hurricane', 'temperature', 'science', 'research',
-                      'drug approval', 'clinical trial'],
+                      'drug approval', 'clinical trial',
+                      'artemis', 'moon landing', 'asteroid', 'satellite launch'],
     'business':      [# General corporate / company-specific markets. Space-padded
                       # for common English words to avoid substring false positives
                       # (' apple ' won't match 'pineapple', ' meta ' won't match
