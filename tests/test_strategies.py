@@ -120,14 +120,184 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
     def test_crypto_category_fires(self):
-        """Crypto markets have meaningful bias (6.1pp) — must fire."""
-        m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
-        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
-
-    def test_crypto_category_fires(self):
         """Crypto markets have meaningful bias (5.3pp) — must fire."""
         m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
         self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _infer_market_category — v2 taxonomy
+# ─────────────────────────────────────────────────────────────────────────────
+
+from manifold_bot.strategies import _infer_market_category
+
+
+class TestCategoryV2(unittest.TestCase):
+    """
+    v2 adds gaming / entertainment / business to shrink the `other` catchall.
+    These tests lock in the new routing AND protect the v1 categories from
+    regressing when keyword lists are expanded.
+    """
+
+    # ── v1 categories — still route correctly ────────────────────────────────
+
+    def test_v1_crypto(self):
+        self.assertEqual(_infer_market_category("Will Bitcoin hit $150k?"), "crypto")
+
+    def test_v1_ai_tech(self):
+        self.assertEqual(_infer_market_category("Will GPT-5 be released this year?"), "ai_tech")
+
+    def test_v1_politics(self):
+        self.assertEqual(_infer_market_category("Will Trump win the 2028 election?"), "politics")
+
+    def test_v1_sports(self):
+        self.assertEqual(_infer_market_category("Will the Lakers win the NBA championship?"), "sports")
+
+    def test_v1_economics(self):
+        self.assertEqual(
+            _infer_market_category("Will inflation hit 5% by Q3?"),
+            "economics",
+        )
+
+    def test_v1_science(self):
+        self.assertEqual(
+            _infer_market_category("Will SpaceX launch Starship successfully?"),
+            "science",
+        )
+
+    # ── v2 new categories ────────────────────────────────────────────────────
+
+    def test_v2_gaming_title(self):
+        self.assertEqual(
+            _infer_market_category("Will GTA6 release in 2026?"),
+            "gaming",
+        )
+
+    def test_v2_gaming_platform(self):
+        self.assertEqual(
+            _infer_market_category("Will Nintendo announce a Switch 2?"),
+            "gaming",
+        )
+
+    def test_v2_gaming_esports(self):
+        self.assertEqual(
+            _infer_market_category("Will any esport tournament hit 10M viewers?"),
+            "gaming",
+        )
+
+    def test_v2_entertainment_movie(self):
+        self.assertEqual(
+            _infer_market_category("Will the next Marvel movie gross over $1B?"),
+            "entertainment",
+        )
+
+    def test_v2_entertainment_awards(self):
+        self.assertEqual(
+            _infer_market_category("Will Oppenheimer win Best Picture at the Oscars?"),
+            "entertainment",
+        )
+
+    def test_v2_entertainment_celebrity(self):
+        self.assertEqual(
+            _infer_market_category("Will Taylor Swift release a new album in 2026?"),
+            "entertainment",
+        )
+
+    def test_v2_entertainment_streaming(self):
+        self.assertEqual(
+            _infer_market_category("Will Netflix raise subscription prices again?"),
+            "entertainment",
+        )
+
+    def test_v2_business_company(self):
+        self.assertEqual(
+            _infer_market_category("Will Apple release a new iPhone in September?"),
+            "business",
+        )
+
+    def test_v2_business_corporate_action(self):
+        self.assertEqual(
+            _infer_market_category("Will any major tech company announce layoffs in Q2?"),
+            "business",
+        )
+
+    def test_v2_business_ipo(self):
+        self.assertEqual(
+            _infer_market_category("Will Stripe IPO before the end of 2026?"),
+            "business",
+        )
+
+    # ── Order-of-match conflicts — lock in intended routing ──────────────────
+
+    def test_order_crypto_beats_business(self):
+        """Bitcoin-about-Coinbase should be crypto, not business."""
+        self.assertEqual(
+            _infer_market_category("Will Coinbase list Bitcoin ETF?"),
+            "crypto",
+        )
+
+    def test_order_ai_tech_beats_business(self):
+        """OpenAI IPO should land in ai_tech, not business (openai matches first)."""
+        self.assertEqual(
+            _infer_market_category("Will OpenAI IPO in 2026?"),
+            "ai_tech",
+        )
+
+    def test_order_business_beats_economics(self):
+        """Apple stock question should land in business (apple matches before stock)."""
+        self.assertEqual(
+            _infer_market_category("Will Apple stock hit $300?"),
+            "business",
+        )
+
+    def test_order_economics_still_wins_when_no_company(self):
+        """Pure-macro stock-market question lands in economics."""
+        self.assertEqual(
+            _infer_market_category("Will the stock market crash in 2026?"),
+            "economics",
+        )
+
+    # ── Substring false-positive guards ──────────────────────────────────────
+
+    def test_substring_apple_vs_pineapple(self):
+        """' apple ' is space-bounded — 'pineapple' must NOT match business."""
+        # Guards against a regression where 'apple' would match inside 'pineapple'
+        # and misroute a food question to business.
+        self.assertNotEqual(
+            _infer_market_category("Will pineapple be the most-ordered pizza topping?"),
+            "business",
+        )
+
+    def test_substring_meta_vs_metabolism(self):
+        """' meta ' is space-bounded — 'metabolism' must NOT match business."""
+        self.assertNotEqual(
+            _infer_market_category("Will a new metabolism supplement become popular?"),
+            "business",
+        )
+
+    def test_substring_nfl_vs_inflation(self):
+        """' nfl ' is space-bounded — 'nfl' must NOT match inside 'inflation'."""
+        # Regression guard for the v1 bug where 'nfl' (unpadded sports keyword)
+        # matched inside 'inflation' and routed economics questions to sports.
+        self.assertEqual(
+            _infer_market_category("Will inflation hit 5% by Q3?"),
+            "economics",
+        )
+
+    def test_substring_steam_vs_stream(self):
+        """' steam ' must NOT match 'streaming' or 'stream'."""
+        # A question about HBO streaming should go to entertainment, not gaming.
+        self.assertEqual(
+            _infer_market_category("Will HBO streaming subscribers hit 100M?"),
+            "entertainment",
+        )
+
+    def test_fallthrough_to_other(self):
+        """Questions with no matching keyword still land in `other`."""
+        self.assertEqual(
+            _infer_market_category("Will it rain tomorrow?"),
+            "other",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

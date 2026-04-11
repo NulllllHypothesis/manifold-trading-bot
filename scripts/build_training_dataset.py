@@ -93,13 +93,16 @@ def _split(market_id: str) -> str:
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
 _CATEGORY_LABELS = {
-    "politics":  "Politics / geopolitics",
-    "ai_tech":   "AI / technology",
-    "sports":    "Sports",
-    "economics": "Economics / finance",
-    "crypto":    "Crypto / blockchain",
-    "science":   "Science / health",
-    "other":     "General",
+    "politics":      "Politics / geopolitics",
+    "ai_tech":       "AI / technology",
+    "sports":        "Sports",
+    "economics":     "Economics / finance",
+    "crypto":        "Crypto / blockchain",
+    "science":       "Science / health",
+    "gaming":        "Video games / esports",
+    "entertainment": "Movies / TV / music / celebrity",
+    "business":      "Business / corporate",
+    "other":         "General",
 }
 
 

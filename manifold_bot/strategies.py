@@ -38,54 +38,109 @@ logger = logging.getLogger(__name__)
 # scripts/harvest_resolved.py imports _infer_market_category from here so that
 # calibration data category labels always match live-trading labels.
 
+# Category v2 — expanded taxonomy to stop `other` from swallowing 70% of markets.
+# Insertion order = match order. First matching category wins. Specific topics
+# (crypto, ai_tech) come first so "Will OpenAI IPO?" lands in ai_tech, not business.
+# Business comes before economics so "Will Apple stock split?" lands in business
+# (apple wins) while "Will S&P500 hit 6000?" still lands in economics (no company match).
 _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
-    'crypto':    ['bitcoin', 'btc', 'ethereum', 'crypto', 'blockchain',
-                  'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin',
-                  'doge', 'dogecoin', 'xrp', 'ripple'],
-    'politics':  ['trump', 'biden', 'election', 'congress', 'senate', 'president',
-                  'democrat', 'republican', 'vote', 'policy', 'legislation',
-                  'supreme court', 'governor', 'parliament',
-                  'war', 'ceasefire', 'military', 'nato', 'ukraine', 'russia',
-                  'gaza', 'israel', 'iran', 'harris', 'political', 'sanction',
-                  'tariff', 'geopolit'],
-    'ai_tech':   [' ai ', 'gpt', 'llm', 'openai', 'anthropic', 'claude', 'gemini',
-                  'machine learning', 'artificial intelligence', 'neural', 'deepmind',
-                  'chatgpt', 'language model', 'deepseek', 'chatbot', 'mistral',
-                  'grok', 'xai'],
-    'sports':    ['nba', 'nfl', 'mlb', 'nhl', 'fifa', 'world cup', 'olympics',
-                  'championship', 'tennis', 'golf', 'soccer', 'football',
-                  'basketball', 'baseball', 'premier league',
-                  # Space-bounded so we match whole words only:
-                  # ' win ' avoids Windows/winning; ' game ' avoids GameStop/gaming;
-                  # ' team ' avoids steam; ' match '/' score '/' league '/' player '
-                  # avoid mismatches in economics/science questions.
-                  # _infer_market_category pads q with spaces so these also match
-                  # at the start/end of a sentence.
-                  ' win ', ' team ', ' match ', ' game ', ' score ', ' league ', ' player ',
-                  'tournament', 'bundesliga', 'la liga', 'serie a',
-                  'champions league', 'europa league', 'ufc', 'mma', 'boxing',
-                  'formula 1', 'f1', 'wimbledon', 'super bowl', 'world series'],
-    'economics': ['gdp', 'inflation', 'federal reserve', 'fed rate', 'interest rate',
-                  'recession', 'stock market', 'nasdaq', 'sp500', 's&p', 'cpi',
-                  'unemployment', 'treasury', 'stock', 'economy', 'dow', 'dollar',
-                  'euro', 'trade deficit', 'budget deficit', 'debt ceiling'],
-    'science':   ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
-                  'cancer', 'physics', 'biology', 'crispr', 'fusion',
-                  'earthquake', 'hurricane', 'temperature', 'science', 'research',
-                  'drug approval', 'clinical trial'],
+    'crypto':        ['bitcoin', 'btc', 'ethereum', 'crypto', 'blockchain',
+                      'defi', 'nft', 'solana', 'binance', 'coinbase', 'stablecoin',
+                      'doge', 'dogecoin', 'xrp', 'ripple'],
+    'ai_tech':       [' ai ', 'gpt', 'llm', 'openai', 'anthropic', 'claude', 'gemini',
+                      'machine learning', 'artificial intelligence', 'neural', 'deepmind',
+                      'chatgpt', 'language model', 'deepseek', 'chatbot', 'mistral',
+                      'grok', 'xai'],
+    'gaming':        [# Video game platforms, titles, releases, esports.
+                      # Space-bounded terms avoid substring false positives
+                      # (' steam ' won't match 'stream', ' switch ' won't match 'switches').
+                      ' xbox ', ' playstation ', ' ps5 ', ' ps6 ',
+                      ' nintendo ', ' switch ', ' steam ',
+                      'video game', 'videogame', 'e-sport', 'esport', 'twitch',
+                      'minecraft', 'fortnite', 'roblox', 'zelda', 'mario',
+                      'pokemon', 'pokémon', 'call of duty', 'warcraft',
+                      'league of legends', 'valorant', 'counter-strike',
+                      ' dota ', ' dota2', 'gta ', ' gta6', 'starfield', 'elden ring',
+                      'game release', 'game launch', 'gaming', 'speedrun'],
+    'entertainment': [# Movies, TV, music, celebrities, awards.
+                      'movie', 'film release', 'cinema', 'box office',
+                      'oscar', 'academy award', 'emmy', 'grammy',
+                      'golden globe', 'tony award', 'cannes',
+                      'netflix', 'disney+', 'disney plus', ' hbo ',
+                      'streaming service', 'amazon prime video', 'paramount+',
+                      'tv show', 'tv series', 'sitcom', 'drama series',
+                      'album', 'concert', 'tour dates', 'billboard', 'top 40',
+                      'music video',
+                      'celebrity', ' celeb ', 'hollywood', 'actor', 'actress',
+                      'taylor swift', 'beyonce', 'beyoncé', 'drake', 'kanye',
+                      'kardashian', 'rihanna', 'bieber',
+                      'marvel', 'dc comics', 'star wars', 'harry potter',
+                      'lord of the rings', 'game of thrones', 'house of the dragon',
+                      'anime', 'manga', 'pixar', 'dreamworks'],
+    'politics':      ['trump', 'biden', 'election', 'congress', 'senate', 'president',
+                      'democrat', 'republican', 'vote', 'policy', 'legislation',
+                      'supreme court', 'governor', 'parliament',
+                      'war', 'ceasefire', 'military', 'nato', 'ukraine', 'russia',
+                      'gaza', 'israel', 'iran', 'harris', 'political', 'sanction',
+                      'tariff', 'geopolit'],
+    'sports':        [# Short acronyms MUST be space-padded to avoid substring matches:
+                      # 'nfl' inside 'inflation', 'nba' inside 'unban', etc.
+                      ' nba ', ' nfl ', ' mlb ', ' nhl ', ' fifa ', ' ufc ',
+                      ' mma ', ' f1 ',
+                      'world cup', 'olympics', 'championship', 'tennis', 'golf',
+                      'soccer', 'football', 'basketball', 'baseball', 'premier league',
+                      # Space-bounded so we match whole words only:
+                      # ' win ' avoids Windows/winning; ' game ' avoids GameStop/gaming;
+                      # ' team ' avoids steam; ' match '/' score '/' league '/' player '
+                      # avoid mismatches in economics/science questions.
+                      # _infer_market_category pads q with spaces so these also match
+                      # at the start/end of a sentence.
+                      ' win ', ' team ', ' match ', ' game ', ' score ', ' league ', ' player ',
+                      'tournament', 'bundesliga', 'la liga', 'serie a',
+                      'champions league', 'europa league', 'boxing',
+                      'formula 1', 'wimbledon', 'super bowl', 'world series'],
+    'science':       ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
+                      'cancer', 'physics', 'biology', 'crispr', 'fusion',
+                      'earthquake', 'hurricane', 'temperature', 'science', 'research',
+                      'drug approval', 'clinical trial'],
+    'business':      [# General corporate / company-specific markets. Space-padded
+                      # for common English words to avoid substring false positives
+                      # (' apple ' won't match 'pineapple', ' meta ' won't match
+                      # 'metabolism', ' x corp' won't match 'xyz').
+                      ' apple ', 'google', 'microsoft', ' meta ', 'facebook',
+                      'tesla', 'nvidia', 'tiktok', 'twitter', ' x corp', ' xai ',
+                      'uber', 'airbnb', 'walmart', 'mcdonalds', "mcdonald's",
+                      'starbucks', 'nike', 'boeing', 'samsung', 'sony',
+                      'spotify', 'shopify', 'amazon',
+                      'company', 'corporation', 'corporate',
+                      ' ceo ', ' cfo ', ' cto ', 'chief executive',
+                      'startup', ' ipo ', 'acquires', 'acquisition', 'merger',
+                      'bankruptcy', 'product launch', 'layoff', 'layoffs',
+                      'earnings report', 'quarterly report', 'subscription'],
+    'economics':     ['gdp', 'inflation', 'federal reserve', 'fed rate', 'interest rate',
+                      'recession', 'stock market', 'nasdaq', 'sp500', 's&p', 'cpi',
+                      'unemployment', 'treasury', 'stock', 'economy', 'dow', 'dollar',
+                      'euro', 'trade deficit', 'budget deficit', 'debt ceiling'],
 }
 
 # Category-level bias loaded from data/calibration_table.json at import time.
 # Falls back to the values recorded at the last manual calibration run so the
 # strategy still works on a fresh checkout before calibration data is generated.
+#
+# New v2 categories (gaming / entertainment / business) start at 0.0 so
+# probability_bias_strategy cannot fire on them until reclassify_categories.py
+# has been run and analyze_calibration.py has computed real bias values.
 _CATEGORY_BIAS_FALLBACK: Dict[str, float] = {
-    'other':     0.0439,
-    'sports':    0.0348,
-    'economics': 0.0151,
-    'politics':  0.0623,
-    'ai_tech':   0.0019,
-    'crypto':    0.0534,
-    'science':   0.0543,
+    'other':         0.0439,
+    'sports':        0.0348,
+    'economics':     0.0151,
+    'politics':      0.0623,
+    'ai_tech':       0.0019,
+    'crypto':        0.0534,
+    'science':       0.0543,
+    'gaming':        0.0000,   # v2 — no data yet
+    'entertainment': 0.0000,   # v2 — no data yet
+    'business':      0.0000,   # v2 — no data yet
 }
 
 
