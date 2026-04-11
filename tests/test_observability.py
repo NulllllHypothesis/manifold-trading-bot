@@ -331,5 +331,247 @@ class TestCounterEmitHelpers(unittest.TestCase):
             self.assertEqual(lines[0]["trades_executed"], 2)
 
 
+# ── Schema v2 invariant (zero-candidate AI branch fix) ──────────────────────
+#
+# The reviewer caught a real production bug on 2026-04-11: when every above-floor
+# recommendation was on AI-timeout cooldown, candidate_markets was empty, the
+# AI metadata init loop never ran, and save_research() wrote schema_version=1.
+# That halts auto_trader for the rest of the cycle.
+#
+# Fix: initialize AI defaults on every rec BEFORE the `if candidate_markets:`
+# branch, so a zero-candidate path still produces schema v2 output.
+#
+# These tests lock that invariant in so no future refactor can silently remove
+# the default-init block.
+
+from automation.auto_research import MarketResearcher
+
+
+class TestSchemaV2Invariant(unittest.TestCase):
+    """save_research() must write schema_version=2 whenever the pipeline
+    finishes, regardless of whether the AI candidate pass actually ran."""
+
+    def _make_researcher_with_tempfile(self) -> tuple:
+        """Return (researcher, tmp_path) with .research_file pointed at a temp file."""
+        with patch("automation.auto_research.PaperTrader"):
+            researcher = MarketResearcher()
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        researcher.research_file = tmp.name
+        return researcher, tmp.name
+
+    def _read(self, path: str) -> dict:
+        with open(path) as f:
+            return json.load(f)
+
+    def test_zero_candidate_branch_writes_schema_v2(self):
+        """
+        A rec that went through the new default-init block (but was never an
+        AI candidate) must serialise as schema v2. This locks in the fix:
+        ai_was_candidate must be present even on recs that never hit the AI.
+        """
+        researcher, path = self._make_researcher_with_tempfile()
+        try:
+            rec = {
+                "market_id": "mkt_x",
+                "question": "Will it rain?",
+                "recommendation": "YES",
+                "confidence": 0.65,
+                "probability": 0.5,
+                "strategies": ["probability_direction"],
+                # The defaults Op4-fix initializes on every rec:
+                "ai_was_candidate":  False,
+                "ai_returned_skip":  False,
+                "ai_recommendation": None,
+                "ai_confidence":     0.0,
+                "ai_reasoning":      "",
+                "ai_source":         None,
+            }
+            researcher.save_research([rec])
+            data = self._read(path)
+            self.assertEqual(data["latest"]["schema_version"], 2)
+        finally:
+            os.unlink(path)
+
+    def test_missing_ai_was_candidate_still_falls_back_to_v1(self):
+        """
+        Belt-and-braces: if for some reason a rec is missing ai_was_candidate
+        entirely (e.g. a caller hand-builds a rec and forgets the defaults),
+        save_research() must still write v1 so the trader halts rather than
+        trading on unvalidated data. This is the original safety guard we
+        don't want to weaken.
+        """
+        researcher, path = self._make_researcher_with_tempfile()
+        try:
+            rec = {
+                "market_id": "mkt_y",
+                "question": "Will it rain?",
+                "recommendation": "YES",
+                "confidence": 0.65,
+                # Intentionally missing every AI field
+            }
+            researcher.save_research([rec])
+            data = self._read(path)
+            self.assertEqual(data["latest"]["schema_version"], 1)
+        finally:
+            os.unlink(path)
+
+    def test_empty_recommendations_writes_v1(self):
+        """No recs at all → v1 (nothing to trade on, trader should halt)."""
+        researcher, path = self._make_researcher_with_tempfile()
+        try:
+            researcher.save_research([])
+            data = self._read(path)
+            self.assertEqual(data["latest"]["schema_version"], 1)
+        finally:
+            os.unlink(path)
+
+    def test_mixed_recs_with_one_missing_ai_field_writes_v1(self):
+        """
+        If ANY rec is missing ai_was_candidate the writer must fall back to v1.
+        This is the existing safety invariant — the new fix is supposed to
+        make this case unreachable via the normal pipeline, not to relax it.
+        """
+        researcher, path = self._make_researcher_with_tempfile()
+        try:
+            recs = [
+                {"market_id": "a", "ai_was_candidate": False},
+                {"market_id": "b"},   # missing
+            ]
+            researcher.save_research(recs)
+            data = self._read(path)
+            self.assertEqual(data["latest"]["schema_version"], 1)
+        finally:
+            os.unlink(path)
+
+
+class TestAnalyzeMarketsZeroCandidatePath(unittest.TestCase):
+    """
+    End-to-end guard for the zero-candidate path.
+
+    This test stubs out the Manifold API, the snapshot writer, the weights
+    loader, and the AI cooldown state so we can drive analyze_markets() to
+    the exact failure mode the reviewer observed in production: every above-
+    floor rec is on AI-timeout cooldown, so candidate_markets is empty, so
+    without the Op4-fix default init the resulting recs would be missing
+    ai_was_candidate and save_research() would write schema v1.
+    """
+
+    def _market(self, market_id: str, prob: float, question: str = "Will X?") -> dict:
+        import time
+        now_ms = time.time() * 1000
+        return {
+            "id":                 market_id,
+            "question":           question,
+            "probability":        prob,
+            "volume24Hours":      50.0,
+            "uniqueBettorCount":  10,
+            "totalLiquidity":     500,
+            "isResolved":         False,
+            "lastBetTime":        now_ms - 3_600_000,   # 1h ago
+            "closeTime":          now_ms + 7 * 86_400_000,
+        }
+
+    def test_all_recs_get_ai_defaults_when_candidates_empty(self):
+        from automation.auto_research import MarketResearcher
+
+        # Three markets, all with strong directional signal (probability_direction
+        # fires at prob >= 0.70). After family dedup and confidence scaling they
+        # will all clear _STAT_BOOST_FLOOR = 0.65, so they will all land in
+        # above_floor. Then we put every market on AI-timeout cooldown so the
+        # filter strips them out and candidate_markets ends up empty.
+        markets = [
+            self._market("mkt_a", 0.80),
+            self._market("mkt_b", 0.82),
+            self._market("mkt_c", 0.85),
+        ]
+        cooldown = {
+            "mkt_a": {"fails": 5, "last_fail_at": "2026-04-11T00:00:00+00:00"},
+            "mkt_b": {"fails": 5, "last_fail_at": "2026-04-11T00:00:00+00:00"},
+            "mkt_c": {"fails": 5, "last_fail_at": "2026-04-11T00:00:00+00:00"},
+        }
+
+        with patch("automation.auto_research.PaperTrader") as MockTrader, \
+             patch("automation.auto_research.api_client") as mock_api, \
+             patch("automation.auto_research._write_market_snapshots"), \
+             patch("automation.auto_research._load_strategy_weights", return_value=({}, {})), \
+             patch("automation.auto_research._load_ai_timeout_cooldown", return_value=cooldown), \
+             patch("automation.auto_research._save_ai_timeout_cooldown"), \
+             patch("automation.auto_research._is_in_ai_cooldown", return_value=True), \
+             patch("automation.auto_research.batch_analyze") as mock_batch:
+
+            mock_api.get_markets.return_value = markets
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            MockTrader.return_value = mock_instance
+
+            researcher = MarketResearcher()
+            recs = researcher.analyze_markets(limit=10)
+
+            # batch_analyze must NOT have been called because every candidate
+            # was filtered out as cooled-down.
+            mock_batch.assert_not_called()
+
+            # This is the whole point of the fix: every rec must still have
+            # the AI metadata defaults set, so save_research() writes v2.
+            self.assertGreater(len(recs), 0, "Expected at least one recommendation")
+            for rec in recs:
+                self.assertIn("ai_was_candidate",  rec, f"rec {rec.get('market_id')} missing ai_was_candidate")
+                self.assertIn("ai_returned_skip",  rec)
+                self.assertIn("ai_recommendation", rec)
+                self.assertIn("ai_confidence",     rec)
+                self.assertIn("ai_source",         rec)
+                # All defaults because no AI actually ran for them
+                self.assertFalse(rec["ai_was_candidate"])
+                self.assertFalse(rec["ai_returned_skip"])
+                self.assertIsNone(rec["ai_recommendation"])
+
+    def test_save_research_on_zero_candidate_recs_writes_v2(self):
+        """
+        Full round-trip: analyze_markets() produces recs on the zero-candidate
+        path, we hand them to save_research(), the JSON file on disk must
+        report schema_version=2 (not 1).
+        """
+        from automation.auto_research import MarketResearcher
+
+        markets = [
+            self._market("mkt_a", 0.80),
+            self._market("mkt_b", 0.82),
+        ]
+        cooldown = {
+            "mkt_a": {"fails": 5, "last_fail_at": "2026-04-11T00:00:00+00:00"},
+            "mkt_b": {"fails": 5, "last_fail_at": "2026-04-11T00:00:00+00:00"},
+        }
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        try:
+            with patch("automation.auto_research.PaperTrader") as MockTrader, \
+                 patch("automation.auto_research.api_client") as mock_api, \
+                 patch("automation.auto_research._write_market_snapshots"), \
+                 patch("automation.auto_research._load_strategy_weights", return_value=({}, {})), \
+                 patch("automation.auto_research._load_ai_timeout_cooldown", return_value=cooldown), \
+                 patch("automation.auto_research._save_ai_timeout_cooldown"), \
+                 patch("automation.auto_research._is_in_ai_cooldown", return_value=True):
+
+                mock_api.get_markets.return_value = markets
+                mock_instance = MagicMock()
+                mock_instance.positions = {}
+                MockTrader.return_value = mock_instance
+
+                researcher = MarketResearcher()
+                researcher.research_file = tmp.name
+                recs = researcher.analyze_markets(limit=10)
+                researcher.save_research(recs)
+
+            with open(tmp.name) as f:
+                data = json.load(f)
+
+            self.assertEqual(data["latest"]["schema_version"], 2,
+                             "zero-candidate path must still write schema_version=2")
+        finally:
+            os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     unittest.main()

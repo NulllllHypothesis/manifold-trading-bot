@@ -649,6 +649,30 @@ class MarketResearcher:
                 if news_by_market_id:
                     recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
+            # ── AI metadata defaults ─────────────────────────────────────────
+            # Initialize AI fields on EVERY recommendation before the candidate
+            # pass runs.  The defaults encode "this rec was never sent to AI",
+            # which is the correct state for:
+            #   - recs below the top-3 in a normal run
+            #   - ALL recs when candidate_markets is empty (e.g. every
+            #     above-floor rec is on AI-timeout cooldown)
+            #   - ALL recs when the batch_analyze() call raises and ai_results
+            #     stays empty
+            #
+            # Previously these fields were only set inside the `if candidate_markets`
+            # block, so a zero-candidate run produced recs without `ai_was_candidate`,
+            # which caused save_research() to write schema_version=1, which then
+            # halted the trader for the rest of the cycle. Setting defaults up-front
+            # guarantees schema_version=2 is written whenever the research pipeline
+            # itself runs to completion.
+            for rec in recommendations:
+                rec['ai_was_candidate']  = False
+                rec['ai_returned_skip']  = False
+                rec['ai_recommendation'] = None
+                rec['ai_confidence']     = 0.0
+                rec['ai_reasoning']      = ''
+                rec['ai_source']         = None
+
             # AI candidate selection — 3 markets, ranked by composite score.
             #
             # Composite score = confidence + priority_boost * 0.15
