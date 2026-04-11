@@ -83,10 +83,15 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
                       'war', 'ceasefire', 'military', 'nato', 'ukraine', 'russia',
                       'gaza', 'israel', 'iran', 'harris', 'political', 'sanction',
                       'tariff', 'geopolit'],
-    'sports':        [# Short acronyms MUST be space-padded to avoid substring matches:
-                      # 'nfl' inside 'inflation', 'nba' inside 'unban', etc.
-                      ' nba ', ' nfl ', ' mlb ', ' nhl ', ' fifa ', ' ufc ',
-                      ' mma ', ' f1 ',
+    'sports':        [# Only acronyms with real English-word substring collisions
+                      # are space-padded:
+                      #   ' nfl ' — without spaces matches inside 'inflation', 'conflict'
+                      #   ' nba ' — without spaces matches inside 'unbalanced', 'unbanked'
+                      #   ' mma ' — without spaces matches inside 'comma', 'summary'
+                      # Others (mlb/nhl/ufc/fifa/f1) have low substring risk and are
+                      # left unpadded so bracketed tokens like "[F1 China]" still match.
+                      ' nba ', ' nfl ', ' mma ',
+                      'mlb', 'nhl', 'fifa', 'ufc', 'f1',
                       'world cup', 'olympics', 'championship', 'tennis', 'golf',
                       'soccer', 'football', 'basketball', 'baseball', 'premier league',
                       # Space-bounded so we match whole words only:
