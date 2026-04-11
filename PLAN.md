@@ -465,17 +465,18 @@ Right now live recommendations are mono-strategy (`9/9` driven by `probability_d
 - [ ] optional small JSON artifact per run (`data/research_counters.jsonl` / `data/trader_counters.jsonl`) for trend analysis later
 - [ ] tests in `tests/test_automation.py` (or a focused new file) that the counters survive a normal run and correctly tally the core rejection reasons
 
-#### ✅ Op4 — Live snapshot quality (`days_before_close`)
+#### ✅ Op4 — Live snapshot quality (`days_before_close`) (done 2026-04-11)
 
-Unlocks the `~3100+` live snapshots already accumulating on the server as future M4/M5/M6 training data. Higher-leverage data improvement than training on today's thin 127-row corpus.
+Forward path + historical backfill for the live snapshot training pipeline.
 
 - [x] `auto_research.py::_write_market_snapshots()` — computes `days_before_close` from each market's `closeTime` at snapshot time; clamps already-closed observations to 0; `None` when `closeTime` missing or malformed
 - [x] `scripts/backfill_days_before_close.py` — one-off backfill for existing NULL live rows; fast local lookup via `resolved_markets.close_date`, optional `--no-api` mode, idempotent (`WHERE days_before_close IS NULL`)
-- [x] `scripts/build_training_dataset.py` — live rows are now picked up: one row kept per `(market_id, window)` where `window ∈ {7, 14, 30}`, earliest snapshot per window wins (least converged = closest to decision-time semantics from M3)
-- [x] `tests/test_days_before_close.py` — 24 tests covering the math floor, already-closed clamping, missing/malformed `closeTime`, `_load_resolved_close_ms_map`, end-to-end backfill with idempotency check, and live-row filtering in `load_examples()`
-- [ ] Run backfill on server: `python3 scripts/backfill_days_before_close.py --dry-run` → then without `--dry-run`
-- [ ] Rebuild training dataset after backfill: `python3 scripts/build_training_dataset.py`
-- [ ] Re-run M5: `python3 scripts/run_eval_harness.py --split test` to verify the crowd baseline still moves sanely with the expanded corpus
+- [x] `scripts/build_training_dataset.py` — live rows picked up via `_snap_live_to_window()`: one row kept per `(market_id, window)` where `window ∈ {7, 14, 30}` with `±1` day tolerance, earliest snapshot per window wins
+- [x] `tests/test_days_before_close.py` — 30 tests covering the math floor, already-closed clamping, missing/malformed `closeTime`, `_load_resolved_close_ms_map`, end-to-end backfill with idempotency, `_snap_live_to_window` bucketing, and live-row filtering in `load_examples()`
+- [x] Server backfill run: **4384 of 4605 rows populated** (95.2%); 221 unresolvable (deleted markets); ~72s wall time via Manifold API with 0.2s delay
+- [x] Training dataset rebuilt: still 127 rows (all reconstructed) because **0 of 16 qualifying live markets have resolved yet** — Op4 is pre-positioning data so that when those markets do resolve, they flow through to M4/M5/M6 automatically
+
+**Expected future effect:** as the 4500 backfilled live rows slide through the T-7/14/30 windows and their markets resolve, the dataset will grow week-over-week without any further code changes. The live logger now persistently captures what it needs.
 
 #### 🟢 Op5 — Strategy mix retune
 
