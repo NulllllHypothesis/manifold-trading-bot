@@ -137,13 +137,34 @@ def find_all_weak_positions(positions: Dict) -> List[Dict]:
 
 # ── Opportunity analysis ───────────────────────────────────────────────────────
 
+def _swap_ev(rec: Dict) -> Optional[float]:
+    """
+    Return the EV figure to use for swap decisions.
+
+    Swaps compare against a REAL unrealised loss on an open position, so they
+    must use the EV computed at the actual executable stake (MAX_BET_AMOUNT),
+    not the $25 cross-market ranking reference.
+
+    Falls back to the legacy 'estimated_ev' field for pre-migration research
+    files that don't yet have 'estimated_ev_exec'.
+    """
+    ev = rec.get('estimated_ev_exec')
+    if ev is None:
+        ev = rec.get('estimated_ev')
+    return ev
+
+
 def find_best_opportunity(research: Dict, existing_ids: set) -> Optional[Dict]:
     """
-    Find the recommendation with the highest positive EV that:
+    Find the recommendation with the highest positive executable-size EV that:
     - Is not in existing_ids (already held OR already proposed as a target)
     - Has confidence >= MIN_CONFIDENCE
     - Was not vetoed by AI (SKIP)
-    - Has a positive estimated_ev
+    - Has a positive estimated_ev_exec (or legacy estimated_ev fallback)
+
+    Ranking by exec EV instead of reference EV is the correct choice for swaps:
+    reference EV at $25 overstates the attractiveness of any proposal under the
+    current $5 MAX_BET_AMOUNT throttle by 5×.
 
     Returns None if no qualifying opportunity exists.
     """
@@ -165,7 +186,7 @@ def find_best_opportunity(research: Dict, existing_ids: set) -> Optional[Dict]:
         if rec.get('liquidity', 0) < MIN_LIQUIDITY:
             continue
 
-        ev = rec.get('estimated_ev')
+        ev = _swap_ev(rec)
         if ev is None or ev <= 0:
             continue
 
@@ -240,7 +261,8 @@ def format_telegram_message(swap: Dict) -> str:
     close_now = swap.get('close_current_probability', 0)
     close_pnl = swap.get('close_unrealised_pnl', 0)
     open_rec = swap.get('open_recommendation', {})
-    open_ev = open_rec.get('estimated_ev', 0) or 0
+    # Prefer exec EV — that's the number the swap decision was gated on.
+    open_ev = _swap_ev(open_rec) or 0
     open_conf = open_rec.get('confidence', 0) or 0
 
     return (
@@ -249,7 +271,7 @@ def format_telegram_message(swap: Dict) -> str:
         f"  Entered {close_entry:.0%}, now {close_now:.0%}, unrealised ${close_pnl:+.2f}\n"
         "\n"
         f"Open: {open_rec.get('recommendation', '?')} on \"{swap['open_question'][:70]}\"\n"
-        f"  AI confidence {open_conf:.0%}, EV +${open_ev:.2f}\n"
+        f"  AI confidence {open_conf:.0%}, exec EV +${open_ev:.2f}\n"
         "\n"
         f"Reply \"approve swap {swap_id}\" to execute.\n"
         f"Reply \"dismiss swap {swap_id}\" to skip.\n"
@@ -311,11 +333,14 @@ def run_swap_check() -> int:
             break
 
         loss = abs(weakest['unrealised_pnl'])
-        best_ev = best.get('estimated_ev', 0)
+        # Gate on exec-size EV, not reference EV. A "+$4 EV at $25 stake"
+        # proposal is actually "+$0.80 EV at $5 stake" — and that's what we'd
+        # really capture if we executed the swap right now.
+        best_ev = _swap_ev(best) or 0.0
 
         if best_ev <= loss:
             print(
-                f"  {weakest['market_id']}: best EV ${best_ev:.2f} does not justify "
+                f"  {weakest['market_id']}: best exec EV ${best_ev:.2f} does not justify "
                 f"${loss:.2f} loss — skipping this pair."
             )
             continue
@@ -327,7 +352,7 @@ def run_swap_check() -> int:
         print(
             f"  Proposal #{swap_id}: close {weakest['market_id']} "
             f"(pnl ${weakest['unrealised_pnl']:+.2f}) → open {best['market_id']} "
-            f"(EV ${best_ev:.2f})"
+            f"(exec EV ${best_ev:.2f})"
         )
 
     if not proposals:

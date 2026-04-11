@@ -19,7 +19,7 @@ from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import TradingStrategies, _infer_market_category
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
-from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY
+from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY, MAX_BET_AMOUNT
 from manifold_bot.news_fetcher import fetch_headlines
 from scripts.position_swap_checker import run_swap_check
 
@@ -678,25 +678,48 @@ class MarketResearcher:
                         rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
                     # if ai returned something unexpected, leave confidence unchanged
 
-            # Compute estimated_ev for every recommendation now that ai_estimated_probability
-            # is set. This value is consumed by position_swap_checker to rank opportunities
-            # and gate swap proposals (requires ev > 0). Uses a fixed reference bet for
-            # cross-market comparability; auto_trader.py will recompute with actual size.
+            # Compute two EV figures for every recommendation now that
+            # ai_estimated_probability is set:
+            #
+            #   estimated_ev_ref  — at a fixed $25 reference stake. Used ONLY for
+            #                       cross-market ranking. Stake-independent ordering
+            #                       is useful because it lets us compare raw edge
+            #                       quality without having to know the current
+            #                       position sizing throttle.
+            #
+            #   estimated_ev_exec — at the actual executable stake under the current
+            #                       MAX_BET_AMOUNT throttle. This is what swap
+            #                       decisions MUST compare against real unrealised
+            #                       losses, because a "+$4 EV" swap computed at $25
+            #                       reference is actually "+$0.80 EV" at the live
+            #                       $5 cap.
+            #
+            # estimated_ev remains as an alias for estimated_ev_ref so older
+            # consumers (backtests, reports) don't break.
             _EV_REF = 25.0
+            _EV_EXEC = float(MAX_BET_AMOUNT)
             for rec in recommendations:
                 ai_p = rec.get('ai_estimated_probability')
                 direction = rec.get('recommendation')
                 mkt_p = max(0.01, min(0.99, rec.get('probability', 0.5)))
+
                 if ai_p is not None and direction in ('YES', 'NO'):
                     if direction == 'YES':
-                        gross = _EV_REF / mkt_p
                         win_p = float(ai_p)
+                        payout_per_dollar = 1.0 / mkt_p
                     else:
-                        gross = _EV_REF / (1.0 - mkt_p)
                         win_p = 1.0 - float(ai_p)
-                    rec['estimated_ev'] = round(win_p * gross - _EV_REF, 4)
+                        payout_per_dollar = 1.0 / (1.0 - mkt_p)
+
+                    # EV(stake) = stake * (win_p * payout_per_dollar - 1)
+                    ev_per_dollar = win_p * payout_per_dollar - 1.0
+                    rec['estimated_ev_ref']  = round(_EV_REF  * ev_per_dollar, 4)
+                    rec['estimated_ev_exec'] = round(_EV_EXEC * ev_per_dollar, 4)
+                    rec['estimated_ev']      = rec['estimated_ev_ref']  # legacy alias
                 else:
-                    rec['estimated_ev'] = None
+                    rec['estimated_ev_ref']  = None
+                    rec['estimated_ev_exec'] = None
+                    rec['estimated_ev']      = None
 
             # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)

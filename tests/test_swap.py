@@ -292,6 +292,122 @@ class TestFindBestOpportunity(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Swap EV correctness — Op2 fix
+#
+# Swap decisions must compare real unrealised losses against the EV at the
+# actual executable stake (MAX_BET_AMOUNT), not the $25 cross-market ranking
+# reference. These tests lock that behaviour in so a future change can't
+# silently regress to ref-EV gating.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from scripts.position_swap_checker import _swap_ev
+
+
+def _make_recommendation_v2(market_id='mkt_new', confidence=0.75,
+                             ev_ref=20.0, ev_exec=4.0,
+                             recommendation='YES', ai_rec='YES'):
+    """v2 recommendation shape with BOTH ev fields set."""
+    return {
+        'market_id': market_id,
+        'question': 'Will something happen?',
+        'recommendation': recommendation,
+        'confidence': confidence,
+        'estimated_ev_ref':  ev_ref,
+        'estimated_ev_exec': ev_exec,
+        'estimated_ev':      ev_ref,   # legacy alias
+        'probability': 0.4,
+        'ai_recommendation': ai_rec,
+        'ai_returned_skip': False,
+        'strategies': ['volume_spike'],
+        'liquidity': MIN_LIQUIDITY,
+    }
+
+
+class TestSwapEvCorrectness(unittest.TestCase):
+    """Op2: swap scoring must use estimated_ev_exec, not estimated_ev_ref."""
+
+    # ── _swap_ev helper ────────────────────────────────────────────────────
+
+    def test_swap_ev_prefers_exec(self):
+        """When both fields exist, _swap_ev returns exec (the smaller, honest number)."""
+        rec = _make_recommendation_v2(ev_ref=20.0, ev_exec=4.0)
+        self.assertEqual(_swap_ev(rec), 4.0)
+
+    def test_swap_ev_falls_back_to_legacy_estimated_ev(self):
+        """Pre-migration recs with only 'estimated_ev' still work."""
+        rec = {'estimated_ev': 8.0}
+        self.assertEqual(_swap_ev(rec), 8.0)
+
+    def test_swap_ev_returns_none_when_both_missing(self):
+        rec = {'market_id': 'x'}
+        self.assertIsNone(_swap_ev(rec))
+
+    def test_swap_ev_exec_none_falls_back_to_legacy(self):
+        """If exec is explicitly None but legacy is set, use legacy."""
+        rec = {'estimated_ev_exec': None, 'estimated_ev': 7.5}
+        self.assertEqual(_swap_ev(rec), 7.5)
+
+    # ── find_best_opportunity uses exec EV for ranking ────────────────────
+
+    def test_ranks_by_exec_not_ref(self):
+        """
+        Market A has higher REF EV but lower EXEC EV.
+        Market B has lower REF EV but higher EXEC EV.
+        find_best_opportunity must pick B (the one with better exec EV).
+        """
+        research = {'recommendations': [
+            _make_recommendation_v2(market_id='a', ev_ref=50.0, ev_exec=2.0),
+            _make_recommendation_v2(market_id='b', ev_ref=20.0, ev_exec=6.0),
+        ]}
+        best = find_best_opportunity(research, set())
+        self.assertEqual(best['market_id'], 'b')
+
+    def test_rejects_rec_with_positive_ref_but_nonpositive_exec(self):
+        """Positive ref EV does not rescue a rec whose exec EV is zero or negative."""
+        research = {'recommendations': [
+            _make_recommendation_v2(market_id='a', ev_ref=25.0, ev_exec=0.0),
+        ]}
+        self.assertIsNone(find_best_opportunity(research, set()))
+
+    def test_legacy_rec_without_exec_field_still_works(self):
+        """
+        A recommendation written by pre-Op2 code (only 'estimated_ev', no
+        'estimated_ev_exec') must still be findable — the fallback in _swap_ev
+        uses the legacy field.
+        """
+        legacy_rec = _make_recommendation(market_id='legacy', ev=15.0)
+        # Strip v2 fields explicitly to simulate pre-migration data
+        legacy_rec.pop('estimated_ev_exec', None)
+        legacy_rec.pop('estimated_ev_ref',  None)
+        research = {'recommendations': [legacy_rec]}
+        best = find_best_opportunity(research, set())
+        self.assertIsNotNone(best)
+        self.assertEqual(best['market_id'], 'legacy')
+
+    # ── Exec EV must gate the swap-worthiness check ───────────────────────
+
+    def test_ref_ev_would_clear_loss_but_exec_ev_does_not(self):
+        """
+        This is the WTI-scenario regression guard:
+          loss  = $1.99
+          ref   = +$4.09  (would clear if we used ref)
+          exec  = +$0.80  (does NOT clear under $5 cap)
+        Op2 requires this proposal to be REJECTED.
+
+        We verify by running the same logic find_best_opportunity +
+        run_swap_check do: best.ev_exec > loss.
+        """
+        rec = _make_recommendation_v2(market_id='wti', ev_ref=4.09, ev_exec=0.80)
+        loss = 1.99
+        ev = _swap_ev(rec)
+        self.assertLess(ev, loss,
+                        f"exec EV ${ev:.2f} must be below loss ${loss:.2f} for this scenario")
+        # And just to be explicit: if gated on ref EV this would have passed.
+        self.assertGreater(rec['estimated_ev_ref'], loss,
+                           "ref EV should exceed loss — that's the bug we're guarding against")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # has_active_pending_swaps
 # ─────────────────────────────────────────────────────────────────────────────
 

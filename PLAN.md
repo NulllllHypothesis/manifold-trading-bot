@@ -423,6 +423,40 @@ Adds real current-event awareness to the fundamental family. Addresses the knowl
 - [x] `news_strategy` in `strategies.py` — `family: "fundamental"`, confidence 0.60–0.80 based on headline recency and relevance
 - [x] Wire into `auto_research.py` — top 3 candidates per cycle (72 max req/day on free tier); recency-scaled confidence modifier
 
+#### 🔴 Op1 — Unblock live loop (operational)
+
+The bot is currently jammed: `11/10` positions open, `$55` balance, one pending swap blocking all further swap proposals (see [position_swap_checker.py](scripts/position_swap_checker.py#L284)).
+
+- [ ] Approve or dismiss the active pending swap via `scripts/execute_swap.py --id N [--dismiss]`
+- [ ] Verify swap loop resumes on next `:20` cron cycle
+- [ ] Confirm trader can open new positions after the book drops below `10/10`
+
+#### 🔴 Op2 — Swap EV correctness
+
+**Bug:** [auto_research.py:685](automation/auto_research.py#L685) computes `estimated_ev` using a fixed `_EV_REF = $25` reference size for cross-market ranking. [position_swap_checker.py:313-321](scripts/position_swap_checker.py#L313) then compares a **real unrealised loss** against this **$25 reference EV**, so a swap looks ~5× more attractive than it really is under the current `MAX_BET_AMOUNT=$5` throttle. This is why the WTI swap proposal (loss `-$1.99`, ref-EV `+$4.09`, exec-EV closer to `+$0.80`) looked better on paper than it was.
+
+- [ ] `auto_research.py` — write BOTH `estimated_ev_ref` ($25 ref size for cross-market ranking) and `estimated_ev_exec` (at real executable size under `MAX_BET_AMOUNT`) onto every recommendation
+- [ ] Keep legacy `estimated_ev` field pointing to `estimated_ev_ref` so anything reading it still works
+- [ ] `position_swap_checker.py` — use `estimated_ev_exec` for both the `find_best_opportunity` ranking AND the `ev > loss` gate; fall back to `estimated_ev` only if the new field is missing (pre-migration data)
+- [ ] Add tests in `tests/test_swap.py` covering: both fields written, exec < ref under throttle, swap rejected when only ref-EV would clear loss
+
+#### 🟢 Op3 — Strategy observability
+
+Right now live recommendations are mono-strategy (`9/9` driven by `probability_direction` at `0.65`), but we can't tell whether that's because base confidences are mistuned or because the other strategies simply aren't firing. Before retuning anything, add counters.
+
+- [ ] `auto_research.py` — per-run counters: raw fires by strategy, survivors after family dedup, AI candidate count, AI skip/veto count
+- [ ] `auto_trader.py` — per-run counters: trader rejection reasons (max positions, category cap, liquidity, Kelly-zero, MIN_BET)
+- [ ] Surface both in `daily_summary.py` as a compact block so we can watch the distribution over time
+- [ ] Only retune base confidences AFTER we have a week of observability data
+
+#### 🟢 Op4 — Fix `days_before_close` in live logger
+
+Unlocks the `~4500+` live snapshots already accumulating on the server as future M4/M5/M6 training data. Higher-leverage data improvement than training on today's thin 127-row corpus.
+
+- [ ] `auto_research.py::_write_market_snapshots()` — compute `days_before_close` from each market's `closeTime` at snapshot time
+- [ ] Backfill existing live rows where `closeTime` is still available via Manifold API
+- [ ] Re-run `build_training_dataset.py` once enough rows have a value to unlock the live accumulation path in [build_training_dataset.py:195](scripts/build_training_dataset.py#L195)
+
 #### 🟡 P4 — Whale Tracking
 
 Strong signal when it fires. High-accuracy large bettors on Manifold have asymmetric information. Confidence scales with bettor track record and bet size.
