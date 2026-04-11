@@ -220,7 +220,9 @@ def _write_market_snapshots(markets: list) -> None:
             snapshot_at, source, days_before_close, outcome
     """
     os.makedirs(os.path.dirname(_SNAPSHOTS_DB_PATH), exist_ok=True)
-    snapshot_at = datetime.now(timezone.utc).isoformat()
+    snapshot_at_dt = datetime.now(timezone.utc)
+    snapshot_at    = snapshot_at_dt.isoformat()
+    snapshot_at_ms = snapshot_at_dt.timestamp() * 1000.0
 
     conn = sqlite3.connect(_SNAPSHOTS_DB_PATH)
     conn.execute("""
@@ -261,8 +263,28 @@ def _write_market_snapshots(markets: list) -> None:
         ON market_snapshots(source)
     """)
 
-    rows = [
-        (
+    rows = []
+    for m in markets:
+        if not m.get("id") or m.get("isResolved"):
+            continue
+
+        # Op4: compute days_before_close from the market's closeTime at snapshot
+        # time. Without this, live rows are unusable for M4/M5/M6 training because
+        # build_training_dataset.py skips rows where days_before_close is None
+        # (near-close prices converge to the outcome and would inflate accuracy).
+        # closeTime is Manifold's unix-ms close timestamp; we convert to integer
+        # days and floor non-positive values to 0 so already-closed markets are
+        # visibly distinct from "field missing" (None).
+        close_ms = m.get("closeTime")
+        days_before_close: Optional[int] = None
+        if close_ms is not None:
+            try:
+                delta_ms = float(close_ms) - snapshot_at_ms
+                days_before_close = max(0, int(delta_ms // (24 * 60 * 60 * 1000)))
+            except (TypeError, ValueError):
+                days_before_close = None
+
+        rows.append((
             m.get("id"),
             (m.get("question") or "")[:200],
             m.get("probability"),
@@ -271,12 +293,9 @@ def _write_market_snapshots(markets: list) -> None:
             m.get("totalLiquidity") or 0.0,
             snapshot_at,
             "live",
-            None,   # days_before_close — N/A for live snapshots
+            days_before_close,
             None,   # outcome — not resolved yet
-        )
-        for m in markets
-        if m.get("id") and not m.get("isResolved")
-    ]
+        ))
 
     conn.executemany("""
         INSERT INTO market_snapshots

@@ -151,6 +151,9 @@ def _load_outcome_map(calibration_db: str) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+LIVE_DECISION_WINDOWS = (7, 14, 30)
+
+
 def load_examples(
     snapshots_db: str = SNAPSHOTS_DB,
     calibration_db: str = CALIBRATION_DB,
@@ -158,6 +161,18 @@ def load_examples(
 ) -> list[dict]:
     """
     Load and join all snapshot rows that have a known outcome.
+
+    Reconstructed rows (source='reconstructed') are written by M3 at exactly
+    T-7/T-14/T-30 and each is emitted as one example.
+
+    Live rows (source='live') are written hourly by auto_research.py and
+    tagged with days_before_close at snapshot time (Op4). Many live rows
+    accumulate per market as its closeTime approaches; to match M3's
+    decision-time semantics and keep the dataset comparable, we pick
+    exactly one live row per (market_id, window) where window ∈ {7, 14, 30}
+    — specifically the earliest chronological row whose days_before_close
+    equals that window. This is the least-converged observation inside
+    each window, mirroring M3's reconstruction target.
 
     Returns list of dicts ready to serialise.
     """
@@ -171,15 +186,34 @@ def load_examples(
     conn = sqlite3.connect(snapshots_db)
     rows = conn.execute("""
         SELECT market_id, question, probability, bettors, liquidity,
-               days_before_close, source, outcome
+               days_before_close, source, outcome, snapshot_at
         FROM market_snapshots
         WHERE probability IS NOT NULL
+        ORDER BY snapshot_at ASC
     """).fetchall()
     conn.close()
 
+    # First pass: for live rows, keep one row per (market_id, window).
+    # The earliest matching snapshot wins because rows are ORDER BY snapshot_at ASC.
+    live_seen: set[tuple[str, int]] = set()
+    kept_rows: list[tuple] = []
+    for row in rows:
+        (market_id, _question, _probability, _bettors, _liquidity,
+         days_before_close, source, _stored_outcome, _snapshot_at) = row
+
+        if source == "live":
+            if days_before_close is None or days_before_close not in LIVE_DECISION_WINDOWS:
+                continue   # wrong window — skip
+            key = (market_id, int(days_before_close))
+            if key in live_seen:
+                continue   # already have a row for this market at this window
+            live_seen.add(key)
+
+        kept_rows.append(row)
+
     examples = []
     for (market_id, question, probability, bettors,
-         liquidity, days_before_close, source, stored_outcome) in rows:
+         liquidity, days_before_close, source, stored_outcome, _snapshot_at) in kept_rows:
 
         # Resolve outcome: stored (reconstructed) or joined from calibration.db (live)
         outcome = stored_outcome if stored_outcome in ("YES", "NO") else outcome_map.get(market_id)
@@ -189,13 +223,9 @@ def load_examples(
         if min_bettors and bettors is not None and bettors < min_bettors:
             continue
 
-        # Live snapshots are skipped when days_before_close is None or 0.
-        # The live logger currently writes days_before_close=None for every row
-        # (auto_research.py does not compute it at snapshot time). Until the logger
-        # is updated to compute days_before_close from the market's closeTime, live
-        # rows with no explicit decision-time window cannot safely be included —
-        # near-close prices converge toward the outcome and would inflate accuracy.
-        if source == "live" and (days_before_close is None or days_before_close < 1):
+        # Reconstructed rows: skip anything without an explicit decision window.
+        # Live rows were already filtered to LIVE_DECISION_WINDOWS above.
+        if source == "reconstructed" and (days_before_close is None or days_before_close < 1):
             continue
 
         category = cat_map.get(market_id) or _infer_market_category(question or "")
