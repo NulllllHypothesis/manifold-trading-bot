@@ -66,7 +66,12 @@ DATASET_PATH = os.path.join(ROOT_DIR, "data", "training_dataset.jsonl")
 ADAPTER_PATH = os.path.join(ROOT_DIR, "data", "lora_adapter")
 PREDS_PATH   = os.path.join(ROOT_DIR, "data", "finetuned_preds.jsonl")
 
-# Base model — pulled from HuggingFace on first run (~6 GB)
+# Base model — pulled from HuggingFace on first run (~6 GB).
+# GATED MODEL: requires accepting Meta's license at
+#   https://huggingface.co/meta-llama/Llama-3.2-3B
+# and authenticating on the server with either:
+#   huggingface-cli login
+# or passing --hf-token <your_token> at the command line.
 BASE_MODEL = "meta-llama/Llama-3.2-3B"
 
 # LoRA config — conservative settings for CPU training on 127 examples
@@ -82,6 +87,50 @@ LEARNING_RATE      = 3e-4
 MAX_SEQ_LEN        = 256    # prompt + completion well under this
 
 _EPSILON = 1e-4  # clip parsed predictions away from 0/1
+
+
+# ── HuggingFace auth preflight ────────────────────────────────────────────────
+
+def check_hf_access(hf_token: str | None = None) -> None:
+    """
+    Verify that the current environment can access the gated BASE_MODEL before
+    attempting the ~6 GB download.  Calls huggingface_hub.model_info() which is
+    fast (one API request) and raises a clear error if access is denied.
+
+    If hf_token is provided it is set as the active token for this process.
+    If it is None the function relies on the token already cached by
+    `huggingface-cli login` (stored in ~/.cache/huggingface/token).
+    """
+    try:
+        from huggingface_hub import model_info, login
+    except ImportError:
+        # huggingface_hub is a transitive dep of transformers — if it's missing
+        # the full install is broken; skip the check and let transformers fail.
+        print("  [preflight] huggingface_hub not available; skipping access check.")
+        return
+
+    if hf_token:
+        login(token=hf_token, add_to_git_credential=False)
+        print("  [preflight] HF token set.")
+
+    try:
+        model_info(BASE_MODEL)
+        print(f"  [preflight] Access confirmed: {BASE_MODEL}")
+    except Exception as exc:
+        error_msg = str(exc)
+        if "401" in error_msg or "403" in error_msg or "gated" in error_msg.lower():
+            print(
+                f"\nERROR: Cannot access gated model '{BASE_MODEL}'.\n"
+                f"\nYou need to:\n"
+                f"  1. Accept the Meta license at:\n"
+                f"       https://huggingface.co/meta-llama/Llama-3.2-3B\n"
+                f"  2. Authenticate on this machine with one of:\n"
+                f"       huggingface-cli login\n"
+                f"       python3 scripts/finetune.py --hf-token <your_token>\n"
+            )
+        else:
+            print(f"\nERROR: HuggingFace model check failed: {exc}\n")
+        sys.exit(1)
 
 
 # ── Dataset loading ───────────────────────────────────────────────────────────
@@ -244,6 +293,7 @@ def train(
     epochs: int,
     batch_size: int,
     adapter_path: str,
+    hf_token: str | None = None,
 ) -> None:
     """Fine-tune the base model with LoRA on train_examples."""
     print("\nLoading HuggingFace libraries...", flush=True)
@@ -255,7 +305,8 @@ def train(
     print("(First run downloads ~6 GB — may take a few minutes)", flush=True)
     t0 = time.time()
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, use_fast=True,
+                                              token=hf_token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -263,6 +314,7 @@ def train(
         BASE_MODEL,
         torch_dtype="auto",   # fp32 on CPU
         device_map="cpu",
+        token=hf_token,
     )
     print(f"Model loaded in {time.time()-t0:.0f}s  "
           f"({model.num_parameters()/1e6:.0f}M parameters)", flush=True)
@@ -339,7 +391,7 @@ def train(
 
 # ── Load adapter for prediction ───────────────────────────────────────────────
 
-def load_model_for_inference(adapter_path: str):
+def load_model_for_inference(adapter_path: str, hf_token: str | None = None):
     """Load base model + LoRA adapter for inference."""
     from transformers import AutoTokenizer, AutoModelForCausalLM
     from peft import PeftModel
@@ -353,6 +405,7 @@ def load_model_for_inference(adapter_path: str):
         BASE_MODEL,
         torch_dtype = "auto",
         device_map  = "cpu",
+        token       = hf_token,
     )
     model = PeftModel.from_pretrained(base, adapter_path)
     return model, tokenizer
@@ -361,17 +414,22 @@ def load_model_for_inference(adapter_path: str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(
-    dataset_path:  str  = DATASET_PATH,
-    adapter_path:  str  = ADAPTER_PATH,
-    preds_path:    str  = PREDS_PATH,
-    epochs:        int  = DEFAULT_EPOCHS,
-    batch_size:    int  = DEFAULT_BATCH_SIZE,
-    dry_run:       bool = False,
-    predict_only:  bool = False,
+    dataset_path:  str       = DATASET_PATH,
+    adapter_path:  str       = ADAPTER_PATH,
+    preds_path:    str       = PREDS_PATH,
+    epochs:        int       = DEFAULT_EPOCHS,
+    batch_size:    int       = DEFAULT_BATCH_SIZE,
+    dry_run:       bool      = False,
+    predict_only:  bool      = False,
+    hf_token:      str|None  = None,
 ) -> None:
     print("=" * 72)
     print("M6 — LORA FINE-TUNE  (train → finetuned_preds.jsonl → M5 eval)")
     print("=" * 72)
+
+    # Verify HuggingFace access before attempting a 6 GB download.
+    if not dry_run:
+        check_hf_access(hf_token)
 
     splits = load_dataset(dataset_path)
     train_n = len(splits["train"])
@@ -395,7 +453,7 @@ def main(
             print("ERROR: no train examples found.")
             sys.exit(1)
         train(splits["train"], epochs=epochs, batch_size=batch_size,
-              adapter_path=adapter_path)
+              adapter_path=adapter_path, hf_token=hf_token)
     else:
         print("\n[predict-only] Skipping training — loading existing adapter.")
 
@@ -404,7 +462,7 @@ def main(
         sys.exit(1)
 
     # ── Inference on all splits ────────────────────────────────────────────
-    model, tokenizer = load_model_for_inference(adapter_path)
+    model, tokenizer = load_model_for_inference(adapter_path, hf_token=hf_token)
 
     all_examples = splits["train"] + splits["val"] + splits["test"]
     print(f"\nRunning inference on {len(all_examples)} examples...", flush=True)
@@ -443,6 +501,9 @@ if __name__ == "__main__":
                         help="Validate config and dataset loading without training")
     parser.add_argument("--predict-only", action="store_true",
                         help="Skip training; load existing adapter and run inference")
+    parser.add_argument("--hf-token",     default=None,
+                        help="HuggingFace access token for the gated Llama-3.2-3B "
+                             "model. Alternatively run: huggingface-cli login")
     args = parser.parse_args()
 
     main(
@@ -453,4 +514,5 @@ if __name__ == "__main__":
         batch_size    = args.batch_size,
         dry_run       = args.dry_run,
         predict_only  = args.predict_only,
+        hf_token      = args.hf_token,
     )
