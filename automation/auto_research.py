@@ -25,6 +25,127 @@ from scripts.position_swap_checker import run_swap_check
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SNAPSHOTS_DB_PATH = os.path.join(_ROOT, "data", "market_snapshots.db")
+_RESEARCH_COUNTERS_PATH = os.path.join(_ROOT, "data", "research_counters.jsonl")
+
+
+# ── Op3: Strategy observability ───────────────────────────────────────────────
+# Per-run counters covering every stage of the research pipeline. Used to
+# diagnose why the live system is currently mono-strategy — before any base
+# confidence retuning we need evidence of WHERE in the pipeline the non-
+# probability_direction signals are being lost (never fire? dedup'd out?
+# tied? vetoed by AI?).
+#
+# See PLAN.md Op3 for the full motivation and Op5 for the retune that these
+# counters will inform.
+
+def _new_research_counters() -> dict:
+    """Return a fresh counters dict — one per analyze_markets() call."""
+    return {
+        "timestamp":           None,        # set at run start, ISO UTC
+        "markets_fetched":     0,
+        # Pre-strategy filter skips
+        "skipped_resolved":    0,
+        "skipped_low_liquidity": 0,
+        "skipped_stale":       0,
+        # Raw strategy fires (counted BEFORE family dedup / weight scaling)
+        "raw_fires": {
+            "probability_direction": 0,
+            "mean_reversion":        0,
+            "probability_bias":      0,
+            "creator_disagreement":  0,
+            "thin_market":           0,
+        },
+        # Family dedup winners (one per family per market, max)
+        "dedup_winners": {
+            "momentum":    0,
+            "contrarian":  0,
+            "fundamental": 0,
+        },
+        "thin_market_confirmations": 0,   # thin_market +0.03 boost applied
+        "no_active_signals":         0,   # all strategies silent → dropped
+        "tied_votes_dropped":        0,   # yes_votes == no_votes → dropped
+        # AI flow
+        "ai_eligible":     0,   # recs with confidence above _STAT_BOOST_FLOOR
+        "ai_cooled_down":  0,   # filtered out by AI-timeout cooldown
+        "ai_analyzed":     0,   # actually sent to the AI
+        "ai_agree":        0,
+        "ai_disagree":     0,
+        "ai_skip":         0,   # AI returned SKIP
+        "ai_no_result":    0,   # timeout / missing response
+        # Final output composition
+        "final_recommendations": 0,
+        "final_by_strategy_mix": {},    # e.g. {"probability_direction": 9}
+        "final_by_category":     {},
+    }
+
+
+def _finalize_research_counters(counters: dict, recommendations: list) -> None:
+    """
+    Compute the 'final_*' breakdowns from the output recommendation list.
+    Called once right before save_research() so the counters reflect the
+    exact recs that will be written to market_research.json.
+    """
+    counters["final_recommendations"] = len(recommendations)
+    by_mix: dict = {}
+    by_cat: dict = {}
+    for rec in recommendations:
+        # Strategy mix signature: sorted tuple of strategy names, joined.
+        # Excludes 'ai_analysis' because that is a post-hoc tag, not a signal.
+        strats = sorted(s for s in (rec.get('strategies') or []) if s != 'ai_analysis')
+        key = ",".join(strats) if strats else "(none)"
+        by_mix[key] = by_mix.get(key, 0) + 1
+        cat = rec.get('category') or 'other'
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    counters["final_by_strategy_mix"] = by_mix
+    counters["final_by_category"]     = by_cat
+
+
+def _print_research_counters(counters: dict) -> None:
+    """Human-readable end-of-run summary block printed to the cron log."""
+    print()
+    print("  ── Research observability (Op3) ──────────────────────────────")
+    print(f"    Markets fetched      : {counters['markets_fetched']}")
+    print(f"    Skipped (resolved)   : {counters['skipped_resolved']}")
+    print(f"    Skipped (low liq)    : {counters['skipped_low_liquidity']}")
+    print(f"    Skipped (stale)      : {counters['skipped_stale']}")
+    print(f"    Raw strategy fires:")
+    for strat, n in counters['raw_fires'].items():
+        print(f"      {strat:<22} {n:>5}")
+    print(f"    Family dedup winners:")
+    for fam, n in counters['dedup_winners'].items():
+        print(f"      {fam:<22} {n:>5}")
+    print(f"    Thin-market confirmations : {counters['thin_market_confirmations']}")
+    print(f"    No active signals (drop)  : {counters['no_active_signals']}")
+    print(f"    Tied YES/NO votes (drop)  : {counters['tied_votes_dropped']}")
+    print(f"    AI flow:")
+    print(f"      eligible     {counters['ai_eligible']:>4}"
+          f"    cooled-down  {counters['ai_cooled_down']:>4}"
+          f"    analyzed    {counters['ai_analyzed']:>4}")
+    print(f"      agree        {counters['ai_agree']:>4}"
+          f"    disagree     {counters['ai_disagree']:>4}"
+          f"    skip        {counters['ai_skip']:>4}"
+          f"    no-result   {counters['ai_no_result']:>4}")
+    print(f"    Final recommendations: {counters['final_recommendations']}")
+    if counters['final_by_strategy_mix']:
+        print(f"    Strategy mix:")
+        for mix, n in sorted(counters['final_by_strategy_mix'].items(), key=lambda x: -x[1]):
+            print(f"      {mix:<40} {n:>3}")
+    if counters['final_by_category']:
+        print(f"    Category mix:")
+        for cat, n in sorted(counters['final_by_category'].items(), key=lambda x: -x[1]):
+            print(f"      {cat:<22} {n:>3}")
+    print("  ──────────────────────────────────────────────────────────────")
+
+
+def _append_research_counters(counters: dict) -> None:
+    """Append one JSON line to data/research_counters.jsonl for trend analysis."""
+    try:
+        os.makedirs(os.path.dirname(_RESEARCH_COUNTERS_PATH), exist_ok=True)
+        with open(_RESEARCH_COUNTERS_PATH, "a") as f:
+            f.write(json.dumps(counters) + "\n")
+    except Exception as e:
+        # Observability must never break the research run itself.
+        print(f"  Warning: could not append research counters ({e})")
 
 # ── AI timeout cooldown ────────────────────────────────────────────────────────
 # Markets that repeatedly time out Ollama waste all 3 AI candidate slots every
@@ -237,10 +358,16 @@ class MarketResearcher:
         """
         print(f"[{datetime.now()}] Starting market analysis...")
 
+        # Op3: per-run observability counters.  Populated inline at each stage
+        # of the pipeline below and emitted at the end of the try block.
+        counters = _new_research_counters()
+        counters["timestamp"] = datetime.now(timezone.utc).isoformat()
+
         try:
             # Get recent markets
             markets = api_client.get_markets(limit=limit)
             print(f"  Retrieved {len(markets)} markets")
+            counters["markets_fetched"] = len(markets)
 
             # M1: write hourly snapshot for ML training pipeline.
             # Best-effort: a snapshot failure (disk full, lock, schema) must never
@@ -284,16 +411,19 @@ class MarketResearcher:
 
                 # Skip closed/resolved markets
                 if market.get('isResolved', False):
+                    counters["skipped_resolved"] += 1
                     continue
 
                 # Skip low liquidity markets — threshold matches auto_trader.py (MIN_LIQUIDITY).
                 # Previously this was 100 while the trader rejected < 200, causing AI slots
                 # to be wasted on markets that could never be traded.
                 if liquidity < MIN_LIQUIDITY:
+                    counters["skipped_low_liquidity"] += 1
                     continue
 
                 # Skip stale markets — last bet > 72h ago AND near-zero 24h volume
                 if TradingStrategies.is_stale_market(market):
+                    counters["skipped_stale"] += 1
                     continue
 
                 # ── Run all strategies ───────────────────────────────────────
@@ -321,6 +451,7 @@ class MarketResearcher:
                                         'recommendation': prob_dir_rec,
                                         'confidence': 0.65,
                                         'family': 'momentum'})
+                    counters["raw_fires"]["probability_direction"] += 1
 
                 mean_rev_rec = TradingStrategies.mean_reversion_strategy(market)
                 if mean_rev_rec:
@@ -328,6 +459,7 @@ class MarketResearcher:
                                         'recommendation': mean_rev_rec,
                                         'confidence': 0.68,
                                         'family': 'contrarian'})
+                    counters["raw_fires"]["mean_reversion"] += 1
 
                 bias_rec = TradingStrategies.probability_bias_strategy(market)
                 if bias_rec:
@@ -335,6 +467,7 @@ class MarketResearcher:
                                         'recommendation': bias_rec,
                                         'confidence': 0.70,
                                         'family': 'contrarian'})
+                    counters["raw_fires"]["probability_bias"] += 1
 
                 creator_rec = TradingStrategies.creator_disagreement_strategy(market)
                 if creator_rec:
@@ -342,8 +475,11 @@ class MarketResearcher:
                                         'recommendation': creator_rec,
                                         'confidence': 0.75,
                                         'family': 'fundamental'})
+                    counters["raw_fires"]["creator_disagreement"] += 1
 
                 thin_rec = TradingStrategies.thin_market_strategy(market)
+                if thin_rec:
+                    counters["raw_fires"]["thin_market"] += 1
                 # thin_market is tracked separately — added only as confirmation
 
                 # ── Apply strategy reliability weights ────────────────────────
@@ -373,6 +509,7 @@ class MarketResearcher:
                         # Take the strongest signal from this family
                         best = max(family_sigs, key=lambda s: s['confidence'])
                         active_signals.append(best)
+                        counters["dedup_winners"][family] += 1
 
                 # thin_market: confirmation-only — when it agrees with the selected
                 # contrarian/fundamental signal, give that signal a small confidence
@@ -386,9 +523,11 @@ class MarketResearcher:
                         if _sig['family'] in ('contrarian', 'fundamental') and _sig['recommendation'] == thin_rec:
                             _sig['confidence'] = round(min(1.0, _sig['confidence'] + 0.03), 4)
                             thin_market_fired = True
+                            counters["thin_market_confirmations"] += 1
                             break
 
                 if not active_signals:
+                    counters["no_active_signals"] += 1
                     continue
 
                 # ── Determine overall recommendation ──────────────────────────
@@ -404,6 +543,7 @@ class MarketResearcher:
                     confidence = sum(s['confidence'] for s in active_signals
                                      if s['recommendation'] == 'NO') / no_votes
                 else:
+                    counters["tied_votes_dropped"] += 1
                     continue  # tied — no clear edge
 
                 # Check if we already have an OPEN position (closed/resolved don't count)
@@ -509,6 +649,7 @@ class MarketResearcher:
             below_floor = [
                 r for r in recommendations if r['confidence'] < _STAT_BOOST_FLOOR
             ]
+            counters["ai_eligible"] = len(above_floor)
 
             def _composite(r):
                 return r['confidence'] + r.get('priority_boost', 0.0) * 0.15
@@ -524,6 +665,7 @@ class MarketResearcher:
                 1 for r in (above_floor + below_floor)
                 if _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)
             )
+            counters["ai_cooled_down"] = n_cooled
             if n_cooled:
                 print(f"  AI cooldown: skipping {n_cooled} market(s) with >= {_AI_TIMEOUT_MAX_FAILS} recent timeouts")
                 above_floor = [r for r in above_floor if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
@@ -553,6 +695,7 @@ class MarketResearcher:
 
             if candidate_markets:
                 print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
+                counters["ai_analyzed"] = len(candidate_markets)
                 ai_results = {}
 
                 # Snapshot pre-AI confidence scores so we can restore them if the AI
@@ -585,6 +728,7 @@ class MarketResearcher:
                     # Record per-market failures: candidate got no result at all (not SKIP,
                     # which is a valid response — only missing entries indicate a timeout).
                     missing_ai = [mid for mid in top_candidate_ids if ai_results.get(mid) is None]
+                    counters["ai_no_result"] += len(missing_ai)
                     if missing_ai:
                         print(f"  AI no-result for {len(missing_ai)} candidate(s) — recording for cooldown")
                         _record_ai_timeout(missing_ai, ai_timeout_cooldown)
@@ -637,6 +781,7 @@ class MarketResearcher:
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
                         rec['ai_returned_skip'] = True
+                        counters["ai_skip"] += 1
                         continue
 
                     rec['ai_recommendation'] = ai['recommendation']
@@ -653,6 +798,7 @@ class MarketResearcher:
                     # Blend statistical + AI confidence
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
+                        counters["ai_agree"] += 1
                         # Only blend upward on agreement: a low-confidence AI agreement
                         # must not reduce a strong statistical signal. Take the maximum of
                         # stat_conf and the blended value so the stat signal is always the
@@ -668,6 +814,7 @@ class MarketResearcher:
                         rec['confidence'] = blended
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
+                        counters["ai_disagree"] += 1
                         # AI disagrees — scale the confidence multiplier by AI confidence.
                         # Formula: confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
                         #   ai_conf=1.0 → confidence_multiplier=0.40 (AI certain → hardest reduction, keeps 40% of stat score)
@@ -725,10 +872,28 @@ class MarketResearcher:
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
 
             print(f"  Found {len(recommendations)} trading opportunities")
+
+            # Op3: finalize + emit counters (best-effort — never abort the run)
+            try:
+                _finalize_research_counters(counters, recommendations)
+                _print_research_counters(counters)
+                _append_research_counters(counters)
+            except Exception as ctr_err:
+                print(f"  Warning: research counter emit failed ({ctr_err})")
+
             return recommendations
 
         except Exception as e:
             print(f"  Error analyzing markets: {e}")
+            # Emit whatever counters we managed to populate before the failure —
+            # the mix of "skipped_*" and "raw_fires" is diagnostic for the
+            # exception itself.
+            try:
+                _finalize_research_counters(counters, [])
+                _print_research_counters(counters)
+                _append_research_counters(counters)
+            except Exception:
+                pass
             return []
 
     def save_research(self, recommendations: List[Dict]):

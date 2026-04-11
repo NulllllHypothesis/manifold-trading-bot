@@ -26,6 +26,65 @@ from automation.send_telegram import send_message as _tg
 _MIN_SAMPLES_PER_CATEGORY = 8
 
 
+# ── Op3: trader-side observability counters ──────────────────────────────────
+# Mirrors the research-side counters in auto_research.py.  Every recommendation
+# that comes through run_trading_cycle() lands in exactly one of the rejection
+# buckets below, or in 'passed'.  The end-of-run print is the fastest way to
+# see why the book isn't turning over (max_positions vs category_cap vs
+# ai_veto is a very different diagnosis).
+_TRADER_COUNTERS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "trader_counters.jsonl",
+)
+
+
+def _new_trader_counters() -> dict:
+    return {
+        "timestamp":                None,   # set at run start
+        "recommendations_loaded":   0,
+        "rejected": {
+            "ai_veto":              0,
+            "low_confidence":       0,
+            "existing_open":        0,
+            "max_positions":        0,
+            "category_cap":         0,
+            "liquidity":            0,
+            "kelly_no_edge":        0,
+            "size_too_small":       0,
+            "market_unverifiable":  0,
+        },
+        "passed_filter":            0,      # survived should_trade_market
+        "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
+        "trades_executed":          0,
+    }
+
+
+def _print_trader_counters(counters: dict) -> None:
+    print()
+    print("  ── Trader observability (Op3) ───────────────────────────────")
+    print(f"    Recommendations loaded : {counters['recommendations_loaded']}")
+    print(f"    Rejections:")
+    for reason, n in counters['rejected'].items():
+        if n:
+            print(f"      {reason:<22} {n:>4}")
+    print(f"    Passed should_trade    : {counters['passed_filter']}")
+    print(f"    Trades executed        : {counters['trades_executed']}")
+    if counters['top_ev_at_exec']:
+        print(f"    Top EV-ranked (exec):")
+        for mid, ev in counters['top_ev_at_exec'][:5]:
+            print(f"      {mid:<24} ${ev:+.2f}")
+    print("  ─────────────────────────────────────────────────────────────")
+
+
+def _append_trader_counters(counters: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_TRADER_COUNTERS_PATH), exist_ok=True)
+        with open(_TRADER_COUNTERS_PATH, "a") as f:
+            f.write(json.dumps(counters) + "\n")
+    except Exception as e:
+        print(f"  Warning: could not append trader counters ({e})")
+
+
 def _load_weights_file(root: str) -> tuple[dict, dict, int, int]:
     """Load strategy_weights.json. Returns (weights, by_category, sample_count, min_threshold)."""
     path = os.path.join(root, "data", "strategy_weights.json")
@@ -154,12 +213,14 @@ class AutoTrader:
             return 1
         return MAX_POSITIONS_PER_CATEGORY
 
-    def should_trade_market(self, market_id: str, recommendation: Dict) -> bool:
+    def _trade_rejection_reason(self, market_id: str, recommendation: Dict) -> Optional[str]:
         """
-        Check if we should trade a specific market based on risk rules
+        Run every risk gate and return a short rejection reason string, or
+        None when the market passes all filters.  Used by run_trading_cycle
+        to count rejections by reason (Op3 observability).
 
-        Returns:
-            bool: True if trade should be executed
+        The returned reason strings match the keys in
+        _new_trader_counters()['rejected'] exactly.
         """
         # AI veto — if the market was analyzed by AI and explicitly rejected, never trade it.
         # This must be checked BEFORE the confidence threshold: when AI returns SKIP,
@@ -169,12 +230,12 @@ class AutoTrader:
         # trade every market the AI explicitly flags as noise.
         if recommendation.get('ai_returned_skip') or recommendation.get('ai_recommendation') == 'SKIP':
             print(f"  AI vetoed this market (SKIP) — skipping regardless of confidence")
-            return False
+            return "ai_veto"
 
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
             print(f"  Confidence too low: {recommendation['confidence']*100:.0f}% < {self.min_confidence*100:.0f}%")
-            return False
+            return "low_confidence"
 
         # Block any new bet on a market that already has an OPEN position.
         # Previously the bot allowed "adding to position" at confidence >= 0.80,
@@ -184,7 +245,7 @@ class AutoTrader:
         has_open = any(p.get('status') == 'OPEN' for p in market_positions)
         if has_open:
             print(f"  Already have an OPEN position in this market — use swap to replace it")
-            return False
+            return "existing_open"
 
         # Check max positions limit
         open_positions = sum(1 for pos_list in self.trader.positions.values()
@@ -192,7 +253,7 @@ class AutoTrader:
 
         if open_positions >= self.max_positions:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
-            return False
+            return "max_positions"
 
         # Check category exposure cap — prevent over-concentration in one topic.
         # Category comes from the research recommendation; fall back to inference
@@ -215,14 +276,25 @@ class AutoTrader:
         effective_cap = self._effective_category_cap(rec_category)
         if open_in_category >= effective_cap:
             print(f"  Category cap reached: {rec_category} has {open_in_category}/{effective_cap} open positions")
-            return False
+            return "category_cap"
 
         # Check market liquidity — threshold matches auto_research.py (MIN_LIQUIDITY).
         if recommendation.get('liquidity', 0) < MIN_LIQUIDITY:
             print(f"  Liquidity too low: ${recommendation.get('liquidity', 0):.0f}")
-            return False
+            return "liquidity"
 
-        return True
+        return None
+
+    def should_trade_market(self, market_id: str, recommendation: Dict) -> bool:
+        """
+        Check if we should trade a specific market based on risk rules.
+
+        Returns True when the market passes every gate. This is a thin bool
+        wrapper around _trade_rejection_reason() so that Op3 observability
+        can also see the specific rejection reason without requiring every
+        caller (tests included) to handle a string return type.
+        """
+        return self._trade_rejection_reason(market_id, recommendation) is None
 
     def calculate_position_size(self, recommendation: Dict, outcome: str) -> float:
         """
@@ -485,6 +557,11 @@ class AutoTrader:
         print(f"AUTO TRADING CYCLE - {datetime.now()}")
         print(f"{'='*60}")
 
+        # Op3: per-run observability counters
+        counters = _new_trader_counters()
+        from datetime import timezone
+        counters["timestamp"] = datetime.now(timezone.utc).isoformat()
+
         print(f"Starting balance: ${self.trader.balance:.2f}")
         open_positions = sum(1 for pos_list in self.trader.positions.values()
                                    for pos in pos_list if pos.get('status') == 'OPEN')
@@ -494,27 +571,47 @@ class AutoTrader:
         research = self.load_latest_research()
         if not research or not research.get('recommendations'):
             print("No research recommendations available")
+            _print_trader_counters(counters)
+            _append_trader_counters(counters)
             return 0
 
         recommendations = research['recommendations']
         print(f"Loaded {len(recommendations)} research recommendations")
+        counters["recommendations_loaded"] = len(recommendations)
 
-        # Filter and sort recommendations
+        # Filter and sort recommendations.  Use the reason-returning variant
+        # so we can tally rejections by category (Op3).
         tradable_recs = []
         for rec in recommendations:
-            if self.should_trade_market(rec['market_id'], rec):
+            reason = self._trade_rejection_reason(rec['market_id'], rec)
+            if reason is None:
                 tradable_recs.append(rec)
+                counters["passed_filter"] += 1
+            else:
+                counters["rejected"][reason] = counters["rejected"].get(reason, 0) + 1
 
         if not tradable_recs:
             print("No tradable opportunities after risk filtering")
+            _print_trader_counters(counters)
+            _append_trader_counters(counters)
             return 0
 
         # Sort by estimated EV (highest first) — confidence is a gate, not a ranking signal.
-        # Recs without an AI EV estimate (None) are ranked below any EV > 0.
-        tradable_recs.sort(
-            key=lambda x: x['estimated_ev'] if x.get('estimated_ev') is not None else 0.0,
-            reverse=True,
-        )
+        # Op2: prefer estimated_ev_exec (honest stake-size EV) over the $25 ref EV;
+        # legacy estimated_ev is the fallback for pre-migration research files.
+        def _exec_ev(r):
+            ev = r.get('estimated_ev_exec')
+            if ev is None:
+                ev = r.get('estimated_ev')
+            return ev if ev is not None else 0.0
+
+        tradable_recs.sort(key=_exec_ev, reverse=True)
+
+        # Record top-5 ranked recs for observability before we start trimming
+        counters["top_ev_at_exec"] = [
+            (r.get('market_id', '?'), _exec_ev(r))
+            for r in tradable_recs[:5]
+        ]
 
         print(f"\nFound {len(tradable_recs)} tradable opportunities")
 
@@ -530,11 +627,20 @@ class AutoTrader:
             if self.execute_trade(rec):
                 trades_executed += 1
 
+        counters["trades_executed"] = trades_executed
+
         print(f"\n{'='*60}")
         print(f"Trading cycle complete")
         print(f"Trades executed: {trades_executed}")
         print(f"Ending balance: ${self.trader.balance:.2f}")
         print(f"{'='*60}")
+
+        # Op3: emit counters (best-effort — never abort the cycle)
+        try:
+            _print_trader_counters(counters)
+            _append_trader_counters(counters)
+        except Exception as ctr_err:
+            print(f"  Warning: trader counter emit failed ({ctr_err})")
 
         return trades_executed
 
