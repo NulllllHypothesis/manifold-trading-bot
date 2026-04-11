@@ -67,6 +67,7 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from typing import Optional
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
@@ -153,6 +154,26 @@ def _load_outcome_map(calibration_db: str) -> dict[str, str]:
 
 LIVE_DECISION_WINDOWS = (7, 14, 30)
 
+# Live snapshots happen hourly, so only ~1 in 24 will land on an exact integer
+# day boundary.  Instead of requiring exact matches, bucket each live row to
+# its nearest window if within ±_LIVE_WINDOW_TOLERANCE days.  Reconstructed
+# rows (M3) are always exact, so this tolerance only applies to live rows.
+_LIVE_WINDOW_TOLERANCE = 1  # ±1 day → T-6/7/8 → T-7, T-13/14/15 → T-14, T-29/30/31 → T-30
+
+
+def _snap_live_to_window(dbc: Optional[int]) -> Optional[int]:
+    """
+    Bucket a live snapshot's days_before_close to the closest decision
+    window (7, 14, 30) if within tolerance.  Returns None when dbc is
+    None or outside every window's tolerance band.
+    """
+    if dbc is None:
+        return None
+    for window in LIVE_DECISION_WINDOWS:
+        if abs(dbc - window) <= _LIVE_WINDOW_TOLERANCE:
+            return window
+    return None
+
 
 def load_examples(
     snapshots_db: str = SNAPSHOTS_DB,
@@ -168,11 +189,14 @@ def load_examples(
     Live rows (source='live') are written hourly by auto_research.py and
     tagged with days_before_close at snapshot time (Op4). Many live rows
     accumulate per market as its closeTime approaches; to match M3's
-    decision-time semantics and keep the dataset comparable, we pick
-    exactly one live row per (market_id, window) where window ∈ {7, 14, 30}
-    — specifically the earliest chronological row whose days_before_close
-    equals that window. This is the least-converged observation inside
-    each window, mirroring M3's reconstruction target.
+    decision-time semantics and keep the dataset comparable, we:
+
+      1. Bucket each live row to the nearest window in {7, 14, 30} if
+         within ±_LIVE_WINDOW_TOLERANCE days (because hourly snapshots
+         rarely land on an exact integer day boundary).
+      2. Keep exactly one live row per (market_id, window): the earliest
+         chronological row in the bucket, because earlier = less converged
+         = closer to M3's reconstruction target.
 
     Returns list of dicts ready to serialise.
     """
@@ -195,19 +219,26 @@ def load_examples(
 
     # First pass: for live rows, keep one row per (market_id, window).
     # The earliest matching snapshot wins because rows are ORDER BY snapshot_at ASC.
+    # Live rows are also RENAMED to their snapped window (e.g. a row at T-8
+    # gets days_before_close=7) so downstream consumers see the canonical window.
     live_seen: set[tuple[str, int]] = set()
     kept_rows: list[tuple] = []
     for row in rows:
-        (market_id, _question, _probability, _bettors, _liquidity,
-         days_before_close, source, _stored_outcome, _snapshot_at) = row
+        (market_id, question, probability, bettors, liquidity,
+         days_before_close, source, stored_outcome, snapshot_at) = row
 
         if source == "live":
-            if days_before_close is None or days_before_close not in LIVE_DECISION_WINDOWS:
-                continue   # wrong window — skip
-            key = (market_id, int(days_before_close))
+            snapped = _snap_live_to_window(days_before_close)
+            if snapped is None:
+                continue   # outside every window's tolerance band
+            key = (market_id, snapped)
             if key in live_seen:
                 continue   # already have a row for this market at this window
             live_seen.add(key)
+            # Replace the raw days_before_close with the snapped window so
+            # example_id formatting and prompt building see the canonical value.
+            row = (market_id, question, probability, bettors, liquidity,
+                   snapped, source, stored_outcome, snapshot_at)
 
         kept_rows.append(row)
 

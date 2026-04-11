@@ -35,6 +35,7 @@ from scripts.backfill_days_before_close import (
 from scripts.build_training_dataset import (
     load_examples,
     LIVE_DECISION_WINDOWS,
+    _snap_live_to_window,
 )
 import automation.auto_research as auto_research
 
@@ -362,6 +363,39 @@ class TestBackfillEndToEnd(unittest.TestCase):
 
 # ── build_training_dataset live-row filtering ────────────────────────────────
 
+class TestSnapLiveToWindow(unittest.TestCase):
+    """_snap_live_to_window buckets raw dbc to nearest canonical window within ±1."""
+
+    def test_exact_windows(self):
+        self.assertEqual(_snap_live_to_window(7),  7)
+        self.assertEqual(_snap_live_to_window(14), 14)
+        self.assertEqual(_snap_live_to_window(30), 30)
+
+    def test_within_tolerance_below(self):
+        self.assertEqual(_snap_live_to_window(6),  7)
+        self.assertEqual(_snap_live_to_window(13), 14)
+        self.assertEqual(_snap_live_to_window(29), 30)
+
+    def test_within_tolerance_above(self):
+        self.assertEqual(_snap_live_to_window(8),  7)
+        self.assertEqual(_snap_live_to_window(15), 14)
+        self.assertEqual(_snap_live_to_window(31), 30)
+
+    def test_outside_tolerance(self):
+        self.assertIsNone(_snap_live_to_window(5))   # 2 away from 7
+        self.assertIsNone(_snap_live_to_window(9))   # 2 away from 7
+        self.assertIsNone(_snap_live_to_window(12))  # 2 away from 14
+        self.assertIsNone(_snap_live_to_window(16))  # 2 away from 14
+        self.assertIsNone(_snap_live_to_window(25))
+        self.assertIsNone(_snap_live_to_window(32))  # 2 away from 30
+
+    def test_none_passes_through(self):
+        self.assertIsNone(_snap_live_to_window(None))
+
+    def test_zero_is_not_in_any_window(self):
+        self.assertIsNone(_snap_live_to_window(0))
+
+
 class TestLiveRowFiltering(unittest.TestCase):
     """
     load_examples() must pick at most one live row per (market_id, window)
@@ -388,7 +422,13 @@ class TestLiveRowFiltering(unittest.TestCase):
                 outcome TEXT
             )
         """)
-        # mkt_live: 4 snapshots — two at T-7, one at T-14, one at T-9 (off-window)
+        # mkt_live snapshots:
+        #   0h : T-7 exact       → window 7, first wins
+        #   2h : T-7 exact       → dropped (same window already seen)
+        #   4h : T-15            → window 14 (within ±1 tolerance)
+        #   6h : T-9             → dropped (>1 from 7 AND >1 from 14)
+        #   8h : T-25            → dropped (>1 from any window)
+        #  10h : T-29            → window 30 (within ±1 tolerance)
         base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
         conn.executemany(
             """INSERT INTO market_snapshots
@@ -401,12 +441,13 @@ class TestLiveRowFiltering(unittest.TestCase):
                 ("mkt_live", "Will X?", 0.45, 5, 500,
                  (base + timedelta(hours=2)).isoformat(), "live", 7, None),
                 ("mkt_live", "Will X?", 0.50, 5, 500,
-                 (base + timedelta(hours=4)).isoformat(), "live", 14, None),
+                 (base + timedelta(hours=4)).isoformat(), "live", 15, None),
                 ("mkt_live", "Will X?", 0.48, 5, 500,
                  (base + timedelta(hours=6)).isoformat(), "live", 9, None),
-                # Skip: off-window
                 ("mkt_live", "Will X?", 0.52, 5, 500,
                  (base + timedelta(hours=8)).isoformat(), "live", 25, None),
+                ("mkt_live", "Will X?", 0.55, 5, 500,
+                 (base + timedelta(hours=10)).isoformat(), "live", 29, None),
             ],
         )
         conn.commit()
@@ -447,10 +488,10 @@ class TestLiveRowFiltering(unittest.TestCase):
             snapshots_db=self.snap_tmp.name,
             calibration_db=self.cal_tmp.name,
         )
-        # Expect exactly 2 rows: T-7 (earliest of the two) and T-14
-        self.assertEqual(len(examples), 2)
+        # Expect exactly 3 rows: T-7 (exact), T-14 (snapped from 15), T-30 (snapped from 29)
+        self.assertEqual(len(examples), 3)
         windows = sorted(e["days_before_close"] for e in examples)
-        self.assertEqual(windows, [7, 14])
+        self.assertEqual(windows, [7, 14, 30])
 
     def test_earliest_snapshot_per_window_wins(self):
         """The T-7 row kept must be the FIRST chronological 7d observation."""
@@ -463,6 +504,7 @@ class TestLiveRowFiltering(unittest.TestCase):
         self.assertAlmostEqual(t7["crowd_probability"], 0.40, places=3)
 
     def test_offwindow_rows_are_skipped(self):
+        """Rows outside every window's ±1 tolerance (9d, 25d) must be skipped."""
         examples = load_examples(
             snapshots_db=self.snap_tmp.name,
             calibration_db=self.cal_tmp.name,
@@ -470,7 +512,8 @@ class TestLiveRowFiltering(unittest.TestCase):
         for e in examples:
             self.assertIn(e["days_before_close"], LIVE_DECISION_WINDOWS)
 
-    def test_example_id_includes_window(self):
+    def test_example_id_uses_snapped_window(self):
+        """example_id must show the canonical window (14), not the raw dbc (15)."""
         examples = load_examples(
             snapshots_db=self.snap_tmp.name,
             calibration_db=self.cal_tmp.name,
@@ -478,6 +521,10 @@ class TestLiveRowFiltering(unittest.TestCase):
         ids = {e["example_id"] for e in examples}
         self.assertIn("mkt_live__live__7",  ids)
         self.assertIn("mkt_live__live__14", ids)
+        self.assertIn("mkt_live__live__30", ids)
+        # The raw dbc values (15, 29) must NOT appear in any example_id
+        self.assertNotIn("mkt_live__live__15", ids)
+        self.assertNotIn("mkt_live__live__29", ids)
 
 
 if __name__ == "__main__":
