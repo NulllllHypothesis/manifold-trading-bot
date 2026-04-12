@@ -46,9 +46,12 @@ _STOPWORDS = frozenset({
     'if', 'or', 'and', 'but', 'not', 'with', 'from', 'any', 'more', 'get',
     'has', 'have', 'had', 'his', 'her', 'been', 'can', 'who', 'what',
     'when', 'how', 'than', 'they', 'there', 'which', 'does', 'do', 'did',
-    # Resolution framing
+    # Resolution framing + generic verbs that add no topic signal
     'reach', 'happen', 'occur', 'complete', 'before', 'after', 'until',
     'end', 'year', 'month', 'day', 'first', 'second', 'third', 'fourth',
+    'hit', 'make', 'take', 'give', 'come', 'go', 'say', 'new', 'use',
+    'win', 'lose', 'start', 'stop', 'get', 'set', 'put', 'run', 'try',
+    'above', 'below', 'ever', 'still', 'think', 'receive', 'release',
     # Numeric scale words
     'percent', 'million', 'billion', 'trillion',
     # Year tokens
@@ -64,23 +67,38 @@ _STOPWORDS = frozenset({
 
 def extract_keywords(question: str) -> str:
     """
-    Extract 3-4 meaningful search keywords from a market question.
+    Extract 2-3 meaningful search keywords from a market question.
 
-    Strips punctuation, lowercases, removes stopwords and short tokens,
-    then takes the first 4 surviving words. Returns the original question
-    (truncated to 50 chars) as a fallback if nothing survives filtering.
+    Strips punctuation, lowercases, removes stopwords, generic verbs, and
+    tokens that contain digits (prices, percentages, dates like "150k" or
+    "100m" add nothing to a headline search). Takes the first 2 surviving
+    words — keeping the query narrow avoids NewsAPI's implicit AND
+    returning zero results when too many specific terms are combined.
+
+    Returns the original question (truncated to 50 chars) as a fallback
+    if nothing survives filtering.
 
     Examples:
-        "Will Bitcoin reach $100k by end of 2026?"  →  "bitcoin 100k"
-        "Will Trump win the 2028 presidential election?"  →  "trump win presidential election"
-        "Will the Fed raise interest rates in Q2 2026?"  →  "fed raise interest rates"
+        "Will Bitcoin hit $150k by December 2026?"  →  "bitcoin"
+        "Will Trump win the 2028 election?"  →  "trump election"
+        "Will the Fed raise interest rates in Q2?"  →  "fed interest"
+        "Will SpaceX launch Starship successfully?"  →  "spacex starship"
     """
     # Strip punctuation (keep alphanumerics and spaces), lowercase
     q = re.sub(r'[^\w\s]', ' ', question.lower())
     words = q.split()
-    # Keep tokens that are not stopwords and are at least 3 chars
-    keywords = [w for w in words if w not in _STOPWORDS and len(w) >= 3]
-    return ' '.join(keywords[:4]) if keywords else question[:50]
+    # Keep tokens that are:
+    #   - not in stopwords
+    #   - at least 3 chars
+    #   - not purely numeric or containing digits (prices, years, ordinals)
+    keywords = [
+        w for w in words
+        if w not in _STOPWORDS
+        and len(w) >= 3
+        and not re.search(r'\d', w)
+    ]
+    # Fewer keywords = broader search = more results from NewsAPI's AND logic
+    return ' '.join(keywords[:2]) if keywords else question[:50]
 
 
 def _load_cache() -> dict:
