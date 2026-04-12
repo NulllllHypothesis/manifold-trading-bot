@@ -615,13 +615,26 @@ class AutoTrader:
 
         print(f"\nFound {len(tradable_recs)} tradable opportunities")
 
-        # Execute top 1-2 trades (risk management)
+        # Execute top 1-2 trades (risk management).
+        # IMPORTANT: re-check should_trade_market() before EACH trade, not just
+        # once at filter time. The pre-filter above builds a candidate list but
+        # placing trade #1 changes the positions dict (adds a new OPEN entry),
+        # so trade #2 must re-validate max_positions / category_cap / etc.
+        # Without this re-check the bot could exceed MAX_POSITIONS by placing
+        # 2 trades in one cycle when it started at MAX-1 open.
         max_trades_per_cycle = 2
         trades_executed = 0
 
         for rec in tradable_recs[:max_trades_per_cycle]:
             if trades_executed >= max_trades_per_cycle:
                 break
+
+            # Re-validate before execution — positions may have changed since
+            # the initial filter pass (e.g. trade #1 in this cycle added one).
+            recheck = self._trade_rejection_reason(rec['market_id'], rec)
+            if recheck is not None:
+                print(f"\n  Re-check rejected {rec['market_id'][:14]}: {recheck}")
+                continue
 
             print(f"\n{'─'*40}")
             if self.execute_trade(rec):
