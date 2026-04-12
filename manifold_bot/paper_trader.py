@@ -362,6 +362,137 @@ class PaperTrader:
         self.save_state()
     
 
+    def resolve_market_mkt(self, market_id: str, resolution_prob: float, question: str = ""):
+        """
+        Resolve a market that settled as MKT (to a specific probability).
+
+        On Manifold, MKT means the market resolved to `resolutionProbability`
+        instead of a binary YES/NO. Payout is proportional:
+          - YES bettors get: amount × resolutionProb / entryProb
+          - NO bettors get:  amount × (1 − resolutionProb) / (1 − entryProb)
+
+        P&L = payout − amount (can be positive or negative).
+        """
+        if market_id not in self.positions:
+            print(f"No positions in market {market_id}")
+            return
+
+        _init_bet_outcomes_db()
+
+        positions = self.positions[market_id]
+        total_pnl = 0
+        updated_trade_ids = []
+
+        for trade in positions:
+            if trade['status'] != 'OPEN':
+                continue
+
+            amount = trade.get('amount', 0)
+            entry  = trade.get('entry_probability') or trade.get('probability', 0.5)
+            bet    = trade.get('outcome', 'YES')
+
+            if bet == 'YES':
+                payout = amount * resolution_prob / entry if entry > 0 else 0
+            else:
+                payout = amount * (1 - resolution_prob) / (1 - entry) if entry < 1 else 0
+
+            profit = round(payout - amount, 4)
+            trade['status'] = 'WIN' if profit >= 0 else 'LOSE'
+            trade['actual_outcome'] = 'MKT'
+            trade['profit'] = profit
+            total_pnl += profit
+            updated_trade_ids.append(trade['trade_id'])
+            print(f"Trade {trade['trade_id']}: MKT@{resolution_prob:.0%} → ${profit:+.2f}")
+
+            _write_bet_outcome(trade, market_resolution='MKT', actual_pnl=profit)
+
+        for trade in self.trade_history:
+            if trade['trade_id'] in updated_trade_ids:
+                for pos in positions:
+                    if pos['trade_id'] == trade['trade_id']:
+                        trade['status'] = pos['status']
+                        trade['actual_outcome'] = pos.get('actual_outcome')
+                        trade['profit'] = pos.get('profit')
+                        break
+
+        self.balance += total_pnl
+        print(f"Market {market_id} resolved as MKT@{resolution_prob:.0%}, P&L: ${total_pnl:+.2f}, balance: ${self.balance:.2f}")
+
+        if updated_trade_ids:
+            our_bet = next(
+                (p['outcome'] for p in positions if p.get('trade_id') in updated_trade_ids),
+                "?"
+            )
+            _notify_resolution(
+                market_id=market_id,
+                question=question or market_id,
+                outcome=f"MKT@{resolution_prob:.0%}",
+                our_bet=our_bet,
+                total_pnl=total_pnl,
+                new_balance=self.balance,
+            )
+
+        self.save_state()
+
+    def resolve_market_cancel(self, market_id: str, question: str = ""):
+        """
+        Resolve a cancelled market — full refund of the bet amount.
+
+        On Manifold, CANCEL means the market was voided and all bets are
+        returned at face value. P&L = 0 for every position.
+        """
+        if market_id not in self.positions:
+            print(f"No positions in market {market_id}")
+            return
+
+        _init_bet_outcomes_db()
+
+        positions = self.positions[market_id]
+        updated_trade_ids = []
+
+        for trade in positions:
+            if trade['status'] != 'OPEN':
+                continue
+
+            trade['status'] = 'CANCELLED'
+            trade['actual_outcome'] = 'CANCEL'
+            trade['profit'] = 0.0
+            updated_trade_ids.append(trade['trade_id'])
+            print(f"Trade {trade['trade_id']}: CANCELLED (refund ${trade.get('amount', 0):.2f})")
+
+            _write_bet_outcome(trade, market_resolution='CANCEL', actual_pnl=0.0)
+
+        for trade in self.trade_history:
+            if trade['trade_id'] in updated_trade_ids:
+                for pos in positions:
+                    if pos['trade_id'] == trade['trade_id']:
+                        trade['status'] = pos['status']
+                        trade['actual_outcome'] = pos.get('actual_outcome')
+                        trade['profit'] = 0.0
+                        break
+
+        # Balance unchanged — the original amount was already deducted at bet time,
+        # but since P&L = 0, add back the amount to simulate the refund.
+        refund = sum(t.get('amount', 0) for t in positions if t.get('trade_id') in updated_trade_ids)
+        self.balance += refund
+        print(f"Market {market_id} CANCELLED, refund ${refund:.2f}, balance: ${self.balance:.2f}")
+
+        if updated_trade_ids:
+            our_bet = next(
+                (p['outcome'] for p in positions if p.get('trade_id') in updated_trade_ids),
+                "?"
+            )
+            _notify_resolution(
+                market_id=market_id,
+                question=question or market_id,
+                outcome="CANCEL",
+                our_bet=our_bet,
+                total_pnl=0.0,
+                new_balance=self.balance,
+            )
+
+        self.save_state()
+
     def close_position_early(self, market_id: str, current_prob: float) -> Optional[float]:
         """
         Close an open position early at the current market probability.
@@ -431,7 +562,13 @@ class PaperTrader:
         return round(total_pnl, 4)
 
     def auto_resolve_markets(self):
-        """Auto-check Manifold for resolved markets and update positions"""
+        """Auto-check Manifold for resolved markets and update positions.
+
+        Handles three resolution types:
+          YES / NO  → binary win/loss (resolve_market)
+          MKT       → proportional payout at resolutionProbability (resolve_market_mkt)
+          CANCEL    → full refund (resolve_market_cancel)
+        """
         resolved_count = 0
         for market_id in list(self.positions.keys()):
             open_positions = [p for p in self.positions[market_id] if p.get('status') == 'OPEN']
@@ -439,15 +576,37 @@ class PaperTrader:
                 continue
             try:
                 market = api_client.get_market(market_id)
-                if market.get('isResolved', False):
-                    resolution = market.get('resolution', '')
-                    if resolution in ['YES', 'NO']:
-                        q = market.get('question', market_id)
-                        print(f"Auto-resolving {q[:50]}... as {resolution}")
-                        self.resolve_market(market_id, resolution, question=q)
+                if not market.get('isResolved', False):
+                    continue
+
+                resolution = market.get('resolution', '')
+                q = market.get('question', market_id)
+
+                if resolution in ('YES', 'NO'):
+                    print(f"Auto-resolving {q[:50]}... as {resolution}")
+                    self.resolve_market(market_id, resolution, question=q)
+                    resolved_count += 1
+
+                elif resolution == 'MKT':
+                    res_prob = market.get('resolutionProbability')
+                    if res_prob is not None:
+                        print(f"Auto-resolving {q[:50]}... as MKT@{res_prob:.0%}")
+                        self.resolve_market_mkt(market_id, float(res_prob), question=q)
                         resolved_count += 1
+                    else:
+                        print(f"MKT resolution for {market_id} but no resolutionProbability — skipping")
+
+                elif resolution == 'CANCEL':
+                    print(f"Auto-resolving {q[:50]}... as CANCEL (refund)")
+                    self.resolve_market_cancel(market_id, question=q)
+                    resolved_count += 1
+
+                else:
+                    print(f"Unknown resolution type '{resolution}' for {market_id} — skipping")
+
             except Exception as e:
                 print(f"Error checking market {market_id}: {e}")
+
         if resolved_count:
             print(f"Auto-resolved {resolved_count} market(s)")
         else:
