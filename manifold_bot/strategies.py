@@ -213,12 +213,15 @@ _BIAS_EXCLUDED_CATEGORIES = frozenset({'other'})
 # Op7: question-text patterns that indicate a structurally random market.
 # Coinflips, lotteries, and dice rolls resolve at ~50% by construction — no
 # crowd bias signal applies regardless of what the calibration table says.
+# Patterns that must appear as the DOMINANT topic of the question, not just
+# as a substring. 'random' and 'dice' alone are too broad — "random drug
+# testing" and "Dice Dreams" are real markets. Use multi-word phrases or
+# context-specific terms that only appear in structurally random markets.
 _NOISE_MARKET_PATTERNS = frozenset({
     'coinflip', 'coin flip', 'coin-flip',
     'daily coinflip', 'daily coin flip',
-    'free lottery', 'lottery',
-    'dice roll', 'dice', 'd20', 'd6',
-    'random', 'coinflip#', 'coin flip -',
+    'free lottery',
+    'dice roll', 'd20 roll', 'd6 roll',
 })
 
 

@@ -261,16 +261,36 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
     def test_non_noise_market_not_skipped(self):
-        """A real market question must NOT be filtered by the noise check."""
+        """A real crypto market must NOT be filtered by the noise check."""
         m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
-        # Should fire (or not) based on calibration data, not the noise filter
-        # The point is it must NOT return None because of noise filtering
-        # With our test fixture 'other' aggregate bias 0.050, this should fire
         result = TradingStrategies.probability_bias_strategy(m)
-        # Either fires or doesn't based on bias — but the noise filter didn't block it
-        # (We just verify it's not None due to the noise check by checking the function
-        #  actually evaluates the bias path. With 'other' @ 0.050 > 0.025 it fires.)
         self.assertIsNotNone(result)
+
+    # ── Op7.1 false-positive guards ──────────────────────────────────
+
+    def test_random_drug_testing_not_filtered(self):
+        """'random' as a substring in a real question must not trigger noise filter."""
+        m = self._m(0.65, question='Will the school adopt random drug testing next year?')
+        # This is an 'other' category → excluded by _BIAS_EXCLUDED_CATEGORIES
+        # but the noise filter itself must NOT be the reason it returns None.
+        # Test via _is_noise_market directly:
+        from manifold_bot.strategies import _is_noise_market
+        self.assertFalse(_is_noise_market('Will the school adopt random drug testing next year?'))
+
+    def test_dice_dreams_not_filtered(self):
+        """'Dice Dreams' is a real app, not a dice roll market."""
+        from manifold_bot.strategies import _is_noise_market
+        self.assertFalse(_is_noise_market('Will Dice Dreams hit 50M downloads?'))
+
+    def test_random_forest_not_filtered(self):
+        """'random forest' is an ML algorithm, not a noise market."""
+        from manifold_bot.strategies import _is_noise_market
+        self.assertFalse(_is_noise_market('Will random forest beat XGBoost on this benchmark?'))
+
+    def test_lottery_revenue_not_filtered(self):
+        """'lottery' alone could match real markets about lottery policy."""
+        from manifold_bot.strategies import _is_noise_market
+        self.assertFalse(_is_noise_market('Will state lottery revenue exceed $1B?'))
 
     # ── Op7: 'other' excluded from per-bucket lookup ─────────────────────
 
