@@ -112,10 +112,10 @@ specific layer of the analysis pipeline.
   │                                                                     │
   └─────────────────────────────────────────────────────────────────────┘
 
-  Current state (2026-04-12):
-    Resolved trades: 6 post-fix (need ≥ 10 per strategy to activate)
-    All weights: 1.0 (default) except probability_bias = 1.2 (from backtest)
-    Learning gate: NOT YET ACTIVE — accumulating data
+  Session-8 snapshot (historical example, values drift over time):
+    Resolved trades were still below the ≥ 10 live-sample activation gate
+    Live weights were mostly neutral, with backtest able to fill gaps
+    To inspect the current state, read data/strategy_weights.json
 
 
 ════════════════════════════════════════════════════════════════════════════
@@ -191,11 +191,10 @@ specific layer of the analysis pipeline.
   │                                                                     │
   └─────────────────────────────────────────────────────────────────────┘
 
-  Current state (2026-04-12):
-    resolved_markets: 2016 rows
-    calibration_table: regenerated 2026-04-12 02:00 UTC
-    10 categories, 92 per-bucket cells
-    Category v2 reclassify applied (282 rows relabeled)
+  Session-8 snapshot (historical example, values drift over time):
+    resolved_markets had crossed 2000 rows
+    calibration_table.json had been rebuilt after category-v2 reclassify
+    To inspect the current state, read data/calibration_table.json
 
 
 ════════════════════════════════════════════════════════════════════════════
@@ -249,10 +248,9 @@ specific layer of the analysis pipeline.
   │                                                                     │
   └─────────────────────────────────────────────────────────────────────┘
 
-  Current state (2026-04-12):
-    Only "other" has samples: accuracy = 0.0, sample_count = 6
-    Gate NOT active (need ≥ 8 per category)
-    All categories at default cap = 3
+  Session-8 snapshot (historical example, values drift over time):
+    Category accuracy had too few samples to activate adaptive caps
+    To inspect the current state, read data/category_accuracy.json
 
 
 ════════════════════════════════════════════════════════════════════════════

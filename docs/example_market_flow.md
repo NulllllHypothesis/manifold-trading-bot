@@ -217,16 +217,17 @@ candidates sent to the AI. Higher composite = higher priority.
 
 ## STEP 7 — News Enrichment
 
-The bot extracts search keywords from the question using Ollama, then
+The bot extracts search keywords from the question using Ollama
+(regex fallback if Ollama keyword extraction fails), then
 queries NewsAPI for recent headlines.
 
 ```
 Question → Ollama → "nvidia stock price"
 NewsAPI search → 3 headlines:
 
-  - "Nvidia supplier expands AI-chip production"        (Reuters, 6h ago)
-  - "Analysts raise Nvidia revenue expectations"        (Bloomberg, 18h ago)
-  - "Demand for AI compute remains strong"              (TechCrunch, 2d ago)
+  - "Nvidia supplier expands AI-chip production"
+  - "Analysts raise Nvidia revenue expectations"
+  - "Demand for AI compute remains strong"
 
 News strategy analysis:
   Headlines lean YES (positive sentiment keywords)
@@ -313,7 +314,8 @@ Final research output:
   recommendation = YES
   confidence = 0.792
   ai_estimated_probability = 0.79
-  strategies = [probability_direction, creator_disagreement, ai_analysis]
+  strategies = [probability_direction, probability_bias,
+                creator_disagreement, ai_analysis]
 ```
 
 *If the AI had DISAGREED (returned NO), the penalty formula would apply:*
@@ -434,7 +436,8 @@ Place paper bet:
   entry_probability: 0.67
   estimated_ev: $0.90 (exec)
   ai_confidence: 0.82
-  strategies: [probability_direction, creator_disagreement, ai_analysis]
+  strategies: [probability_direction, probability_bias,
+               creator_disagreement, ai_analysis]
   category: business
 
 State updated:

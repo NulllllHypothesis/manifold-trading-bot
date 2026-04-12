@@ -43,7 +43,7 @@ Each layer filters, enriches, or gates the signal from the layer below.
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                              ▲                                          │
 │                              │ confidence blended                       │
-│  LAYER 4: AI ANALYSIS                               ai_analyzer + Ollama│
+│  LAYER 4: AI ANALYSIS          ai_analyzer + Ollama (DeepSeek fallback)│
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │  Top 3 candidates by composite score sent to llama3.2:3b          │  │
 │  │                                                                   │  │
@@ -51,9 +51,9 @@ Each layer filters, enriches, or gates the signal from the layer below.
 │  │    ┌──────────────────────────────────────────────────────────┐   │  │
 │  │    │  Question + probability + volume + liquidity + close date│   │  │
 │  │    │                                                          │   │  │
-│  │    │  Recent news (Ollama-extracted keywords → NewsAPI):      │   │  │
-│  │    │    - "Bitcoin ETF approved by SEC" (Reuters, 6h ago)     │   │  │
-│  │    │    - "Crypto market rally continues" (CNBC, 18h ago)     │   │  │
+│  │    │  Recent news (headline titles only, from NewsAPI):        │   │  │
+│  │    │    - "Bitcoin ETF approved by SEC"                        │   │  │
+│  │    │    - "Crypto market rally continues"                      │   │  │
 │  │    │                                                          │   │  │
 │  │    │  Calibration prior (per-category, per-bucket):           │   │  │
 │  │    │    "Past crypto markets at 60-70%: crowd overestimates   │   │  │
@@ -73,8 +73,8 @@ Each layer filters, enriches, or gates the signal from the layer below.
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │  Top 3 recs by confidence get real-time headlines:                │  │
 │  │                                                                   │  │
-│  │    Question → Ollama extracts keywords → NewsAPI search           │  │
-│  │              ("bitcoin price forecast", not "bitcoin hit 150k")   │  │
+│  │    Question → keyword extraction (Ollama, regex fallback)         │  │
+│  │              → NewsAPI search                                     │  │
 │  │                                                                   │  │
 │  │  News direction vs stat direction:                                │  │
 │  │    agrees   → confidence + boost × recency_factor                 │  │
@@ -115,11 +115,11 @@ Each layer filters, enriches, or gates the signal from the layer below.
 │  │                                                                   │  │
 │  │  probability_direction (0.65) — momentum                          │  │
 │  │    "Price is high + recent activity → bet YES"                    │  │
-│  │    Guards: prob outside 45-55%, last bet < 48h, volume > 0        │  │
+│  │    Guards: prob outside 45-55%, last bet < 48h, volume24h ≥ 5     │  │
 │  │                                                                   │  │
 │  │  mean_reversion (0.68) — contrarian                               │  │
 │  │    "Price is extreme → bet against"                               │  │
-│  │    Guards: prob >80% or <20%, bettors < 100, not closing soon     │  │
+│  │    Guards: prob >85% or <15%, bettors < 100, not closing soon     │  │
 │  │                                                                   │  │
 │  │  probability_bias (0.70) — contrarian                             │  │
 │  │    "Historical crowd overconfidence in this (category, bucket)"   │  │
@@ -151,13 +151,14 @@ Each layer filters, enriches, or gates the signal from the layer below.
 │  │    - Stale (last bet > 72h AND volume24h < 10)                    │  │
 │  │                                                                   │  │
 │  │  Category inference: _infer_market_category(question)             │  │
-│  │    9 categories: crypto → ai_tech → gaming → entertainment →      │  │
-│  │    politics → sports → science → business → economics → other     │  │
+│  │    9 named categories + other fallback:                           │  │
+│  │    crypto → ai_tech → gaming → entertainment → politics →        │  │
+│  │    sports → science → business → economics → other               │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 
-Numbers from real production run (2026-04-11 15:55 UTC):
+Historical production snapshot (2026-04-11 15:55 UTC):
   Layer 0: 100 fetched → 38 survive filters
   Layer 1: prob_dir=11, mean_rev=3, prob_bias=18, creator=0, thin=0
   Layer 2: momentum=11 winners, contrarian=18 winners, 18 no-signal drops
@@ -166,5 +167,5 @@ Numbers from real production run (2026-04-11 15:55 UTC):
   Layer 5: 19 final recs with EV computed
   Layer 6: all rejected (8 positions OPEN, max_positions not hit but
            other gates like AI veto / low confidence / existing position)
-  Layer 7: 0 trades executed (book was full at 11/10 before the MKT fix)
+  Layer 7: 0 trades executed in that run (gates + book state blocked execution)
 ```
