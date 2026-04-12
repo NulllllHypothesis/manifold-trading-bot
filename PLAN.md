@@ -516,7 +516,7 @@ Forward path + historical backfill for the live snapshot training pipeline.
 | `ai_eligible` | 7 | 19 |
 | Strategy mix shapes | 1 | **3** |
 
-**Op5 follow-up observation (for Op7):** in the post-Op5 run, Ollama `ai_skip=3/3` — every bias rec the AI analysed was vetoed. This suggests per-(category, bucket) bias applied to `other` markets near the 50-60% bucket may be over-firing on markets where the underlying "other" historical bias doesn't apply (e.g. Daily Coinflip markets at exactly 50% are 50/50 by construction). The AI veto is correctly catching these. **Not an Op5 regression** — the strategy mix is finally diverse, it just means category-level `other` aggregate is too heterogeneous to be a useful prior. Op7 candidate: filter out markets whose question text flags them as structurally uncorrelated with category bias (coinflip, roll, random, etc.) OR exclude `other` from the per-bucket lookup entirely.
+**Op5 follow-up observation (fixed by Op7/Op7.1):** in the post-Op5 run, Ollama `ai_skip=3/3` — every bias rec the AI analysed was vetoed. 24h of counter data confirmed 363 bias fires, 96% on 'other', AI vetoed 76%. The `other` aggregate was too heterogeneous to be a useful prior. **Fixed in Op7/Op7.1 below** — `other` excluded from probability_bias entirely, noise market filter with Unicode normalization added.
 
 #### ✅ Op5.1 — MKT/CANCEL resolution + position overflow fix (done 2026-04-12)
 
@@ -544,16 +544,19 @@ Deferred until dataset grows via Op4's live accumulation path. The M6 scaffoldin
 - test split is only 8 examples → a "passing" run would be hard to trust
 - Op5 has finally unblocked the signal layer; if the signal mix produces enough tradable opportunities, a fine-tuned veto may turn out to be unnecessary
 
-#### 🟢 Op7 — Bias over-firing on heterogeneous `other` markets
+#### ✅ Op7/Op7.1 — Bias over-firing on heterogeneous `other` markets (done 2026-04-12)
 
-Follow-up to Op5 identified in the 15:55 post-Op5 run. The `other` category is a catch-all — its aggregate bias is an average over politics/celebrity/coinflip/research markets that share nothing except "failed to match any keyword". Applying that aggregate to a random coinflip market is semantically wrong.
+**Problem:** 24h of Op3 counter data after Op5 showed probability_bias over-firing: 363 fires, 96% on 'other' category, 18% structural noise (coinflip/lottery), AI vetoed 76% of bias recs analyzed. Unicode coinflip variants ("Dailÿ Coin Flip") bypassed ASCII-only filter.
 
-Candidates to consider:
-- Exclude `other` from the per-bucket lookup (keep `other` for aggregate fallback only)
-- Add a "structural noise" filter on question text (coinflip, random, roll, d20, etc.)
-- Require per-bucket bias cells to have BOTH high `sample_size` AND reasonable homogeneity (standard deviation of bias across sub-populations)
+**Op7 (commit `6be2021`):** Initial fix — noise market filter on question text + exclude 'other' from per-bucket lookup.
 
-Op7 should follow 24-48h of Op3 counter data showing AI veto rates by category.
+**Op7.1 (commit `30c6d97`):** Reviewer caught two issues:
+1. Unicode bypass — added NFKD normalization + combining mark stripping so accented coinflip variants are caught
+2. 'other' aggregate bias (0.0259) still cleared the 0.025 `_MIN_BIAS_TO_TRADE` threshold — changed to exclude 'other' from probability_bias entirely via `_BIAS_EXCLUDED_CATEGORIES` set
+
+**Op7.1 tightening (commit `7359b5f`):** Reviewer caught false positives — bare substrings 'random', 'dice', 'lottery' matched legitimate markets like "random drug testing", "Dice Dreams", etc. Removed overly broad patterns, kept only: coinflip variants, 'free lottery', 'd20 roll'/'d6 roll'. Added 4 false-positive guard tests.
+
+**Final state:** 513 tests passing. Server deployed at `7359b5f`.
 
 #### 🟡 P4 — Whale Tracking
 
@@ -616,7 +619,7 @@ Strong signal when it fires. High-accuracy large bettors on Manifold have asymme
 1. FastAPI backend + `/api/portfolio`, `/api/research`, `/api/counters`, `/api/learning` endpoints
 2. Static HTML shell with Chart.js loaded
 3. Panel 1 (portfolio) — highest immediate value
-4. Panel 3 (strategy health) — second highest, directly informs Op7 decisions
+4. Panel 3 (strategy health) — second highest, informed Op7 decisions (now shipped)
 5. Panels 2 + 4 + 5 in that order
 
 #### 🟢 P6 — SQLite storage (housekeeping)

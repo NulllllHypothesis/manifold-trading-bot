@@ -2,7 +2,7 @@
 
 *Written for someone who has never seen this codebase. No assumed knowledge.*
 
-*Last updated: 2026-04-11 (session 8: Op1–Op5 operational track shipped).* Session 8 added: Op2 executable-size swap EV (commit `d7a97b8`), Op3 research + trader observability counters (`6580c7d`) + schema v2 zero-candidate fix (`88b8999`), Op4 `days_before_close` on live snapshots + 4384-row backfill (`28703a7`, `9ee145c`, `c466641`), Op5 per-bucket `probability_bias` lookup + lowered `_MIN_BIAS_TO_TRADE` gate + swap margin buffer (`762c43d`), plus `HEARTBEAT.md` disabled (`fc8777e`) to stop false Telegram alerts. Category v2 (gaming/entertainment/business) shipped in `60c31cf`/`d508b38`/`88b8aa4`. **266 tests passing** across 10 suites.
+*Last updated: 2026-04-12 (session 8: Op1–Op7.1 operational track shipped).* Session 8 added: Op2 executable-size swap EV (commit `d7a97b8`), Op3 research + trader observability counters (`6580c7d`) + schema v2 zero-candidate fix (`88b8999`), Op4 `days_before_close` on live snapshots + 4384-row backfill (`28703a7`, `9ee145c`, `c466641`), Op5 per-bucket `probability_bias` lookup + lowered `_MIN_BIAS_TO_TRADE` gate + swap margin buffer (`762c43d`), Op7/Op7.1 noise market filter + Unicode normalization + `_BIAS_EXCLUDED_CATEGORIES` excluding 'other' from probability_bias (`6be2021`, `30c6d97`, `7359b5f`), plus `HEARTBEAT.md` disabled (`fc8777e`) to stop false Telegram alerts. Category v2 (gaming/entertainment/business) shipped in `60c31cf`/`d508b38`/`88b8aa4`. **513 tests passing** across 10+ suites.
 
 ---
 
@@ -318,7 +318,7 @@ If the market creator's resolution probability estimate differs from the crowd b
 **Strategy 5 — Thin Market** (confidence 0.65) — *confirmation-only*
 When one side of the AMM liquidity pool holds <15% of the total, bet toward that underrepresented side. Wired in `auto_research.py` as confirmation-only: it adds +0.03 boost to an existing contrarian/fundamental signal when it agrees, but never votes independently. So `thin_market` raw_fires in Op3 counters is 0 in most runs — that's expected, because thin_market can only "fire" when another contrarian/fundamental signal matches the same pool-imbalance direction.
 
-**Strategy 6 — Probability Bias** (confidence 0.70) — **Op5 rewired (session 8)**
+**Strategy 6 — Probability Bias** (confidence 0.70) — **Op5 rewired + Op7/Op7.1 tightened (session 8)**
 Exploits systematic crowd overconfidence using per-(category, bucket) calibration cells. The strategy now has two lookup paths:
 
 1. **Per-bucket cell** (preferred): reads `by_category_bucket` rows from `data/calibration_table.json` where `sample_size ≥ 15` AND `reliable=True`. If a match exists for the market's `(category, 10%-bucket)`, use its bias directly.
@@ -331,7 +331,13 @@ The strategy fires when `abs(bias) ≥ _MIN_BIAS_TO_TRADE` (0.025 — lowered fr
 
 Op5 also removed the hardcoded "fires only in 60-70% and 30-40% buckets" filter — any bucket with reliable calibration data now qualifies.
 
-**Op5 production impact (2026-04-11 15:55 UTC, first post-deploy run):** `probability_bias` raw fires went from **0 to 18** in a single run; `contrarian` dedup winners went from 3 to 18; the final recommendation mix expanded from 1 shape (`probability_direction` only) to 3 shapes. Ollama vetoed all 3 bias recs it analysed that run, which is interesting feedback the system is now self-catching — see Op7 in `PLAN.md`.
+**`_BIAS_EXCLUDED_CATEGORIES` (Op7.1):** The `other` category is fully excluded from probability_bias. Its aggregate bias (0.0259) barely cleared the 0.025 threshold, but `other` is a catch-all averaging unrelated sub-populations (politics/celebrity/coinflip/research) — applying it to any individual market is semantically wrong. The exclusion is implemented as a set check at the top of the strategy function.
+
+**Noise market filter (Op7 + Op7.1):** Before strategy evaluation, `_is_noise_market(question)` checks if a market is structural noise (coinflip, free lottery, d20/d6 roll). The filter uses **NFKD Unicode normalization + combining mark stripping** so accented variants like "Dailÿ Coin Flip" cannot bypass ASCII-only patterns. Patterns were tightened in Op7.1 to avoid false positives: bare substrings like 'random', 'dice', 'lottery' were removed (they matched "random drug testing", "Dice Dreams", etc.); only specific phrases are matched: coinflip variants, 'free lottery', 'd20 roll'/'d6 roll'.
+
+**Op5 production impact (2026-04-11 15:55 UTC, first post-deploy run):** `probability_bias` raw fires went from **0 to 18** in a single run; `contrarian` dedup winners went from 3 to 18; the final recommendation mix expanded from 1 shape (`probability_direction` only) to 3 shapes. Ollama vetoed all 3 bias recs it analysed that run — this over-firing on `other` category markets motivated Op7.
+
+**Op7/Op7.1 production impact (2026-04-12):** 24h of counter data showed 363 probability_bias fires, 96% on 'other', 18% structural noise, AI vetoed 76%. After Op7.1: `other` excluded entirely, noise markets filtered out, false-positive-safe patterns only.
 
 **Signal families and deduplication** — each strategy belongs to a family:
 
@@ -750,7 +756,7 @@ The bot runs up to 10 open positions. All new trades require AI agreement (schem
 | `final_recommendations` | 7 | 19 |
 | Strategy mix shapes | 1 | 3 |
 
-**Follow-up observation (Op7 in PLAN.md):** In the same post-Op5 run Ollama vetoed all 3 `probability_bias` recs it analysed (`ai_skip=3/3`). That's likely because the per-bucket `other` bias gets applied to markets like "Daily Coinflip" which are 50/50 by construction — the `other` category is too heterogeneous for aggregate bias to be a valid prior on every member. AI veto is correctly catching this. Op7 candidates: filter structurally-noisy question text (coinflip, random, roll), OR exclude `other` from per-bucket lookup entirely.
+**Follow-up observation → fixed by Op7/Op7.1:** In the post-Op5 run Ollama vetoed all 3 `probability_bias` recs it analysed (`ai_skip=3/3`). 24h of counter data confirmed: 363 probability_bias fires, 96% on 'other', 18% structural noise, AI vetoed 76%. Fixed in Op7/Op7.1 — see below.
 
 **HEARTBEAT.md disabled (commit `fc8777e`).** OpenClaw's heartbeat loop was interpreting `HEARTBEAT.md`'s template header as a task and running a mini status-check turn every hour. That turn was re-reading stale session history from 10:10 UTC (before the session 8 fixes landed) and firing false-positive Telegram alerts claiming Ollama was down, research was missing, balance was $5.28, etc. None of which was true. Fixed by replacing the template text with comment-only content so the heartbeat loop replies HEARTBEAT_OK and stays silent. Real observability now comes from Op3 counters + cron logs + daily summary only.
 
@@ -887,17 +893,17 @@ M2→M3→backtest runs automatically every Sunday night after the harvest (02:3
 
 **M3 — Reconstruct earlier snapshots** — fetch bet history for the 1,121 resolved markets, find probability at T-7d/T-14d/T-30d before close; transforms near-close data into training data matching live conditions.
 
-### Current operational backlog (as of session 8, 2026-04-11)
+### Current operational backlog (as of session 8, 2026-04-12)
 
 **Op6 — M6 LoRA fine-tune run.** Deferred. Scaffolding (`scripts/finetune.py`), promotion gate (crowd Brier 0.1503 / DirAcc 75.0% on held-out test split), and all tests are in place. Blocked on dataset growth via Op4's live accumulation path — current dataset is still 127 rows and the 8-example test split can't distinguish signal from noise. Also contingent on whether Op5's newly-unblocked signal layer produces enough tradable opportunities that a fine-tuned veto turns out to be unnecessary.
 
-**Op7 — Bias over-firing on heterogeneous `other` markets.** Follow-up to Op5 identified in the 15:55 post-Op5 run where Ollama vetoed 3/3 `probability_bias` recs. The `other` category is a catch-all and its aggregate bias is an average over unrelated sub-populations (politics/celebrity/coinflip/research), so applying it to a random coinflip market is semantically wrong. Candidates:
+**Op7/Op7.1 — Bias over-firing on heterogeneous `other` markets (done 2026-04-12, commits `6be2021`, `30c6d97`, `7359b5f`).** 24h of Op3 counter data after Op5 showed probability_bias over-firing: 363 fires, 96% on 'other', 18% structural noise (coinflip/lottery), AI vetoed 76%. Three-commit fix:
 
-- Exclude `other` from per-bucket lookup (use `other` only as aggregate fallback)
-- Add a "structural noise" filter on question text (coinflip, random, roll, d20, etc.)
-- Require per-bucket bias cells to have BOTH high sample size AND reasonable homogeneity
+1. **Op7 (`6be2021`):** Noise market filter (`_is_noise_market`) on question text + exclude 'other' from per-bucket lookup
+2. **Op7.1 (`30c6d97`):** Unicode bypass fix (NFKD normalization + combining mark stripping) + exclude 'other' from probability_bias entirely via `_BIAS_EXCLUDED_CATEGORIES` (aggregate 0.0259 still cleared 0.025 threshold)
+3. **Op7.1 tightening (`7359b5f`):** Removed overly broad noise patterns ('random', 'dice', 'lottery' matched false positives like "random drug testing", "Dice Dreams"). Kept only: coinflip variants, 'free lottery', 'd20 roll'/'d6 roll'. Added 4 false-positive guard tests.
 
-Op7 should wait for 24-48h of Op3 counter data showing AI veto rates by category before acting, so we know where the bias mismatch actually lives.
+**513 tests passing.** Server deployed at `7359b5f`.
 
 **Tracks not in the Op1-Op7 queue:**
 - P4 — Whale tracking (fundamental family, new `whale_strategy`)
@@ -939,4 +945,4 @@ Scripts execute directly via OS cron — no LLM agent involved in scheduling. Ea
 
 ---
 
-*Last updated: 2026-04-11 (session 8 — Op1–Op5 operational track shipped: dual-field swap EV, research/trader observability counters, schema v2 zero-candidate fix, live snapshot `days_before_close` + backfill, per-bucket `probability_bias` lookup with lowered threshold, swap margin buffer, category v2 taxonomy, HEARTBEAT.md disabled. 266 tests passing.)*
+*Last updated: 2026-04-12 (session 8 — Op1–Op7.1 operational track shipped: dual-field swap EV, research/trader observability counters, schema v2 zero-candidate fix, live snapshot `days_before_close` + backfill, per-bucket `probability_bias` lookup with lowered threshold, swap margin buffer, category v2 taxonomy, HEARTBEAT.md disabled, Op7/Op7.1 noise market filter + Unicode normalization + `_BIAS_EXCLUDED_CATEGORIES` excluding 'other' from probability_bias. 513 tests passing.)*
