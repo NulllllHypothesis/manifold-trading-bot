@@ -188,11 +188,43 @@ _MIN_BIAS_TO_TRADE = 0.025
 # Cells smaller than this fall back to the category-level bias aggregate.
 _MIN_BUCKET_SAMPLES = 15
 
+# Op7 (2026-04-12): categories excluded from per-bucket bias lookup.
+# 'other' is a heterogeneous catch-all — its per-bucket bias averages over
+# coinflips, celebrity markets, niche personal questions, and policy debates
+# that share nothing except "failed to match a keyword." 24h of Op3 counter
+# data showed 96% of probability_bias fires were on 'other' markets, and
+# the AI vetoed 76% of those it analyzed.  Excluding 'other' from per-bucket
+# lookup forces a fallback to the category aggregate, which is too diluted
+# to clear _MIN_BIAS_TO_TRADE for 'other' (aggregate ≈ 0.026) — effectively
+# silencing probability_bias on the catch-all bucket unless the aggregate
+# itself justifies it.
+_BUCKET_EXCLUDED_CATEGORIES = frozenset({'other'})
+
+# Op7: question-text patterns that indicate a structurally random market.
+# Coinflips, lotteries, and dice rolls resolve at ~50% by construction — no
+# crowd bias signal applies regardless of what the calibration table says.
+# Checked case-insensitively against the full question text.
+_NOISE_MARKET_PATTERNS = frozenset({
+    'coinflip', 'coin flip', 'coin-flip',
+    'daily coinflip', 'daily coin flip',
+    'free lottery', 'lottery',
+    'dice roll', 'dice', 'd20', 'd6',
+    'random', 'coinflip#', 'coin flip -',
+})
+
+
+def _is_noise_market(question: str) -> bool:
+    """Return True if the question text indicates a structurally random market."""
+    q = question.lower()
+    return any(pattern in q for pattern in _NOISE_MARKET_PATTERNS)
+
 
 def _bucket_bias_for(category: str, probability: float) -> Optional[float]:
     """Look up the per-bucket bias for a (category, 10% bucket) cell.
 
     Returns None if:
+      - category is in _BUCKET_EXCLUDED_CATEGORIES (Op7: 'other' is too
+        heterogeneous for per-bucket patterns to be meaningful)
       - there is no cell matching (category, bucket)
       - the cell is not marked reliable
       - the cell has fewer than _MIN_BUCKET_SAMPLES samples
@@ -201,6 +233,8 @@ def _bucket_bias_for(category: str, probability: float) -> Optional[float]:
     _CATEGORY_BIAS[category] aggregate.
     """
     if not _BY_CATEGORY_BUCKET:
+        return None
+    if category in _BUCKET_EXCLUDED_CATEGORIES:
         return None
     prob_pct = max(0.0, min(1.0, probability))
     bucket_idx = min(int(prob_pct * 10), 9)
@@ -584,9 +618,17 @@ class TradingStrategies:
         if probability is None:
             return None
 
-        category = _infer_market_category(market.get('question', ''))
+        # Op7: skip structurally random markets. Coinflips/lotteries resolve
+        # at ~50% by construction — no crowd bias signal applies.
+        question = market.get('question', '')
+        if _is_noise_market(question):
+            return None
+
+        category = _infer_market_category(question)
 
         # Primary lookup: per-(category, bucket) bias.
+        # Op7: 'other' is excluded from per-bucket lookup because it's too
+        # heterogeneous — falls through to category aggregate.
         bias = _bucket_bias_for(category, probability)
         source = "bucket"
 

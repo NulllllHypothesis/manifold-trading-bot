@@ -457,7 +457,13 @@ class TestAnalyzeMarketsZeroCandidatePath(unittest.TestCase):
     ai_was_candidate and save_research() would write schema v1.
     """
 
-    def _market(self, market_id: str, prob: float, question: str = "Will X?") -> dict:
+    def _market(self, market_id: str, prob: float,
+                question: str = "Will GPT-5 be released this year?") -> dict:
+        # Uses an ai_tech question so probability_bias (which keys on category
+        # aggregate bias) doesn't fire and create tied votes with
+        # probability_direction. ai_tech has near-zero bias (0.003) so
+        # probability_bias stays silent, leaving probability_direction as
+        # the sole signal → no ties → recommendations are produced.
         import time
         now_ms = time.time() * 1000
         return {

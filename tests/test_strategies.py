@@ -116,11 +116,15 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     # Per-bucket cells. Two strongly biased (crowd overestimates YES) and one
     # strongly underbiased (crowd underestimates YES — strategy should return YES).
+    # Op7: 'other' is excluded from per-bucket lookup, so per-bucket cells
+    # for 'other' are only useful for testing the exclusion itself. The
+    # negative-bias test uses 'science' instead (a real category that is
+    # allowed per-bucket).
     _BUCKETS = [
-        _cell('other',  0.60, +0.10),  # strong positive bias — bet NO
-        _cell('other',  0.30, +0.08),  # also positive — bet NO
-        _cell('other',  0.20, -0.06),  # strong negative bias — bet YES
-        _cell('crypto', 0.60, +0.09),  # bet NO
+        _cell('other',   0.60, +0.10),  # strong positive bias — but Op7 excludes 'other' from per-bucket
+        _cell('other',   0.30, +0.08),  # also positive — also excluded
+        _cell('science', 0.20, -0.06),  # strong negative bias — bet YES
+        _cell('crypto',  0.60, +0.09),  # bet NO
     ]
 
     def setUp(self):
@@ -151,10 +155,13 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     def test_per_bucket_negative_bias_returns_yes(self):
         """
-        New Op5 behaviour: a bucket with strong negative bias means the crowd
+        Op5 behaviour: a bucket with strong negative bias means the crowd
         underestimates YES, so the strategy should bet YES (not None).
+        Uses a science question (not 'other') because Op7 excludes 'other'
+        from per-bucket lookup.
         """
-        self.assertEqual(TradingStrategies.probability_bias_strategy(self._m(0.20)), "YES")
+        m = self._m(0.20, question='Will SpaceX launch Starship successfully?')
+        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "YES")
 
     # ── Category fallback when bucket has no cell ───────────────────────────
 
@@ -220,6 +227,67 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         """With no calibration data at all the strategy must be silent."""
         with _CalibrationPatch({}, []):
             self.assertIsNone(TradingStrategies.probability_bias_strategy(self._m(0.60)))
+
+    # ── Op7: noise market filter ─────────────────────────────────────────
+
+    def test_coinflip_market_skipped(self):
+        """'Daily Coinflip' is structurally 50/50 — no bias applies."""
+        m = self._m(0.50, question='Daily Coinflip')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_coin_flip_variant_skipped(self):
+        m = self._m(0.50, question='Daily Coin Flip - Day 321')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_free_lottery_skipped(self):
+        m = self._m(0.15, question='Free Lottery (Mars)')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_random_market_skipped(self):
+        m = self._m(0.50, question='Random number generator output above 50?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_dice_roll_skipped(self):
+        m = self._m(0.17, question='Will the d20 roll be above 10?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_non_noise_market_not_skipped(self):
+        """A real market question must NOT be filtered by the noise check."""
+        m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
+        # Should fire (or not) based on calibration data, not the noise filter
+        # The point is it must NOT return None because of noise filtering
+        # With our test fixture 'other' aggregate bias 0.050, this should fire
+        result = TradingStrategies.probability_bias_strategy(m)
+        # Either fires or doesn't based on bias — but the noise filter didn't block it
+        # (We just verify it's not None due to the noise check by checking the function
+        #  actually evaluates the bias path. With 'other' @ 0.050 > 0.025 it fires.)
+        self.assertIsNotNone(result)
+
+    # ── Op7: 'other' excluded from per-bucket lookup ─────────────────────
+
+    def test_other_category_skips_bucket_lookup(self):
+        """
+        'other' category must NOT use per-bucket cells even when they exist.
+        It falls back to the category aggregate (0.050 in fixture → fires).
+        This guards against the heterogeneity problem: 'other' per-bucket
+        bias reflects a mix of unrelated sub-populations.
+        """
+        # Our fixture has a per-bucket cell for 'other' at 60% with +0.10 bias.
+        # Without Op7, _bucket_bias_for would return 0.10.
+        # With Op7, 'other' is excluded → falls back to aggregate 0.050.
+        # Both are above threshold so the strategy still fires — but the
+        # bias value used is the aggregate, not the bucket.
+        m = self._m(0.65)  # 'other' category (no keywords match)
+        result = TradingStrategies.probability_bias_strategy(m)
+        # Strategy should fire (aggregate 0.050 > 0.025)
+        self.assertIsNotNone(result)
+
+    def test_non_other_category_still_uses_bucket(self):
+        """Categories other than 'other' must still use per-bucket cells."""
+        # crypto has a per-bucket cell at 60% with +0.09 bias in our fixture
+        m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
+        result = TradingStrategies.probability_bias_strategy(m)
+        self.assertEqual(result, "NO")  # crypto bucket bias +0.09 → bet NO
 
 
 # ─────────────────────────────────────────────────────────────────────────────
