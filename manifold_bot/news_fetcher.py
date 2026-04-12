@@ -29,11 +29,14 @@ from manifold_bot.config import NEWS_API_KEY
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CACHE_PATH = os.path.join(_ROOT, "data", "news_cache.json")
 _NEWS_API_ENDPOINT = "https://newsapi.org/v2/everything"
+_OLLAMA_URL = "http://localhost:11434/api/generate"
 
 # Fetch headlines published within the last N days
 _MAX_AGE_DAYS = 7
 # Abort if newsapi.org doesn't respond within this many seconds
 _TIMEOUT_SECONDS = 5
+# Abort keyword extraction via Ollama if it takes longer than this
+_OLLAMA_KEYWORD_TIMEOUT = 10
 # Maximum articles to retrieve per request (free tier allows up to 100)
 _MAX_RESULTS = 5
 
@@ -65,40 +68,98 @@ _STOPWORDS = frozenset({
 })
 
 
-def extract_keywords(question: str) -> str:
+def _extract_keywords_regex(question: str) -> str:
     """
-    Extract 2-3 meaningful search keywords from a market question.
+    Fast regex-based keyword extraction — fallback when Ollama is unavailable.
 
     Strips punctuation, lowercases, removes stopwords, generic verbs, and
-    tokens that contain digits (prices, percentages, dates like "150k" or
-    "100m" add nothing to a headline search). Takes the first 2 surviving
-    words — keeping the query narrow avoids NewsAPI's implicit AND
-    returning zero results when too many specific terms are combined.
-
-    Returns the original question (truncated to 50 chars) as a fallback
-    if nothing survives filtering.
-
-    Examples:
-        "Will Bitcoin hit $150k by December 2026?"  →  "bitcoin"
-        "Will Trump win the 2028 election?"  →  "trump election"
-        "Will the Fed raise interest rates in Q2?"  →  "fed interest"
-        "Will SpaceX launch Starship successfully?"  →  "spacex starship"
+    tokens that contain digits. Takes the first 2 surviving words.
     """
-    # Strip punctuation (keep alphanumerics and spaces), lowercase
     q = re.sub(r'[^\w\s]', ' ', question.lower())
     words = q.split()
-    # Keep tokens that are:
-    #   - not in stopwords
-    #   - at least 3 chars
-    #   - not purely numeric or containing digits (prices, years, ordinals)
     keywords = [
         w for w in words
         if w not in _STOPWORDS
         and len(w) >= 3
         and not re.search(r'\d', w)
     ]
-    # Fewer keywords = broader search = more results from NewsAPI's AND logic
     return ' '.join(keywords[:2]) if keywords else question[:50]
+
+
+def _extract_keywords_ollama(question: str) -> str:
+    """
+    Use the local Ollama model to extract 2-3 high-quality search terms.
+
+    The model sees the market question and returns just the search terms —
+    no explanation, no reasoning. This is a ~2-3 second call on a warm
+    model, which is acceptable because we only call it 3 times per hourly
+    run (once per news candidate).
+
+    Returns "" on any failure (timeout, Ollama down, bad output) so the
+    caller can fall back to the regex extractor.
+    """
+    prompt = (
+        "Extract 2-3 search keywords for finding news articles about this "
+        "prediction market question. Return ONLY the keywords separated by "
+        "spaces, nothing else. No explanation, no punctuation, no quotes.\n\n"
+        f"Question: {question}\n\n"
+        "Keywords:"
+    )
+
+    payload = json.dumps({
+        "model": "llama3.2:3b",
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 20,   # keywords only — very short output
+        },
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            _OLLAMA_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=_OLLAMA_KEYWORD_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        raw = data.get("response", "").strip()
+        # Clean: lowercase, strip punctuation, take first 3 tokens
+        cleaned = re.sub(r'[^\w\s]', ' ', raw.lower()).split()
+        # Filter out anything that looks like filler the model might add
+        cleaned = [w for w in cleaned if w not in _STOPWORDS and len(w) >= 2]
+        result = ' '.join(cleaned[:3])
+        return result if result else ""
+
+    except Exception:
+        return ""
+
+
+def extract_keywords(question: str) -> str:
+    """
+    Extract search keywords from a market question for NewsAPI queries.
+
+    Tries Ollama first (smarter — understands the topic entity), falls back
+    to regex (fast, always works) if Ollama is unavailable or returns garbage.
+
+    Examples (Ollama):
+        "Will Bitcoin hit $150k by December 2026?"       → "bitcoin price"
+        "Next James Bond is Callum Turner or Aaron...?"  → "james bond casting"
+        "Will Project Hail Mary receive Oscar noms?"     → "project hail mary oscar"
+
+    Examples (regex fallback):
+        "Will Bitcoin hit $150k by December 2026?"       → "bitcoin"
+        "Next James Bond is Callum Turner or Aaron...?"  → "next james"
+    """
+    # Try Ollama — returns "" on failure
+    result = _extract_keywords_ollama(question)
+    if result:
+        return result
+
+    # Fallback to regex
+    return _extract_keywords_regex(question)
 
 
 def _load_cache() -> dict:
