@@ -116,15 +116,12 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     # Per-bucket cells. Two strongly biased (crowd overestimates YES) and one
     # strongly underbiased (crowd underestimates YES — strategy should return YES).
-    # Op7: 'other' is excluded from per-bucket lookup, so per-bucket cells
-    # for 'other' are only useful for testing the exclusion itself. The
-    # negative-bias test uses 'science' instead (a real category that is
-    # allowed per-bucket).
+    # Op7.1: 'other' is fully excluded from probability_bias. Tests that
+    # need per-bucket cells use 'crypto' or 'science' instead.
     _BUCKETS = [
-        _cell('other',   0.60, +0.10),  # strong positive bias — but Op7 excludes 'other' from per-bucket
-        _cell('other',   0.30, +0.08),  # also positive — also excluded
-        _cell('science', 0.20, -0.06),  # strong negative bias — bet YES
-        _cell('crypto',  0.60, +0.09),  # bet NO
+        _cell('crypto',  0.60, +0.09),  # positive bias → bet NO
+        _cell('crypto',  0.30, +0.08),  # also positive → bet NO
+        _cell('science', 0.20, -0.06),  # negative bias → bet YES
     ]
 
     def setUp(self):
@@ -135,8 +132,9 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
     def tearDown(self):
         self._patch.__exit__()
 
-    def _m(self, prob, question='Will this prediction market resolve YES by end of 2026?'):
-        """Default question maps to 'other' category."""
+    def _m(self, prob, question='Will Bitcoin hit $150k by December 2026?'):
+        """Default question maps to 'crypto' category (not 'other', which is
+        excluded from probability_bias entirely by Op7.1)."""
         return _market(prob, question=question)
 
     # ── Per-bucket path: positive-bias bucket → NO ──────────────────────────
@@ -165,13 +163,14 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     # ── Category fallback when bucket has no cell ───────────────────────────
 
-    def test_category_fallback_other_fires(self):
+    def test_category_other_excluded_entirely(self):
         """
-        0.80 has no matching per-bucket cell for 'other', so the strategy
-        falls back to the category aggregate (+0.050 > 0.025) and fires NO.
+        Op7.1: 'other' is excluded from probability_bias entirely — both
+        per-bucket and aggregate. Its heterogeneous mix makes any bias
+        signal noise.
         """
-        m = self._m(0.80)  # 80-90% bucket has no cell in fixture
-        self.assertEqual(TradingStrategies.probability_bias_strategy(m), "NO")
+        m = self._m(0.80, question='Will something random happen next year?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
     def test_category_fallback_ai_tech_skipped(self):
         """AI/tech aggregate bias 0.003 is below 0.025 threshold → skip."""
@@ -201,8 +200,9 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         A bucket cell with sample_size < _MIN_BUCKET_SAMPLES (15) must NOT be
         used directly. The strategy falls back to the category aggregate.
         """
-        small_cell = _cell('other', 0.60, +0.50, n=3, reliable=True)  # huge bias but tiny n
-        with _CalibrationPatch({'other': 0.050}, [small_cell]):
+        # Use crypto (not 'other' which is fully excluded by Op7.1)
+        small_cell = _cell('crypto', 0.60, +0.50, n=3, reliable=True)  # huge bias but tiny n
+        with _CalibrationPatch({'crypto': 0.050}, [small_cell]):
             # cell should be ignored due to n<15, aggregate 0.050 should fire
             self.assertEqual(
                 TradingStrategies.probability_bias_strategy(self._m(0.60)),
@@ -211,8 +211,8 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     def test_not_reliable_cell_falls_back_to_category(self):
         """A cell marked reliable=False must also be skipped."""
-        bad_cell = _cell('other', 0.60, +0.50, n=100, reliable=False)
-        with _CalibrationPatch({'other': 0.050}, [bad_cell]):
+        bad_cell = _cell('crypto', 0.60, +0.50, n=100, reliable=False)
+        with _CalibrationPatch({'crypto': 0.050}, [bad_cell]):
             self.assertEqual(
                 TradingStrategies.probability_bias_strategy(self._m(0.60)),
                 "NO",
@@ -251,6 +251,15 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
         m = self._m(0.17, question='Will the d20 roll be above 10?')
         self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
+    def test_unicode_coinflip_skipped(self):
+        """Regression: 'Däilÿ Cöin Flip - Day 321' bypassed the ASCII filter."""
+        m = self._m(0.50, question='Däilÿ Cöin Flip - Day 321')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
+    def test_accented_lottery_skipped(self):
+        m = self._m(0.15, question='Frëe Löttery (Märs)')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
+
     def test_non_noise_market_not_skipped(self):
         """A real market question must NOT be filtered by the noise check."""
         m = self._m(0.65, question='Will Bitcoin hit $150k by December 2026?')
@@ -265,22 +274,12 @@ class TestProbabilityBiasStrategy(unittest.TestCase):
 
     # ── Op7: 'other' excluded from per-bucket lookup ─────────────────────
 
-    def test_other_category_skips_bucket_lookup(self):
+    def test_other_category_excluded_at_different_prob(self):
         """
-        'other' category must NOT use per-bucket cells even when they exist.
-        It falls back to the category aggregate (0.050 in fixture → fires).
-        This guards against the heterogeneity problem: 'other' per-bucket
-        bias reflects a mix of unrelated sub-populations.
+        Op7.1: 'other' is excluded at any probability level.
         """
-        # Our fixture has a per-bucket cell for 'other' at 60% with +0.10 bias.
-        # Without Op7, _bucket_bias_for would return 0.10.
-        # With Op7, 'other' is excluded → falls back to aggregate 0.050.
-        # Both are above threshold so the strategy still fires — but the
-        # bias value used is the aggregate, not the bucket.
-        m = self._m(0.65)  # 'other' category (no keywords match)
-        result = TradingStrategies.probability_bias_strategy(m)
-        # Strategy should fire (aggregate 0.050 > 0.025)
-        self.assertIsNotNone(result)
+        m = self._m(0.65, question='Will my cat learn to fetch this year?')
+        self.assertIsNone(TradingStrategies.probability_bias_strategy(m))
 
     def test_non_other_category_still_uses_bucket(self):
         """Categories other than 'other' must still use per-bucket cells."""

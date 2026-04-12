@@ -27,7 +27,9 @@ Confidence scores (used by auto_research.py after family deduplication):
 
 import json
 import logging
+import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -198,12 +200,19 @@ _MIN_BUCKET_SAMPLES = 15
 # to clear _MIN_BIAS_TO_TRADE for 'other' (aggregate ≈ 0.026) — effectively
 # silencing probability_bias on the catch-all bucket unless the aggregate
 # itself justifies it.
-_BUCKET_EXCLUDED_CATEGORIES = frozenset({'other'})
+# Op7.1: 'other' is excluded from per-bucket AND from the category-aggregate
+# fallback path entirely. The 'other' aggregate bias (~0.026) was only 0.001
+# above _MIN_BIAS_TO_TRADE (0.025), so the "exclude from per-bucket" fix in
+# Op7 didn't actually reduce fires — it just switched the source from bucket
+# to aggregate while still clearing the gate. The real fix is to exclude
+# 'other' from probability_bias altogether: its aggregate averages over
+# coinflips, celebrity markets, niche personal questions, and policy debates,
+# so any bias signal is noise.
+_BIAS_EXCLUDED_CATEGORIES = frozenset({'other'})
 
 # Op7: question-text patterns that indicate a structurally random market.
 # Coinflips, lotteries, and dice rolls resolve at ~50% by construction — no
 # crowd bias signal applies regardless of what the calibration table says.
-# Checked case-insensitively against the full question text.
 _NOISE_MARKET_PATTERNS = frozenset({
     'coinflip', 'coin flip', 'coin-flip',
     'daily coinflip', 'daily coin flip',
@@ -213,9 +222,23 @@ _NOISE_MARKET_PATTERNS = frozenset({
 })
 
 
+def _normalize_for_noise_check(text: str) -> str:
+    """Lowercase + strip accents/diacritics + collapse punctuation to spaces.
+
+    Handles production cases like 'Däilÿ Cöin Flip - Day 321' which bypass
+    a naive .lower() check because 'ä' != 'a' and 'ö' != 'o'.
+    """
+    # NFD decomposes accented chars into base + combining mark, then we
+    # strip the combining marks (category 'Mn') to get ASCII equivalents.
+    nfkd = unicodedata.normalize('NFKD', text)
+    ascii_approx = ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+    # Lowercase + collapse non-alphanumeric to spaces
+    return re.sub(r'[^a-z0-9 ]', ' ', ascii_approx.lower()).strip()
+
+
 def _is_noise_market(question: str) -> bool:
     """Return True if the question text indicates a structurally random market."""
-    q = question.lower()
+    q = _normalize_for_noise_check(question)
     return any(pattern in q for pattern in _NOISE_MARKET_PATTERNS)
 
 
@@ -234,7 +257,7 @@ def _bucket_bias_for(category: str, probability: float) -> Optional[float]:
     """
     if not _BY_CATEGORY_BUCKET:
         return None
-    if category in _BUCKET_EXCLUDED_CATEGORIES:
+    if category in _BIAS_EXCLUDED_CATEGORIES:
         return None
     prob_pct = max(0.0, min(1.0, probability))
     bucket_idx = min(int(prob_pct * 10), 9)
@@ -626,15 +649,20 @@ class TradingStrategies:
 
         category = _infer_market_category(question)
 
+        # Op7.1: skip excluded categories entirely. 'other' is too
+        # heterogeneous for any bias signal (bucket or aggregate) to be
+        # meaningful — its aggregate (~0.026) barely cleared the threshold
+        # and produced 96% of all bias fires, most of which were garbage.
+        if category in _BIAS_EXCLUDED_CATEGORIES:
+            return None
+
         # Primary lookup: per-(category, bucket) bias.
-        # Op7: 'other' is excluded from per-bucket lookup because it's too
-        # heterogeneous — falls through to category aggregate.
         bias = _bucket_bias_for(category, probability)
         source = "bucket"
 
         # Fallback: category-level aggregate.
         if bias is None:
-            bias = _CATEGORY_BIAS.get(category, _CATEGORY_BIAS.get('other', 0.0))
+            bias = _CATEGORY_BIAS.get(category, 0.0)
             source = "category"
 
         if abs(bias) < _MIN_BIAS_TO_TRADE:
