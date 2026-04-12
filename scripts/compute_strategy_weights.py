@@ -211,6 +211,36 @@ def main(dry_run: bool = False) -> None:
     by_category = _compute_weights_by_category(outcomes)
     cat_accuracy = _compute_category_accuracy(outcomes)
 
+    # Preserve backtest-sourced weights for strategies where live data is
+    # insufficient. Without this, the Monday 07:30 run would overwrite the
+    # Sunday 03:30 backtest weights with 1.0 defaults every week, losing
+    # the signal from 267 reconstructed snapshots.
+    #
+    # Merge rule: if a strategy has < MIN_SAMPLES_PER_STRATEGY live trades,
+    # keep whatever weight exists in the current file (which may have been
+    # set by backtest_from_snapshots.py on Sunday).
+    existing: dict = {}
+    if os.path.exists(WEIGHTS_PATH):
+        try:
+            with open(WEIGHTS_PATH) as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    existing_weights = existing.get("weights", {})
+    for strat in list(weights.keys()):
+        n = per_strategy_samples.get(strat, 0)
+        if n < MIN_SAMPLES_PER_STRATEGY:
+            # Not enough live data — preserve the existing weight (which
+            # might be from backtest, or a previous live computation, or
+            # the default 1.0). Only live data with sufficient samples
+            # should override.
+            prev = existing_weights.get(strat)
+            if prev is not None and prev != weights[strat]:
+                print(f"  {strat}: preserving existing weight {prev} "
+                      f"(live samples {n} < {MIN_SAMPLES_PER_STRATEGY})")
+                weights[strat] = prev
+
     result = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "sample_count": len(outcomes),
