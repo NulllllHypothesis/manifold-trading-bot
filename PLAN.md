@@ -518,6 +518,24 @@ Forward path + historical backfill for the live snapshot training pipeline.
 
 **Op5 follow-up observation (for Op7):** in the post-Op5 run, Ollama `ai_skip=3/3` — every bias rec the AI analysed was vetoed. This suggests per-(category, bucket) bias applied to `other` markets near the 50-60% bucket may be over-firing on markets where the underlying "other" historical bias doesn't apply (e.g. Daily Coinflip markets at exactly 50% are 50/50 by construction). The AI veto is correctly catching these. **Not an Op5 regression** — the strategy mix is finally diverse, it just means category-level `other` aggregate is too heterogeneous to be a useful prior. Op7 candidate: filter out markets whose question text flags them as structurally uncorrelated with category bias (coinflip, roll, random, etc.) OR exclude `other` from the per-bucket lookup entirely.
 
+#### ✅ Op5.1 — MKT/CANCEL resolution + position overflow fix (done 2026-04-12)
+
+Three positions were permanently stuck as OPEN because `auto_resolve_markets()` only handled YES/NO. Markets resolved as MKT (proportional payout) or CANCEL (full refund) were silently skipped, consuming slots forever.
+
+- [x] `paper_trader.py::resolve_market_mkt()` — proportional payout at `resolutionProbability`
+- [x] `paper_trader.py::resolve_market_cancel()` — full refund of bet amount
+- [x] `auto_resolve_markets()` dispatches: YES/NO → existing, MKT → new, CANCEL → new
+- [x] Position overflow fix: `run_trading_cycle()` re-checks `_trade_rejection_reason()` before EACH trade (prevents 11/10 when starting at 9 and placing 2)
+- [x] `tests/test_resolution_types.py` — 18 tests covering MKT payout math, CANCEL refund, dispatch, skipping non-OPEN
+- [x] **Server result:** 3 positions resolved (Moon MKT -$0.04, Light-year MKT +$0.00, Mythos CANCEL +$10 refund), balance $55→$65, book 11→8→10 (2 new trades placed in freed slots)
+
+#### ✅ Op5.2 — Backtest weight preservation (done 2026-04-12, commit `bd114cc`)
+
+`compute_strategy_weights.py` (Monday 07:30) was overwriting `strategy_weights.json` from scratch, losing the `probability_bias = 1.2` that `backtest_from_snapshots.py` (Sunday 03:30) had computed from 186 historical evaluations.
+
+- [x] Monday run now reads existing file and preserves weights for strategies where live samples < MIN_SAMPLES_PER_STRATEGY (10)
+- [x] Backtest signal persists until enough live data exists to override it
+
 #### 🟢 Op6 — M6 training run
 
 Deferred until dataset grows via Op4's live accumulation path. The M6 scaffolding ([scripts/finetune.py](scripts/finetune.py)) and the promotion gate (crowd Brier 0.1503 / DirAcc 75.0% on the held-out test split) are already in place. Reasons to wait:
@@ -545,11 +563,61 @@ Strong signal when it fires. High-accuracy large bettors on Manifold have asymme
 - [ ] `whale_strategy` in `strategies.py` — `family: "fundamental"`, confidence scales with whale accuracy × bet size
 - [ ] Bettor-accuracy cache in SQLite (`data/calibration.db` — reuse existing DB)
 
-#### 🟢 P5 — Web Dashboard (convenience)
+#### 🟢 P5 — Internal Operator Dashboard
 
-- [ ] FastAPI server, port 5000: portfolio, trades, positions, opportunities endpoints
-- [ ] Single-page HTML with Chart.js — balance over time, daily P&L, open positions, top opportunities
-- [ ] SSH tunnel to view locally
+**Purpose:** an operator console for the team — not a public product. The system now has enough moving parts (8 analysis layers, 4 learning loops, Op3 counters, swap proposals) that debugging from raw logs is getting impractical. The dashboard makes the bot's behaviour legible so the right next improvements become visible from patterns over time, not one-off log reads.
+
+**Scope:** internal only. Runs on the server (port 5000), accessed via SSH tunnel or Tailscale. No auth needed (private network). No public exposure until core performance story is solid.
+
+**Tech:** FastAPI backend reading existing JSON/SQLite files. Single-page HTML + Chart.js frontend. Zero writes to trading state — pure read-only observer.
+
+**Panels (ordered by operator value):**
+
+**Panel 1 — Portfolio (the thing you check 10x a day)**
+- [ ] Balance + total P&L + today's P&L
+- [ ] Open positions table: market question, category, bet direction, $amount, entry price, current price, unrealised P&L, age
+- [ ] Recent resolved trades: outcome (WIN/LOSE/MKT/CANCEL), actual P&L, which strategies triggered
+- [ ] Position count vs MAX_POSITIONS (visual indicator when full)
+
+**Panel 2 — Research Feed (what the bot is seeing right now)**
+- [ ] Latest recommendations from `market_research.json`: question, confidence, strategies, EV (exec), AI recommendation
+- [ ] Which markets went to AI and what AI returned (agree/disagree/SKIP + reasoning snippet)
+- [ ] News headlines that were fetched (from `rec['news_context']`)
+- [ ] Schema version indicator (v2 = healthy, v1 = AI pass failed)
+
+**Panel 3 — Strategy Health (Op3 counters visualised)**
+- [ ] Raw fire rates per strategy over time (line chart from `research_counters.jsonl`)
+- [ ] `no_active_signals` count over time (are we covering more markets?)
+- [ ] Family dedup winner distribution (momentum vs contrarian vs fundamental)
+- [ ] AI flow: eligible → cooled → analyzed → agree/disagree/skip/no-result (funnel chart)
+- [ ] Trader rejection reasons breakdown (from `trader_counters.jsonl`): which gate is the bottleneck?
+- [ ] Confidence distribution of final recommendations (histogram)
+
+**Panel 4 — Learning Health (feedback loops)**
+- [ ] Strategy weights over time (are they moving from 1.0? which direction?)
+- [ ] `per_strategy_samples` progress toward the ≥ 10 live activation gate
+- [ ] Calibration bias by category (bar chart from `calibration_table.json`)
+- [ ] Per-bucket bias heatmap: category × probability bucket, colour by bias magnitude
+- [ ] Category accuracy: samples accumulated vs the ≥ 8 activation gate
+- [ ] Dataset growth: training_dataset.jsonl row count over time (reconstructed vs live)
+
+**Panel 5 — Swap Proposals (replace Telegram flow)**
+- [ ] Active pending swaps with close-side loss vs open-side exec EV
+- [ ] One-click approve/dismiss (calls `execute_swap.py` via subprocess)
+- [ ] Swap history: approved/dismissed/expired with timestamps
+
+**Not in v1:**
+- Public access or auth (internal only for now)
+- Real-time WebSocket updates (polling every 60s is fine)
+- Trade execution from the dashboard (trades are placed by the cron, not by humans)
+- Mobile layout (SSH tunnel from a laptop is the access pattern)
+
+**Implementation order:**
+1. FastAPI backend + `/api/portfolio`, `/api/research`, `/api/counters`, `/api/learning` endpoints
+2. Static HTML shell with Chart.js loaded
+3. Panel 1 (portfolio) — highest immediate value
+4. Panel 3 (strategy health) — second highest, directly informs Op7 decisions
+5. Panels 2 + 4 + 5 in that order
 
 #### 🟢 P6 — SQLite storage (housekeeping)
 
