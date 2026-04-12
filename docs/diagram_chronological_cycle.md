@@ -19,19 +19,23 @@ What happens, when, and in what order — from hourly cron to weekly learning.
     │   ~38 markets survive
     │
     ├─ 3. SCORE
-    │   Run 5 strategies on each survivor
+    │   Run 6 strategy functions on each survivor
+    │     4 directional: probability_direction, mean_reversion,
+    │                    probability_bias, creator_disagreement
+    │     1 confirmation-only: thin_market
+    │     1 ranking filter: volume_spike_priority
     │   Apply strategy weights (from strategy_weights.json)
     │   Family dedup: keep 1 signal per family (momentum/contrarian/fund.)
     │   Vote: YES vs NO majority → overall direction + avg confidence
     │   ~19 recommendations produced
     │
     ├─ 4. NEWS ENRICHMENT (top 3 by confidence)
-    │   Ollama extracts keywords from question → NewsAPI search
+    │   Keyword extraction (Ollama, regex fallback) → NewsAPI search
     │   Direction agree → boost; disagree → penalize
     │   Headlines stored for AI prompt
     │
     ├─ 5. AI ANALYSIS (top 3 by composite score)
-    │   Send to llama3.2:3b with:
+    │   Send to llama3.2:3b first (DeepSeek API fallback if Ollama fails):
     │     market data + news headlines + calibration prior
     │   AI returns: YES/NO/SKIP + confidence + true_prob estimate
     │   Blend stat + AI confidence
@@ -160,6 +164,8 @@ What happens, when, and in what order — from hourly cron to weekly learning.
       Read bet_outcomes (post_ev_fix era only)
       Compute per-strategy direction accuracy
       Compute per-(category, strategy) accuracy
+      Preserve backtest weights for strategies with < 10 live samples
+        (prevents Monday run from overwriting Sunday's backtest signal)
       Write data/strategy_weights.json + data/category_accuracy.json
       Git commit + push
       → feeds Layer 2 + Layer 6 (Kelly sizing) next hourly run
@@ -202,55 +208,24 @@ What happens, when, and in what order — from hourly cron to weekly learning.
   THE FEEDBACK LOOPS (how the bot improves itself)
 ════════════════════════════════════════════════════════════════════════════
 
-  LOOP 1 — Strategy Weights (weekly, automatic)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Hourly trades → positions resolve → bet_outcomes written        │
-  │       │                                                          │
-  │       └──► Monday compute_strategy_weights.py                    │
-  │                │                                                 │
-  │                └──► strategy_weights.json updated                 │
-  │                        │                                         │
-  │                        └──► Next hourly run: Layer 2 uses new    │
-  │                             weights to scale strategy confidence  │
-  │                             + Layer 7 Kelly sizing adjusts       │
-  └──────────────────────────────────────────────────────────────────┘
+  See docs/diagram_learning_loops.md for the full detailed version
+  with data schemas, formulas, and interaction diagrams.
 
-  LOOP 2 — Calibration Table (weekly, automatic)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Sunday harvest → 2000+ resolved markets → calibration.db        │
-  │       │                                                          │
-  │       └──► analyze_calibration.py                                │
-  │                │                                                 │
-  │                └──► calibration_table.json updated                │
-  │                        │                                         │
-  │                        ├──► Layer 1: probability_bias uses        │
-  │                        │    per-bucket crowd bias to fire/skip    │
-  │                        │                                         │
-  │                        └──► Layer 4: AI prompt gets per-market    │
-  │                             calibration prior ("crowd overest-    │
-  │                             imates by +7pp in this bucket")      │
-  └──────────────────────────────────────────────────────────────────┘
+  Quick reference:
 
-  LOOP 3 — Category Accuracy (weekly, automatic)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  bet_outcomes with category → Monday compute weights             │
-  │       │                                                          │
-  │       └──► category_accuracy.json updated                        │
-  │                │                                                 │
-  │                └──► Layer 6: _effective_category_cap()            │
-  │                     reduces cap 3→1 for categories where our     │
-  │                     own trades have <50% accuracy (≥8 samples)   │
-  └──────────────────────────────────────────────────────────────────┘
+  LOOP 1 — Strategy Weights (weekly)
+    trades resolve → bet_outcomes → Monday weights run
+    → strategy_weights.json → Layer 2 scaling + Layer 7 Kelly
 
-  LOOP 4 — ML Dataset Growth (multi-week, semi-automatic)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Hourly snapshots accumulate with days_before_close (Op4)        │
-  │       │                                                          │
-  │       └──► Markets resolve over weeks/months                     │
-  │                │                                                 │
-  │                └──► build_training_dataset.py picks up new rows   │
-  │                        │                                         │
-  │                        └──► Larger dataset → better M6 training   │
-  │                             → better AI veto → better trades     │
-  └──────────────────────────────────────────────────────────────────┘
+  LOOP 2 — Calibration Table (weekly)
+    Sunday harvest → resolved markets → calibration_table.json
+    → Layer 1 probability_bias + Layer 4 AI calibration prior
+
+  LOOP 3 — Category Accuracy (weekly)
+    bet_outcomes by category → Monday weights run
+    → category_accuracy.json → Layer 6 adaptive caps (3→1 if <50%)
+
+  LOOP 4 — ML Dataset Growth (multi-week)
+    hourly snapshots + resolved outcomes → training_dataset.jsonl
+    → M5 eval → M6 fine-tune (when dataset is large enough)
 ```
