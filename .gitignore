@@ -66,3 +66,6 @@ data/ai_timeout_cooldown.json
 
 # Backup files
 automation/auto_research_backup.py
+
+# MCP server config (contains absolute local paths, not portable)
+.mcp.json
