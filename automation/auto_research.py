@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.strategies import TradingStrategies, _infer_market_category
+from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY, MAX_BET_AMOUNT
@@ -47,6 +47,7 @@ def _new_research_counters() -> dict:
         "skipped_resolved":    0,
         "skipped_low_liquidity": 0,
         "skipped_stale":       0,
+        "skipped_noise":       0,
         # Raw strategy fires (counted BEFORE family dedup / weight scaling)
         "raw_fires": {
             "probability_direction": 0,
@@ -108,6 +109,7 @@ def _print_research_counters(counters: dict) -> None:
     print(f"    Skipped (resolved)   : {counters['skipped_resolved']}")
     print(f"    Skipped (low liq)    : {counters['skipped_low_liquidity']}")
     print(f"    Skipped (stale)      : {counters['skipped_stale']}")
+    print(f"    Skipped (noise)      : {counters['skipped_noise']}")
     print(f"    Raw strategy fires:")
     for strat, n in counters['raw_fires'].items():
         print(f"      {strat:<22} {n:>5}")
@@ -448,6 +450,15 @@ class MarketResearcher:
                 # Skip stale markets — last bet > 72h ago AND near-zero 24h volume
                 if TradingStrategies.is_stale_market(market):
                     counters["skipped_stale"] += 1
+                    continue
+
+                # Skip structurally random markets (coinflip, free lottery, etc.)
+                # before ANY strategy evaluates them. These markets resolve at
+                # ~50% by construction — no strategy signal is meaningful.
+                # Previously this filter was only inside probability_bias_strategy,
+                # so noise markets still entered via probability_direction.
+                if _is_noise_market(question):
+                    counters["skipped_noise"] += 1
                     continue
 
                 # ── Run all strategies ───────────────────────────────────────
@@ -821,9 +832,21 @@ class MarketResearcher:
                         continue
 
                     # Market was a candidate — check what AI returned.
-                    if not ai or ai['recommendation'] == 'SKIP':
-                        # AI was invoked for this market and returned SKIP (or failed to
-                        # return a usable result, which we also treat as SKIP).
+                    if not ai:
+                        # AI was invoked but returned no usable result (timeout,
+                        # parse error, etc.). Already counted in ai_no_result above.
+                        # Do NOT also count as ai_skip — that's for explicit SKIPs.
+                        rec['ai_recommendation'] = 'SKIP'
+                        rec['ai_confidence'] = 0.0
+                        rec['ai_reasoning'] = ''
+                        rec['ai_source'] = None
+                        rec['ai_returned_skip'] = True
+                        # No counter increment here — ai_no_result already counted it
+                        continue
+
+                    if ai['recommendation'] == 'SKIP':
+                        # AI explicitly returned SKIP — it analyzed the market and
+                        # decided there's no edge. This is a real signal, not an error.
                         rec['ai_recommendation'] = 'SKIP'
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''

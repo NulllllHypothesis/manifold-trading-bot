@@ -644,8 +644,10 @@ class TradingStrategies:
         if probability is None:
             return None
 
-        # Op7: skip structurally random markets. Coinflips/lotteries resolve
-        # at ~50% by construction — no crowd bias signal applies.
+        # Note: noise market filtering (coinflip/lottery) is now handled
+        # globally in auto_research.py's pre-strategy filter loop. No need
+        # to check _is_noise_market() here — noise markets never reach
+        # any strategy. Kept as a safety belt for direct callers (backtest).
         question = market.get('question', '')
         if _is_noise_market(question):
             return None

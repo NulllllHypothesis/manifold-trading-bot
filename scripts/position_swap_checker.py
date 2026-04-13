@@ -230,6 +230,33 @@ def save_pending_swaps(swaps: List[Dict]) -> None:
         json.dump(swaps, f, indent=2)
 
 
+def _auto_dismiss_expired_swaps() -> None:
+    """Mark any pending swap older than SWAP_EXPIRY_HOURS as 'expired'.
+
+    Called at the start of run_swap_check() so stale proposals don't block
+    new proposals. Previously expired swaps sat as status='pending' forever
+    in the file and only the time-window check in has_active_pending_swaps()
+    prevented them from blocking — but they still prevented proposals during
+    the 4h window even when no human was available to approve.
+    """
+    swaps = load_pending_swaps()
+    cutoff = datetime.now() - timedelta(hours=SWAP_EXPIRY_HOURS)
+    changed = False
+    for s in swaps:
+        if s.get('status') != 'pending':
+            continue
+        try:
+            proposed_at = datetime.fromisoformat(s.get('proposed_at', '2000-01-01'))
+        except ValueError:
+            continue
+        if proposed_at < cutoff:
+            s['status'] = 'expired'
+            print(f"  Auto-expired swap #{s.get('id', '?')} (proposed {s.get('proposed_at', '?')[:19]})")
+            changed = True
+    if changed:
+        save_pending_swaps(swaps)
+
+
 def has_active_pending_swaps() -> bool:
     """Return True if any entry in pending_swaps.json is pending and not expired."""
     swaps = load_pending_swaps()
@@ -316,6 +343,14 @@ def run_swap_check() -> int:
     if open_count < MAX_POSITIONS:
         print("Slots available — no swap needed.")
         return 0
+
+    # Auto-dismiss expired pending swaps so they don't block new proposals.
+    # Previously an expired swap sat as status='pending' forever, and while
+    # has_active_pending_swaps() correctly ignored it after the 4h window,
+    # ANY swap proposed during the first 4h blocked new proposals. By
+    # auto-dismissing at the start of each check, a stale 4h+ swap gets
+    # cleaned up and the loop can propose fresh swaps immediately.
+    _auto_dismiss_expired_swaps()
 
     if has_active_pending_swaps():
         print("Active pending swaps already exist — skipping.")

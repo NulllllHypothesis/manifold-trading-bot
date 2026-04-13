@@ -47,7 +47,7 @@ class TestResearchCountersShape(unittest.TestCase):
     def test_top_level_keys_present(self):
         expected = {
             "timestamp", "markets_fetched",
-            "skipped_resolved", "skipped_low_liquidity", "skipped_stale",
+            "skipped_resolved", "skipped_low_liquidity", "skipped_stale", "skipped_noise",
             "raw_fires", "dedup_winners",
             "thin_market_confirmations", "no_active_signals", "tied_votes_dropped",
             "ai_eligible", "ai_cooled_down", "ai_analyzed",
