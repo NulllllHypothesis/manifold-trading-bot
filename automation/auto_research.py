@@ -154,7 +154,12 @@ def _append_research_counters(counters: dict) -> None:
 # State is persisted in data/ai_timeout_cooldown.json (gitignored runtime file).
 _AI_TIMEOUT_COOLDOWN_PATH = os.path.join(_ROOT, "data", "ai_timeout_cooldown.json")
 _AI_TIMEOUT_COOLDOWN_HOURS = 24   # how long a market stays on cooldown
-_AI_TIMEOUT_MAX_FAILS = 2         # failures within that window before exclusion
+# Raised from 2 → 4 (2026-04-13): Ollama on CPU legitimately takes 60-80s
+# on cold prompts. A single slow batch puts 3 markets on cooldown at once,
+# so fails=2 was cascading to block 87% of AI-eligible recs within a day.
+# fails=4 means a market must time out consistently across multiple hours
+# before exclusion — one or two cold starts won't permanently block it.
+_AI_TIMEOUT_MAX_FAILS = 4         # failures within that window before exclusion
 
 
 def _load_ai_timeout_cooldown() -> dict:
