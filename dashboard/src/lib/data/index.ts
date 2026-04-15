@@ -18,6 +18,7 @@
 import "server-only"
 
 export { readPaperState, summarizePortfolio } from "./portfolio"
+export { summarizePerformance } from "./performance"
 export { readMarketResearch } from "./research"
 export {
   readResearchCounters,

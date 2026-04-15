@@ -9,10 +9,37 @@ export async function readPaperState(_botId: string = BOT_ID): Promise<PaperStat
 }
 
 /**
+ * Module-level cache for Manifold API title lookups.
+ * Null values cache "not found" to avoid re-hitting the API for dead IDs.
+ */
+const MANIFOLD_TITLE_CACHE = new Map<string, { title: string | null; ts: number }>()
+const TITLE_TTL_MS = 60 * 60 * 1000
+
+async function fetchManifoldTitle(marketId: string): Promise<string | null> {
+  const cached = MANIFOLD_TITLE_CACHE.get(marketId)
+  if (cached && Date.now() - cached.ts < TITLE_TTL_MS) return cached.title
+  try {
+    const res = await fetch(
+      `https://api.manifold.markets/v0/market/${marketId}`,
+      { signal: AbortSignal.timeout(3000) },
+    )
+    const title = res.ok
+      ? (((await res.json()) as { question?: unknown }).question ?? null)
+      : null
+    const value = typeof title === "string" ? title : null
+    MANIFOLD_TITLE_CACHE.set(marketId, { title: value, ts: Date.now() })
+    return value
+  } catch {
+    MANIFOLD_TITLE_CACHE.set(marketId, { title: null, ts: Date.now() })
+    return null
+  }
+}
+
+/**
  * Builds a market_id → question map from every source we can reach locally:
  * research.latest, research.history, and any trade/position that already
- * carries a question. Most historical trade records lack `question` — this
- * lets the UI show titles for trades whose markets have been seen recently.
+ * carries a question. Missing IDs (typically legacy trades) are filled in
+ * from the Manifold public API with a 1h in-memory cache.
  */
 async function buildTitleLookup(state: PaperState): Promise<Map<string, string>> {
   const titles = new Map<string, string>()
@@ -31,6 +58,23 @@ async function buildTitleLookup(state: PaperState): Promise<Map<string, string>>
   }
   for (const snap of research?.history ?? []) {
     for (const r of snap.recommendations) add(r.market_id, r.question)
+  }
+
+  const missing = new Set<string>()
+  for (const trades of Object.values(state.positions)) {
+    for (const t of trades) {
+      if (!t.question && !titles.has(t.market_id)) missing.add(t.market_id)
+    }
+  }
+  for (const t of state.trade_history) {
+    if (!t.question && !titles.has(t.market_id)) missing.add(t.market_id)
+  }
+
+  if (missing.size > 0) {
+    const fetched = await Promise.all(
+      [...missing].map(async (id) => [id, await fetchManifoldTitle(id)] as const),
+    )
+    for (const [id, title] of fetched) if (title) titles.set(id, title)
   }
 
   return titles
