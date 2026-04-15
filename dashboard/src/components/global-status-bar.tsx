@@ -10,25 +10,6 @@ import {
 } from "@/lib/data"
 import { StatusBar, type StatusItem, type StatusLevel } from "./status-bar"
 
-function formatAge(ageSeconds: number | null): string {
-  if (ageSeconds === null) return "—"
-  if (ageSeconds < 60) return `${ageSeconds}s`
-  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)}m`
-  if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)}h`
-  return `${Math.floor(ageSeconds / 86400)}d`
-}
-
-function levelForAge(
-  ageSeconds: number | null,
-  warnAfter: number,
-  errorAfter: number,
-): StatusLevel {
-  if (ageSeconds === null) return "idle"
-  if (ageSeconds > errorAfter) return "error"
-  if (ageSeconds > warnAfter) return "warn"
-  return "ok"
-}
-
 export async function GlobalStatusBar() {
   const [diagnostics, pendingSwaps, researchCounters, traderCounters] =
     await Promise.all([
@@ -45,14 +26,10 @@ export async function GlobalStatusBar() {
   const lastResearch = researchCounters.at(-1)
   const lastTrader = traderCounters.at(-1)
 
-  // Snapshot "now" once so the React Compiler sees a pure render path.
-  const nowMs = new Date().getTime()
-  const lastResearchAge = lastResearch
-    ? Math.floor((nowMs - Date.parse(lastResearch.timestamp)) / 1000)
-    : null
-  const lastTraderAge = lastTrader
-    ? Math.floor((nowMs - Date.parse(lastTrader.timestamp)) / 1000)
-    : null
+  // Age/staleness is computed client-side in StatusBar to keep SSR stable.
+  // Server only passes absolute timestamps + thresholds.
+  const RESEARCH_WARN_SEC = 75 * 60
+  const RESEARCH_ERROR_SEC = 3 * 3600
 
   // AI health: derived from recent ai_no_result rate
   const recentAi = researchCounters.slice(-5)
@@ -84,21 +61,27 @@ export async function GlobalStatusBar() {
       level: paperStateFile?.exists ? "ok" : "error",
       value: paperStateFile?.exists ? "ON" : "OFF",
       detail: paperStateFile?.exists
-        ? `Paper state updated ${formatAge(paperStateFile.ageSeconds)} ago`
+        ? "Paper trading state file present"
         : "Paper trading state file missing",
     },
     {
       key: "research",
-      level: levelForAge(lastResearchAge, 75 * 60, 3 * 3600),
-      value: formatAge(lastResearchAge),
+      level: lastResearch ? "idle" : "error",
+      value: lastResearch ? "—" : "n/a",
+      timestamp: lastResearch?.timestamp,
+      warnAfterSec: RESEARCH_WARN_SEC,
+      errorAfterSec: RESEARCH_ERROR_SEC,
       detail: lastResearch
         ? `Last research run: ${lastResearch.timestamp}`
         : "No research runs found",
     },
     {
       key: "trader",
-      level: levelForAge(lastTraderAge, 75 * 60, 3 * 3600),
-      value: formatAge(lastTraderAge),
+      level: lastTrader ? "idle" : "error",
+      value: lastTrader ? "—" : "n/a",
+      timestamp: lastTrader?.timestamp,
+      warnAfterSec: RESEARCH_WARN_SEC,
+      errorAfterSec: RESEARCH_ERROR_SEC,
       detail: lastTrader
         ? `Last trader run: ${lastTrader.timestamp}`
         : "No trader runs found",

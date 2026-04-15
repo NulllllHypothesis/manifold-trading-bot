@@ -1,3 +1,6 @@
+"use client"
+
+import { useEffect, useState } from "react"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { STATUS_INDICATORS } from "@/lib/nav"
@@ -11,6 +14,13 @@ export type StatusItem = {
   value?: string
   /** Detail tooltip text */
   detail?: string
+  /**
+   * Optional ISO timestamp. When present, the client derives `value` (age) and
+   * `level` after mount — keeping SSR output stable so hydration matches.
+   */
+  timestamp?: string
+  warnAfterSec?: number
+  errorAfterSec?: number
 }
 
 const LEVEL_DOT: Record<StatusLevel, string> = {
@@ -27,13 +37,52 @@ const LEVEL_RING: Record<StatusLevel, string> = {
   idle: "ring-muted-foreground/20",
 }
 
+function formatAge(ageSeconds: number): string {
+  if (ageSeconds < 0) return "—"
+  if (ageSeconds < 60) return `${ageSeconds}s`
+  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)}m`
+  if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)}h`
+  return `${Math.floor(ageSeconds / 86400)}d`
+}
+
+function levelForAge(
+  ageSeconds: number,
+  warnAfter: number,
+  errorAfter: number,
+): StatusLevel {
+  if (ageSeconds > errorAfter) return "error"
+  if (ageSeconds > warnAfter) return "warn"
+  return "ok"
+}
+
 export function StatusBar({ items }: { items: StatusItem[] }) {
+  const [nowMs, setNowMs] = useState<number | null>(null)
+  useEffect(() => {
+    setNowMs(Date.now())
+    const id = setInterval(() => setNowMs(Date.now()), 30_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const resolved: StatusItem[] = items.map((item) => {
+    if (!item.timestamp || nowMs === null) return item
+    const ageSeconds = Math.floor((nowMs - Date.parse(item.timestamp)) / 1000)
+    return {
+      ...item,
+      value: formatAge(ageSeconds),
+      level: levelForAge(
+        ageSeconds,
+        item.warnAfterSec ?? 75 * 60,
+        item.errorAfterSec ?? 3 * 3600,
+      ),
+    }
+  })
+
   return (
     <div
       data-tabular
       className="flex h-11 items-center gap-0 overflow-x-auto border-b border-border bg-background/60 px-3 backdrop-blur"
     >
-      {items.map((item, idx) => {
+      {resolved.map((item, idx) => {
         const meta = STATUS_INDICATORS[item.key]
         const Icon = meta.icon
         return (
