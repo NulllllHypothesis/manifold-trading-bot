@@ -29,7 +29,15 @@ export const CalibrationTableSchema = z.object({
   source_db: z.string().optional(),
   min_cell_samples: z.number().optional(),
   description: z.string().optional(),
-  buckets: z.array(z.unknown()).optional(),
+  buckets: z.array(z.object({
+    bucket_low: z.number(),
+    bucket_high: z.number(),
+    crowd_midpoint: z.number().optional(),
+    actual_yes_rate: z.number(),
+    sample_size: z.number(),
+    bias: z.number().optional(),
+    reliable: z.boolean().optional(),
+  })).optional(),
   by_category: z.array(CategoryCalibrationSchema),
   by_category_bucket: z.array(BucketCalibrationSchema).optional(),
 })
