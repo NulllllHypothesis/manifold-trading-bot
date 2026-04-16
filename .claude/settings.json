@@ -24,7 +24,8 @@
       "Bash(WORKSPACE_ROOT=/tmp/manifold-sandbox-snapshot npx next build)",
       "Bash(sed -n '80,85p' src/app/performance/page.tsx)",
       "Bash(sed -n '164,168p' src/lib/data/portfolio.ts)",
-      "Bash(ls -la /Users/amirghari/Desktop/Hackathon/workspace/scripts/*.py)"
+      "Bash(ls -la /Users/amirghari/Desktop/Hackathon/workspace/scripts/*.py)",
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=5 hackathon-server 'cat ~/.openclaw/cron/jobs.json 2>/dev/null | python3 -c \":*)"
     ]
   }
 }

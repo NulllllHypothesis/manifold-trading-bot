@@ -252,15 +252,28 @@ export async function readAutomationStatus(
   if (openclawJobsAvailable) {
     try {
       const raw = JSON.parse(await fs.readFile(openclawPath, "utf-8")) as unknown
-      if (Array.isArray(raw)) {
-        openclawJobs = raw.map((j: Record<string, unknown>) => ({
-          id: String(j.id ?? ""),
-          name: String(j.name ?? j.description ?? ""),
-          schedule: String(j.schedule ?? j.cron ?? ""),
-          enabled: j.enabled !== false && j.disabled !== true,
-          message: String(j.message ?? j.prompt ?? "").slice(0, 100),
-        }))
-      }
+      const jobsArr: unknown[] = Array.isArray(raw)
+        ? raw
+        : (raw as Record<string, unknown>)?.jobs != null && Array.isArray((raw as Record<string, unknown>).jobs)
+          ? (raw as Record<string, unknown>).jobs as unknown[]
+          : []
+      openclawJobs = jobsArr.map((j: unknown) => {
+        const job = j as Record<string, unknown>
+        const sched = job.schedule as Record<string, unknown> | string | undefined
+        const schedExpr = typeof sched === "string"
+          ? sched
+          : typeof sched === "object" && sched !== null
+            ? String((sched as Record<string, unknown>).expr ?? "")
+            : ""
+        const payload = (job.payload ?? {}) as Record<string, unknown>
+        return {
+          id: String(job.id ?? ""),
+          name: String(job.name ?? job.description ?? ""),
+          schedule: schedExpr,
+          enabled: job.enabled === true,
+          message: String(payload.message ?? job.message ?? "").slice(0, 120),
+        }
+      })
     } catch {
       // malformed JSON — leave empty
     }

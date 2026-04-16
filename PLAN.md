@@ -726,6 +726,64 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 
 ---
 
+### ✅ Operator Dashboard — DONE (branch: feature/dashboard-v1)
+
+Full operator console for the trading bot. 15-page Next.js app reading every data file the bot produces.
+
+**Stack:** Next.js 16 + React 19 + shadcn/ui + Tailwind v4 + Recharts + better-sqlite3 + Zod
+
+**Quick start:**
+```bash
+cd dashboard && pnpm install
+pnpm dev:sandbox    # syncs live data from sandbox, starts at http://localhost:3000
+```
+
+**Pages built (15):**
+
+| Page | What it answers |
+|------|----------------|
+| Overview | Is the bot healthy? Balance, P&L, alerts (single source of truth for all issue counts), pipeline conversion |
+| Opportunities | Why can't the bot trade? Blocked opportunity debugger with trader-parity risk simulation |
+| Portfolio | What does the bot own? Book health, category slot usage (adaptive caps), stale position warnings |
+| Swaps | What positions should be replaced? Pending proposals with close/open EV comparison |
+| Performance | How is it performing? Equity curve, daily P&L, per-category and per-strategy breakdown |
+| Pipeline Health | Where do decisions get filtered? Full funnel, AI flow, pre-filter drops, rejection reasons, confidence histogram |
+| Automation | Are the cron jobs running? Live OS crontab + OpenClaw job state (synced from server) |
+| Strategy Lab | Which strategies work? Weights, fire rates, sample progress bars, per-category heatmap |
+| Calibration | How well does the crowd predict? Calibration curve, bias by bucket, per-category bias |
+| Learning Loop | Is the bot getting smarter? End-to-end feedback chain, weight adaptation, eval metrics, backtest status |
+| News Impact | How do headlines affect trades? Signal direction, news/rec agreement, fetch health |
+| Controls | What are the runtime knobs? All parameters from 5 source files (config.py, auto_research.py, auto_trader.py, ai_analyzer.py, position_swap_checker.py) |
+| Audit | What happened when? Chronological event feed (research, trades, resolutions, swaps) |
+| Diagnostics | Are the data files fresh? Per-file staleness, size, age, threshold checks |
+
+**Key design decisions:**
+- Server Components only — all data reads server-side, no API layer for v1
+- Single `computeAlerts()` function drives status bar + sidebar + Overview (no count drift)
+- Category inference mirrors `strategies.py` keyword map exactly (shared `lib/category.ts`)
+- Category caps read `category_accuracy.json` for adaptive behavior (matches `_effective_category_cap()`)
+- Scheduler reads live `crontab -l` and `~/.openclaw/cron/jobs.json` via sync script
+- Controls page parses actual source files for runtime knobs, not a hardcoded list
+- Kill switch detection (`autotrader_disabled.flag`) in status bar, alerts, and Controls page
+- `WORKSPACE_ROOT` env var switches between local and sandbox data
+- All schemas Zod-validated — malformed data fails loudly
+
+**Data synced (18 files + 2 live commands):**
+- 16 bot data files (JSON, JSONL, SQLite)
+- `crontab -l` output → `data/crontab.txt`
+- `~/.openclaw/cron/jobs.json` → `data/openclaw_jobs.json`
+
+**What's deferred to v2:**
+- Write operations (config changes, swap approve/dismiss — needs auth + validation)
+- Real-time WebSocket updates (polling every 60s is fine for now)
+- Current market probability / unrealised P&L (needs live Manifold API per position)
+- Strategy weights over time (no historical snapshots file exists yet)
+- Mobile layout (SSH tunnel from laptop is the access pattern)
+
+See [dashboard/README.md](dashboard/README.md) for full setup, architecture, and per-page documentation.
+
+---
+
 ## Phase Status
 
 | Area | Status | Notes |
@@ -780,7 +838,7 @@ Remaining server action: `openclaw cron edit 359e61eb-... --timeout 600` to add 
 | Category-aware trade log | ✅ Done | `strategy_weight_at_trade_time` now uses category-inferred weight (2026-04-10) |
 | News fetcher | ✅ Done | top-3 post-loop enrichment; recency-scaled modifier; 36 tests; `NEWS_API_KEY` in `.env` (2026-04-10) |
 | Whale tracking | 🟡 P4 | bettor-accuracy cache in SQLite; fundamental family |
-| Web dashboard | 🟢 P5 | convenience only |
+| Web dashboard | ✅ P5 | 15-page Next.js operator dashboard — see [dashboard/README.md](dashboard/README.md) |
 | SQLite storage | 🟢 P6 | housekeeping |
 | Dataset formatter | ✅ M4 | 127 rows (T-7/14/30), example_id key, 80/10/10 split; data/training_dataset.jsonl (2026-04-10) |
 | Eval harness | ✅ M5 | 4 baselines; crowd Brier 0.1503 / DirAcc 75.0% on test split; data/eval_report.json (2026-04-10) |

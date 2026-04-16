@@ -1,7 +1,6 @@
 import { PageHeader } from "@/components/page-header"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Mono, formatAge, formatBytes, formatTimestamp } from "@/components/format"
 import { readAutomationStatus } from "@/lib/data"
 import { cn } from "@/lib/utils"
@@ -225,8 +224,10 @@ export default async function AutomationPage() {
           </div>
           {!openclawJobsAvailable ? (
             <div className="p-4 text-sm text-muted-foreground">
-              OpenClaw job state not available. Run <Mono>pnpm sync</Mono> to
-              pull <Mono>~/.openclaw/cron/jobs.json</Mono> from the server.
+              OpenClaw job state not available. Run{" "}
+              <Mono>pnpm dev:sandbox</Mono> (which syncs first) or{" "}
+              <Mono>pnpm sync</Mono> then{" "}
+              <Mono>WORKSPACE_ROOT=/tmp/manifold-sandbox-snapshot pnpm dev</Mono>.
             </div>
           ) : openclawJobs.length === 0 ? (
             <div className="p-4 text-sm text-muted-foreground">
