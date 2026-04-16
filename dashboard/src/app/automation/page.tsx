@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/page-header"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Mono, formatAge, formatBytes, formatTimestamp } from "@/components/format"
 import { readAutomationStatus } from "@/lib/data"
 import { cn } from "@/lib/utils"
@@ -10,6 +11,7 @@ import {
   XCircleIcon,
   HelpCircleIcon,
   ClockIcon,
+  InfoIcon,
 } from "lucide-react"
 
 export const dynamic = "force-dynamic"
@@ -22,7 +24,8 @@ const HEALTH_CONFIG = {
 } as const
 
 export default async function AutomationPage() {
-  const jobs = await readAutomationStatus()
+  const snapshot = await readAutomationStatus()
+  const { osCronJobs: jobs, openclawJobs, liveCrontabAvailable, openclawJobsAvailable } = snapshot
 
   const healthyCt = jobs.filter((j) => j.health === "healthy").length
   const overdueCt = jobs.filter((j) => j.health === "overdue").length
@@ -82,8 +85,21 @@ export default async function AutomationPage() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="border-b border-border/50 px-4 py-3 text-xs uppercase tracking-wide text-muted-foreground">
-            Cron job schedule
+          <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              OS crontab jobs
+            </span>
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-[10px] font-mono",
+                liveCrontabAvailable
+                  ? "border-gain/40 text-gain"
+                  : "border-warn/40 text-warn",
+              )}
+            >
+              {liveCrontabAvailable ? "live from server" : "static fallback"}
+            </Badge>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-muted/30 text-xs uppercase tracking-wide text-muted-foreground">
@@ -188,6 +204,86 @@ export default async function AutomationPage() {
         </CardContent>
       </Card>
 
+      {/* OpenClaw jobs */}
+      <Card>
+        <CardContent className="p-0">
+          <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              OpenClaw cron jobs
+            </span>
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-[10px] font-mono",
+                openclawJobsAvailable
+                  ? "border-gain/40 text-gain"
+                  : "border-warn/40 text-warn",
+              )}
+            >
+              {openclawJobsAvailable ? "live from server" : "not synced"}
+            </Badge>
+          </div>
+          {!openclawJobsAvailable ? (
+            <div className="p-4 text-sm text-muted-foreground">
+              OpenClaw job state not available. Run <Mono>pnpm sync</Mono> to
+              pull <Mono>~/.openclaw/cron/jobs.json</Mono> from the server.
+            </div>
+          ) : openclawJobs.length === 0 ? (
+            <div className="p-4 text-sm text-muted-foreground">
+              No OpenClaw cron jobs found.
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-muted/30 text-xs uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Status</th>
+                  <th className="px-4 py-2 text-left font-medium">Name</th>
+                  <th className="px-4 py-2 text-left font-medium">Schedule</th>
+                  <th className="px-4 py-2 text-left font-medium">Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openclawJobs.map((job, idx) => (
+                  <tr
+                    key={job.id}
+                    className={cn(
+                      "border-t border-border/50",
+                      idx % 2 === 1 ? "bg-muted/10" : undefined,
+                    )}
+                  >
+                    <td className="px-4 py-2.5">
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "text-[10px] font-mono",
+                          job.enabled
+                            ? "border-gain/40 text-gain"
+                            : "border-border text-muted-foreground",
+                        )}
+                      >
+                        {job.enabled ? "enabled" : "disabled"}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="font-medium">{job.name || job.id.slice(0, 8)}</div>
+                      <Mono className="text-xs text-muted-foreground">
+                        {job.id.slice(0, 12)}
+                      </Mono>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <Mono className="text-xs">{job.schedule}</Mono>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-muted-foreground max-w-xs truncate">
+                      {job.message || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardContent className="p-4">
           <div className="text-xs text-muted-foreground space-y-1">
@@ -198,20 +294,12 @@ export default async function AutomationPage() {
                 server. Jobs pull from <Mono>main</Mono> before each run.
               </span>
             </div>
-            <div className="flex items-center gap-2 ml-5">
+            <div className="flex items-center gap-2">
+              <InfoIcon className="h-3.5 w-3.5 shrink-0" />
               <span>
-                OpenClaw cron: original market-research/trading/summary jobs
-                are <Mono>DISABLED</Mono> (migrated 2026-04-09). However,
-                OpenClaw may still have other enabled jobs (e.g. weekly news
-                summary, monthly prune) — check{" "}
-                <Mono>~/.openclaw/cron/jobs.json</Mono> on the server for
-                the full list.
-              </span>
-            </div>
-            <div className="flex items-center gap-2 ml-5">
-              <span>
-                This page tracks OS crontab jobs only. OpenClaw job state
-                is not yet read automatically.
+                Both OS crontab and OpenClaw jobs are synced from the server
+                via <Mono>pnpm sync</Mono>. The original trading/research
+                OpenClaw jobs were migrated to OS crontab on 2026-04-09.
               </span>
             </div>
           </div>

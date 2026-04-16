@@ -51,6 +51,8 @@ export const DATA_PATHS = {
   calibrationDb: () => path.join(WORKSPACE_ROOT, "data/calibration.db"),
   snapshotsDb: () =>
     path.join(WORKSPACE_ROOT, "data/market_snapshots.db"),
+  liveCrontab: () => path.join(WORKSPACE_ROOT, "data/crontab.txt"),
+  openclawJobs: () => path.join(WORKSPACE_ROOT, "data/openclaw_jobs.json"),
 } as const
 
 /** Cron schedule reference — kept in sync with CLAUDE.md. */

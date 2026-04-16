@@ -3,6 +3,7 @@ import { DATA_PATHS, BOT_ID } from "@/lib/config"
 import { PaperStateSchema, type PaperState, type Trade } from "@/lib/schemas/portfolio"
 import { readJsonFile } from "./_io"
 import { readMarketResearch } from "./research"
+import { z } from "zod"
 
 import { inferCategory as inferCategoryFromQuestion } from "@/lib/category"
 
@@ -128,7 +129,17 @@ export async function summarizePortfolio(
   const state = await readPaperState(botId)
   if (!state) return null
 
-  const titles = await buildTitleLookup(state)
+  const CatAccSchema = z.object({
+    min_samples_per_category: z.number().optional(),
+    categories: z.record(z.string(), z.object({ accuracy: z.number(), sample_count: z.number() })).optional(),
+  }).passthrough()
+
+  const [titles, catAccRaw] = await Promise.all([
+    buildTitleLookup(state),
+    readJsonFile(DATA_PATHS.categoryAccuracy(), CatAccSchema),
+  ])
+  const catAccuracy = catAccRaw?.categories
+  const minSamplesPerCat = catAccRaw?.min_samples_per_category ?? 8
 
   const openPositions: Trade[] = []
   for (const trades of Object.values(state.positions)) {
@@ -195,8 +206,14 @@ export async function summarizePortfolio(
     .sort((a, b) => (categoryCounts.get(b) ?? 0) - (categoryCounts.get(a) ?? 0))
     .map((cat) => {
       const open = categoryCounts.get(cat) ?? 0
-      const effectiveCap = cat === "other" ? MAX_POSITIONS : MAX_PER_CATEGORY
-      return { category: cat, open, cap: effectiveCap, full: open >= effectiveCap }
+      let cap = cat === "other" ? MAX_POSITIONS : MAX_PER_CATEGORY
+      if (cat !== "other" && catAccuracy) {
+        const info = catAccuracy[cat]
+        if (info && info.sample_count >= minSamplesPerCat && info.accuracy < 0.5) {
+          cap = 1
+        }
+      }
+      return { category: cat, open, cap, full: open >= cap }
     })
   if (legacyCount > 0) {
     categorySlots.push({

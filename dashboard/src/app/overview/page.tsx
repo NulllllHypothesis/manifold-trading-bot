@@ -8,13 +8,9 @@ import {
   formatTimestamp,
 } from "@/components/format"
 import {
-  readDiagnostics,
-  readPendingSwaps,
-  readResearchCounters,
-  readStrategyWeights,
-  readTraderCounters,
   summarizePortfolio,
   summarizeRecentCounters,
+  computeAlerts,
 } from "@/lib/data"
 import type { Trade } from "@/lib/schemas/portfolio"
 import { cn } from "@/lib/utils"
@@ -25,190 +21,19 @@ import {
 
 export const dynamic = "force-dynamic"
 
-type AlertItem = {
-  level: "warn" | "error" | "info"
-  title: string
-  detail?: string
-}
-
-function buildAlerts(args: {
-  staleFiles: Array<{ key: string }>
-  missingFiles: Array<{ key: string }>
-  pendingSwapCount: number
-  aiNoResultRate: number | null
-  aiAnalyzed: number
-  bookFull: boolean
-  openCount: number
-  maxPositions: number
-  stalePositionCount: number
-  oldestOpenDays: number | null
-  daysSinceLastTrade: number | null
-  maxPositionsRejections: number
-  conversionRate: number | null
-  cashRatio: number | null
-  cashBalance: number | null
-  recentResolvedCount: number
-  strategyWeightsAllDefault: boolean
-  strategyWeightsSamples: number
-}): AlertItem[] {
-  const out: AlertItem[] = []
-
-  if (args.bookFull) {
-    out.push({
-      level: "error",
-      title: `Book full: ${args.openCount}/${args.maxPositions} positions`,
-      detail: `No new trades can execute. ${args.maxPositionsRejections > 0 ? `${args.maxPositionsRejections} recommendations rejected for max_positions in last 20 trader runs.` : "Free slots by resolving or swapping stale positions."}`,
-    })
-  }
-
-  if (args.cashRatio !== null && args.cashRatio < 0.25) {
-    out.push({
-      level: args.cashRatio < 0.10 ? "error" : "warn",
-      title: `Cash critically low: $${args.cashBalance?.toFixed(2) ?? "?"} (${Math.round(args.cashRatio * 100)}% of initial)`,
-      detail: "Most capital is locked in open positions. New trades will be undersized even if slots open up.",
-    })
-  }
-
-  if (args.daysSinceLastTrade !== null && args.daysSinceLastTrade >= 1) {
-    out.push({
-      level: args.daysSinceLastTrade >= 3 ? "error" : "warn",
-      title: `${args.daysSinceLastTrade} day${args.daysSinceLastTrade === 1 ? "" : "s"} since last trade`,
-      detail: "The pipeline is not converting. Check Opportunities page for rejection breakdown.",
-    })
-  }
-
-  if (args.stalePositionCount > 0) {
-    out.push({
-      level: args.stalePositionCount >= 5 ? "error" : "warn",
-      title: `${args.stalePositionCount} stale position${args.stalePositionCount === 1 ? "" : "s"} (>7 days old)`,
-      detail: args.oldestOpenDays
-        ? `Oldest position is ${args.oldestOpenDays} days old. Stale positions block new trades and starve the learning loop.`
-        : undefined,
-    })
-  }
-
-  if (args.recentResolvedCount === 0 && args.openCount > 0) {
-    out.push({
-      level: "warn",
-      title: "No trades resolved in last 3 days",
-      detail: "The book is stuck — no positions are resolving, so no slots free up and no data flows to calibration.",
-    })
-  }
-
-  if (args.aiNoResultRate !== null && args.aiNoResultRate > 0.4) {
-    out.push({
-      level: args.aiNoResultRate > 0.7 ? "error" : "warn",
-      title: `AI no_result rate ${Math.round(args.aiNoResultRate * 100)}% (acting as veto)`,
-      detail: `${args.aiAnalyzed} analyzed across last 5 research runs. no_result is currently treated as SKIP→ai_veto, suppressing trades and wiping EV.`,
-    })
-  }
-
-  if (args.conversionRate !== null && args.conversionRate < 1) {
-    out.push({
-      level: "warn",
-      title: `Pipeline conversion ${args.conversionRate.toFixed(1)}% (24h, markets→trades)`,
-      detail: "Very few recommendations are becoming trades. Check Pipeline Health for the funnel breakdown.",
-    })
-  }
-
-  if (args.strategyWeightsAllDefault) {
-    out.push({
-      level: "warn",
-      title: `Learning loop not active: all strategy weights at 1.0 (${args.strategyWeightsSamples} samples)`,
-      detail: "Strategy weights have not diverged from defaults. The bot is not yet adapting based on outcomes.",
-    })
-  }
-
-  for (const f of args.missingFiles) {
-    out.push({
-      level: "error",
-      title: `Missing: ${f.key}`,
-      detail: "Expected data file is not on disk.",
-    })
-  }
-  for (const f of args.staleFiles) {
-    out.push({
-      level: "warn",
-      title: `Stale: ${f.key}`,
-      detail:
-        "File exists but has not been updated within its freshness window.",
-    })
-  }
-  if (args.pendingSwapCount > 0) {
-    out.push({
-      level: "info",
-      title: `${args.pendingSwapCount} pending swap proposal${
-        args.pendingSwapCount === 1 ? "" : "s"
-      }`,
-      detail: "Review on the Swaps page.",
-    })
-  }
-  return out
-}
-
 export default async function OverviewPage() {
-  const [portfolio, diagnostics, pendingSwaps, researchCounters, traderCounters, strategyWeights] =
-    await Promise.all([
-      summarizePortfolio(),
-      readDiagnostics(),
-      readPendingSwaps(),
-      readResearchCounters(undefined, { tailLines: 20 }),
-      readTraderCounters(undefined, { tailLines: 20 }),
-      readStrategyWeights(),
-    ])
+  const [portfolio, alerts, conversionWindow] = await Promise.all([
+    summarizePortfolio(),
+    computeAlerts(),
+    summarizeRecentCounters(undefined, { windowHours: 24 }),
+  ])
 
-  const staleFiles = diagnostics.files.filter((f) => f.exists && f.isStale)
-  const missingFiles = diagnostics.files.filter((f) => !f.exists)
-
-  const recent = researchCounters.slice(-5)
-  const aiAnalyzed = recent.reduce((s, r) => s + (r.ai_analyzed ?? 0), 0)
-  const aiNoResult = recent.reduce((s, r) => s + (r.ai_no_result ?? 0), 0)
-  const aiNoResultRate = aiAnalyzed > 0 ? aiNoResult / aiAnalyzed : null
-
-  const conversionWindow = await summarizeRecentCounters(undefined, { windowHours: 24 })
   const totalMarketsFetched = conversionWindow.marketsFetched
   const totalTradesExecuted = conversionWindow.tradesExecuted
   const conversionRate =
     totalMarketsFetched > 0
       ? (totalTradesExecuted / totalMarketsFetched) * 100
       : null
-
-  const maxPositionsRejections = traderCounters.reduce(
-    (s, r) => s + (r.rejected?.max_positions ?? 0),
-    0,
-  )
-
-  const recentResolvedCount = portfolio?.recentResolved.filter((t) => {
-    const ts = t.resolved_at ?? t.timestamp
-    if (!ts) return false
-    const age = (new Date(diagnostics.generatedAt).getTime() - Date.parse(ts)) / 86_400_000
-    return age < 3
-  }).length ?? 0
-
-  const swAllDefault = strategyWeights
-    ? Object.values(strategyWeights.weights).every((w) => Math.abs(w - 1.0) < 0.001)
-    : false
-
-  const alerts = buildAlerts({
-    staleFiles,
-    missingFiles,
-    pendingSwapCount: pendingSwaps.filter((s) => s.status === "pending").length,
-    aiNoResultRate,
-    aiAnalyzed,
-    bookFull: portfolio?.bookHealth.bookFull ?? false,
-    openCount: portfolio?.openPositionCount ?? 0,
-    maxPositions: portfolio?.bookHealth.maxPositions ?? 10,
-    stalePositionCount: portfolio?.bookHealth.stalePositionCount ?? 0,
-    oldestOpenDays: portfolio?.bookHealth.oldestOpenDays ?? null,
-    daysSinceLastTrade: portfolio?.bookHealth.daysSinceLastTrade ?? null,
-    maxPositionsRejections,
-    conversionRate,
-    cashRatio: portfolio?.bookHealth.cashRatio ?? null,
-    cashBalance: portfolio?.balance ?? null,
-    recentResolvedCount,
-    strategyWeightsAllDefault: swAllDefault,
-    strategyWeightsSamples: strategyWeights?.sample_count ?? 0,
-  })
 
   const recentActivity: Trade[] = portfolio?.recentResolved ?? []
 

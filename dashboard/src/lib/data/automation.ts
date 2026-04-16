@@ -1,4 +1,6 @@
 import "server-only"
+import fs from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { CRON_JOBS, DATA_PATHS } from "@/lib/config"
 import { fileStat } from "./_io"
 import { readResearchCounters, readTraderCounters } from "./counters"
@@ -26,6 +28,7 @@ export type CronJobStatus = {
   schedule: string
   description: string
   intervalDescription: string
+  source: "os-crontab" | "config-static"
   outputFiles: Array<{
     key: string
     path: string
@@ -39,8 +42,25 @@ export type CronJobStatus = {
   nextExpectedRun: string | null
 }
 
+export type OpenClawJob = {
+  id: string
+  name: string
+  schedule: string
+  enabled: boolean
+  message: string
+}
+
+export type AutomationSnapshot = {
+  osCronJobs: CronJobStatus[]
+  openclawJobs: OpenClawJob[]
+  liveCrontabAvailable: boolean
+  openclawJobsAvailable: boolean
+}
+
 function describeSchedule(cron: string): string {
-  const [min, hour, _dom, _mon, dow] = cron.split(" ")
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length < 5) return cron
+  const [min, hour, , , dow] = parts
   if (dow === "0") return `Sundays ${hour!.padStart(2, "0")}:${min!.padStart(2, "0")} UTC`
   if (dow === "1") return `Mondays ${hour!.padStart(2, "0")}:${min!.padStart(2, "0")} UTC`
   if (hour === "*") return `Hourly at :${min!.padStart(2, "0")} UTC`
@@ -49,7 +69,9 @@ function describeSchedule(cron: string): string {
 }
 
 function computeNextRun(cron: string, now: Date): Date {
-  const [minStr, hourStr, , , dowStr] = cron.split(" ")
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length < 5) return new Date(now.getTime() + 3600_000)
+  const [minStr, hourStr, , , dowStr] = parts
   const min = Number(minStr)
   const next = new Date(now)
   next.setUTCSeconds(0, 0)
@@ -79,15 +101,58 @@ function computeNextRun(cron: string, now: Date): Date {
 }
 
 function computeInterval(cron: string): number {
-  const [, hourStr, , , dowStr] = cron.split(" ")
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length < 5) return 3600
+  const [, hourStr, , , dowStr] = parts
   if (hourStr === "*") return 3600
   if (dowStr === "*") return 86400
   return 7 * 86400
 }
 
+function parseLiveCrontab(text: string): Array<{ schedule: string; command: string; description: string }> {
+  const lines = text.split("\n")
+  const entries: Array<{ schedule: string; command: string; description: string }> = []
+  let lastComment = ""
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith("#")) {
+      lastComment = trimmed.replace(/^#+\s*/, "")
+      continue
+    }
+    if (!trimmed || trimmed.startsWith("SHELL") || trimmed.startsWith("PATH") || trimmed.startsWith("MAILTO")) {
+      continue
+    }
+    const match = trimmed.match(/^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$/)
+    if (match) {
+      entries.push({
+        schedule: match[1]!,
+        command: match[2]!,
+        description: lastComment || (match[2]!.split("&&").pop()?.trim() ?? ""),
+      })
+      lastComment = ""
+    }
+  }
+  return entries
+}
+
+function inferJobId(command: string): string | null {
+  if (command.includes("auto_research")) return "research"
+  if (command.includes("resolve_positions")) return "resolution"
+  if (command.includes("auto_trader")) return "trader"
+  if (command.includes("daily_summary")) return "daily-summary"
+  if (command.includes("harvest_resolved") || command.includes("analyze_calibration")) return "harvest"
+  if (command.includes("audit_resolved")) return "m2-audit"
+  if (command.includes("reconstruct_snapshots")) return "m3-reconstruct"
+  if (command.includes("backtest_from_snapshots")) return "backtest"
+  if (command.includes("weekly_ev_report")) return "ev-report"
+  if (command.includes("compute_strategy_weights")) return "live-weights"
+  return null
+}
+
 export async function readAutomationStatus(
   nowMs?: number,
-): Promise<CronJobStatus[]> {
+): Promise<AutomationSnapshot> {
   const [researchCounters, traderCounters] = await Promise.all([
     readResearchCounters(undefined, { tailLines: 5 }),
     readTraderCounters(undefined, { tailLines: 5 }),
@@ -99,7 +164,30 @@ export async function readAutomationStatus(
   const now = nowMs ?? Date.now()
   const nowDate = new Date(now)
 
-  return CRON_JOBS.map((job) => {
+  const liveCrontabPath = DATA_PATHS.liveCrontab()
+  const liveCrontabAvailable = existsSync(liveCrontabPath)
+
+  let jobSource: "os-crontab" | "config-static" = "config-static"
+  let jobEntries: Array<{ id: string; schedule: string; description: string }>
+
+  if (liveCrontabAvailable) {
+    const crontabText = await fs.readFile(liveCrontabPath, "utf-8")
+    const parsed = parseLiveCrontab(crontabText)
+    jobEntries = parsed.map((entry) => ({
+      id: inferJobId(entry.command) ?? entry.command.slice(0, 30),
+      schedule: entry.schedule,
+      description: entry.description,
+    }))
+    jobSource = "os-crontab"
+  } else {
+    jobEntries = CRON_JOBS.map((j) => ({
+      id: j.id,
+      schedule: j.schedule,
+      description: j.description,
+    }))
+  }
+
+  const osCronJobs: CronJobStatus[] = jobEntries.map((job) => {
     const mapping = CRON_OUTPUT_MAP[job.id]
     const outputFiles = (mapping?.fileKeys ?? []).map((key) => {
       const pathFn = DATA_PATHS[key as keyof typeof DATA_PATHS]
@@ -148,6 +236,7 @@ export async function readAutomationStatus(
       schedule: job.schedule,
       description: job.description,
       intervalDescription: describeSchedule(job.schedule),
+      source: jobSource,
       outputFiles,
       lastRunTimestamp,
       lastRunAgeSeconds,
@@ -155,4 +244,32 @@ export async function readAutomationStatus(
       nextExpectedRun: nextRun.toISOString(),
     }
   })
+
+  let openclawJobs: OpenClawJob[] = []
+  const openclawPath = DATA_PATHS.openclawJobs()
+  const openclawJobsAvailable = existsSync(openclawPath)
+
+  if (openclawJobsAvailable) {
+    try {
+      const raw = JSON.parse(await fs.readFile(openclawPath, "utf-8")) as unknown
+      if (Array.isArray(raw)) {
+        openclawJobs = raw.map((j: Record<string, unknown>) => ({
+          id: String(j.id ?? ""),
+          name: String(j.name ?? j.description ?? ""),
+          schedule: String(j.schedule ?? j.cron ?? ""),
+          enabled: j.enabled !== false && j.disabled !== true,
+          message: String(j.message ?? j.prompt ?? "").slice(0, 100),
+        }))
+      }
+    } catch {
+      // malformed JSON — leave empty
+    }
+  }
+
+  return {
+    osCronJobs,
+    openclawJobs,
+    liveCrontabAvailable,
+    openclawJobsAvailable,
+  }
 }

@@ -9,21 +9,19 @@ import {
   readDiagnostics,
   readPendingSwaps,
   readResearchCounters,
-  readStrategyWeights,
   readTraderCounters,
-  summarizePortfolio,
+  computeAlerts,
 } from "@/lib/data"
 import { StatusBar, type StatusItem, type StatusLevel } from "./status-bar"
 
 export async function GlobalStatusBar() {
-  const [diagnostics, pendingSwaps, researchCounters, traderCounters, portfolio, strategyWeights] =
+  const [diagnostics, pendingSwaps, researchCounters, traderCounters, alerts] =
     await Promise.all([
       readDiagnostics(),
       readPendingSwaps(),
       readResearchCounters(undefined, { tailLines: 5 }),
       readTraderCounters(undefined, { tailLines: 5 }),
-      summarizePortfolio(),
-      readStrategyWeights(),
+      computeAlerts(),
     ])
 
   const paperStateFile = diagnostics.files.find((f) => f.key === "paperState")
@@ -32,12 +30,9 @@ export async function GlobalStatusBar() {
   const lastResearch = researchCounters.at(-1)
   const lastTrader = traderCounters.at(-1)
 
-  // Age/staleness is computed client-side in StatusBar to keep SSR stable.
-  // Server only passes absolute timestamps + thresholds.
   const RESEARCH_WARN_SEC = 75 * 60
   const RESEARCH_ERROR_SEC = 3 * 3600
 
-  // AI health: derived from recent ai_no_result rate
   const recentAi = researchCounters.slice(-5)
   const aiAnalyzed = recentAi.reduce((s, r) => s + (r.ai_analyzed ?? 0), 0)
   const aiNoResult = recentAi.reduce((s, r) => s + (r.ai_no_result ?? 0), 0)
@@ -51,25 +46,11 @@ export async function GlobalStatusBar() {
           ? "warn"
           : "ok"
 
-  const staleFiles = diagnostics.files.filter((f) => f.exists && f.isStale)
-  const missingFiles = diagnostics.files.filter((f) => !f.exists)
-  let alertCount = staleFiles.length + missingFiles.length
-  if (killSwitchActive) alertCount++
-  if (portfolio?.bookHealth.bookFull) alertCount++
-  if (portfolio && portfolio.bookHealth.cashRatio < 0.25) alertCount++
-  if (portfolio && portfolio.bookHealth.stalePositionCount > 0) alertCount++
-  if (portfolio && portfolio.bookHealth.daysSinceLastTrade !== null && portfolio.bookHealth.daysSinceLastTrade >= 1) alertCount++
-  if (aiNoResultRate !== null && aiNoResultRate > 0.4) alertCount++
-  if (strategyWeights && Object.values(strategyWeights.weights).every((w) => Math.abs(w - 1.0) < 0.001)) alertCount++
-  const recentResolved = portfolio?.recentResolved.filter((t) => {
-    const ts = t.resolved_at ?? t.timestamp
-    if (!ts) return false
-    const age = (new Date(diagnostics.generatedAt).getTime() - Date.parse(ts)) / 86_400_000
-    return age < 3
-  })
-  if (recentResolved && recentResolved.length === 0 && (portfolio?.openPositionCount ?? 0) > 0) alertCount++
+  const alertCount = alerts.length
   const alertLevel: StatusLevel =
     alertCount === 0 ? "ok" : alertCount > 5 ? "error" : "warn"
+
+  const pendingCount = pendingSwaps.filter((s) => s.status === "pending").length
 
   const items: StatusItem[] = [
     {
@@ -106,11 +87,11 @@ export async function GlobalStatusBar() {
     },
     {
       key: "swaps",
-      level: pendingSwaps.filter((s) => s.status === "pending").length > 0 ? "warn" : "idle",
-      value: String(pendingSwaps.filter((s) => s.status === "pending").length),
+      level: pendingCount > 0 ? "warn" : "idle",
+      value: String(pendingCount),
       detail:
-        pendingSwaps.filter((s) => s.status === "pending").length > 0
-          ? `${pendingSwaps.filter((s) => s.status === "pending").length} pending swap proposal${pendingSwaps.filter((s) => s.status === "pending").length === 1 ? "" : "s"}`
+        pendingCount > 0
+          ? `${pendingCount} pending swap proposal${pendingCount === 1 ? "" : "s"}`
           : `No pending swaps (${pendingSwaps.length} total: ${pendingSwaps.map((s) => s.status).join(", ") || "none"})`,
     },
     {
@@ -144,31 +125,12 @@ export async function getSidebarBadges(): Promise<{
   pendingSwaps: number
   alerts: number
 }> {
-  const [pendingSwaps, diagnostics, portfolio, sw, rc] = await Promise.all([
+  const [pendingSwaps, alerts] = await Promise.all([
     readPendingSwaps(),
-    readDiagnostics(),
-    summarizePortfolio(),
-    readStrategyWeights(),
-    readResearchCounters(undefined, { tailLines: 5 }),
+    computeAlerts(),
   ])
-  let alerts = diagnostics.files.filter((f) => !f.exists || f.isStale).length
-  if (portfolio?.bookHealth.bookFull) alerts++
-  if (portfolio && portfolio.bookHealth.cashRatio < 0.25) alerts++
-  if (portfolio && portfolio.bookHealth.stalePositionCount > 0) alerts++
-  if (portfolio && portfolio.bookHealth.daysSinceLastTrade !== null && portfolio.bookHealth.daysSinceLastTrade >= 1) alerts++
-  const aiAnalyzed = rc.slice(-5).reduce((s, r) => s + (r.ai_analyzed ?? 0), 0)
-  const aiNoResult = rc.slice(-5).reduce((s, r) => s + (r.ai_no_result ?? 0), 0)
-  if (aiAnalyzed > 0 && aiNoResult / aiAnalyzed > 0.4) alerts++
-  if (sw && Object.values(sw.weights).every((w) => Math.abs(w - 1.0) < 0.001)) alerts++
-  if (existsSync(path.join(WORKSPACE_ROOT, "autotrader_disabled.flag"))) alerts++
-  const recentRes = portfolio?.recentResolved.filter((t) => {
-    const ts = t.resolved_at ?? t.timestamp
-    if (!ts) return false
-    return (Date.now() - Date.parse(ts)) / 86_400_000 < 3
-  })
-  if (recentRes && recentRes.length === 0 && (portfolio?.openPositionCount ?? 0) > 0) alerts++
   return {
     pendingSwaps: pendingSwaps.filter((s) => s.status === "pending").length,
-    alerts,
+    alerts: alerts.length,
   }
 }

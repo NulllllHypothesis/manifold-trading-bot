@@ -144,6 +144,31 @@ sync_once() {
     fi
   done
 
+  # Pull live scheduler state (not file-synced — generated via SSH commands)
+  mkdir -p "$SANDBOX_SNAPSHOT_DIR/data"
+
+  # OS crontab
+  if "${ssh_wrapper[@]}" "$SANDBOX_SSH_HOST" 'crontab -l' \
+      > "$SANDBOX_SNAPSHOT_DIR/data/crontab.txt" 2>/dev/null; then
+    size=$(wc -c <"$SANDBOX_SNAPSHOT_DIR/data/crontab.txt" | tr -d ' ')
+    bytes_total=$((bytes_total + size))
+    printf "  ${C_OK}✓${C_END} %-48s ${C_DIM}%10s bytes${C_END}\n" "data/crontab.txt (live)" "$size"
+    ok=$((ok + 1))
+  else
+    printf "  ${C_WARN}·${C_END} %-48s ${C_DIM}(crontab -l failed)${C_END}\n" "data/crontab.txt"
+  fi
+
+  # OpenClaw cron jobs
+  if "${ssh_wrapper[@]}" "$SANDBOX_SSH_HOST" 'cat ~/.openclaw/cron/jobs.json 2>/dev/null || echo "[]"' \
+      > "$SANDBOX_SNAPSHOT_DIR/data/openclaw_jobs.json" 2>/dev/null; then
+    size=$(wc -c <"$SANDBOX_SNAPSHOT_DIR/data/openclaw_jobs.json" | tr -d ' ')
+    bytes_total=$((bytes_total + size))
+    printf "  ${C_OK}✓${C_END} %-48s ${C_DIM}%10s bytes${C_END}\n" "data/openclaw_jobs.json (live)" "$size"
+    ok=$((ok + 1))
+  else
+    printf "  ${C_WARN}·${C_END} %-48s ${C_DIM}(openclaw jobs not found)${C_END}\n" "data/openclaw_jobs.json"
+  fi
+
   elapsed=$(( $(date +%s) - started_at ))
   echo "${C_DIM}Done. ${C_END}${C_OK}$ok fetched${C_END}${C_DIM}, ${C_END}${C_WARN}$fail missing${C_END}${C_DIM}, ${C_END}${C_BOLD}$(numfmt --to=iec "$bytes_total" 2>/dev/null || echo "$bytes_total bytes")${C_END}${C_DIM} in ${elapsed}s${C_END}"
   echo

@@ -1,8 +1,10 @@
 import "server-only"
-import { BOT_ID } from "@/lib/config"
+import { BOT_ID, DATA_PATHS } from "@/lib/config"
 import type { Recommendation } from "@/lib/schemas/research"
 import { readMarketResearch } from "./research"
 import { readPaperState } from "./portfolio"
+import { readJsonFile } from "./_io"
+import { z } from "zod"
 
 export type AiStatus = "not_run" | "skip_or_no_result" | "agree" | "disagree"
 
@@ -52,13 +54,42 @@ function inferCategory(t: { category?: string; question?: string }): string {
   return inferCategoryShared(t.question ?? "")
 }
 
+const CategoryAccuracySchema = z.object({
+  sample_count: z.number().optional(),
+  min_samples_per_category: z.number().optional(),
+  categories: z.record(
+    z.string(),
+    z.object({ accuracy: z.number(), sample_count: z.number() }),
+  ).optional(),
+}).passthrough()
+
+function effectiveCategoryCap(
+  category: string,
+  catAccuracy: Record<string, { accuracy: number; sample_count: number }> | undefined,
+  minSamplesPerCategory: number,
+  maxPositions: number,
+  maxPerCategory: number,
+): number {
+  if (category === "other") return maxPositions
+  if (!catAccuracy) return maxPerCategory
+  const info = catAccuracy[category]
+  if (!info) return maxPerCategory
+  if (info.sample_count < minSamplesPerCategory) return maxPerCategory
+  if (info.accuracy < 0.5) return 1
+  return maxPerCategory
+}
+
 export async function summarizeOpportunities(
   botId: string = BOT_ID,
 ): Promise<OpportunitySummary | null> {
-  const [research, state] = await Promise.all([
+  const [research, state, catAccRaw] = await Promise.all([
     readMarketResearch(botId),
     readPaperState(botId),
+    readJsonFile(DATA_PATHS.categoryAccuracy(), CategoryAccuracySchema),
   ])
+
+  const catAccuracy = catAccRaw?.categories
+  const minSamplesPerCat = catAccRaw?.min_samples_per_category ?? 8
 
   const latest = research?.latest
   if (!latest) return null
@@ -114,11 +145,11 @@ export async function summarizeOpportunities(
         rejectionReason = "max_positions"
       } else {
         const cat = r.category ?? "other"
-        const effectiveCap = cat === "other" ? MAX_POSITIONS : MAX_PER_CATEGORY
+        const cap = effectiveCategoryCap(cat, catAccuracy, minSamplesPerCat, MAX_POSITIONS, MAX_PER_CATEGORY)
         const catCount = categoryCounts[cat] ?? 0
-        if (catCount >= effectiveCap) {
+        if (catCount >= cap) {
           rejectionReason = "category_cap"
-          categorySlotInfo = `${cat}: ${catCount}/${effectiveCap}`
+          categorySlotInfo = `${cat}: ${catCount}/${cap}`
         }
       }
 
@@ -129,8 +160,8 @@ export async function summarizeOpportunities(
       const cat = r.category ?? "other"
       const catCount = categoryCounts[cat] ?? 0
       if (!categorySlotInfo && catCount > 0) {
-        const effectiveCap = cat === "other" ? MAX_POSITIONS : MAX_PER_CATEGORY
-        categorySlotInfo = `${cat}: ${catCount}/${effectiveCap}`
+        const cap = effectiveCategoryCap(cat, catAccuracy, minSamplesPerCat, MAX_POSITIONS, MAX_PER_CATEGORY)
+        categorySlotInfo = `${cat}: ${catCount}/${cap}`
       }
 
       return {
