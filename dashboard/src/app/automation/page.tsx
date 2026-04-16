@@ -170,14 +170,9 @@ export default async function AutomationPage() {
                             </div>
                           ))}
                         </div>
-                      ) : job.lastRunTimestamp ? (
+                      ) : job.lastRunAgeSeconds !== null ? (
                         <Mono className="text-xs text-muted-foreground">
-                          {formatAge(
-                            Math.floor(
-                              (Date.now() - Date.parse(job.lastRunTimestamp)) /
-                                1000,
-                            ),
-                          )}
+                          {formatAge(job.lastRunAgeSeconds)}
                         </Mono>
                       ) : (
                         <span className="text-xs text-muted-foreground">
@@ -195,10 +190,30 @@ export default async function AutomationPage() {
 
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <ClockIcon className="h-3.5 w-3.5" />
-            All jobs run via OS crontab on the sandbox server. OpenClaw cron is disabled.
-            Jobs pull from <Mono>main</Mono> before each run.
+          <div className="text-xs text-muted-foreground space-y-1">
+            <div className="flex items-center gap-2">
+              <ClockIcon className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                Primary scheduler: <Mono>OS crontab</Mono> on the sandbox
+                server. Jobs pull from <Mono>main</Mono> before each run.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 ml-5">
+              <span>
+                OpenClaw cron: original market-research/trading/summary jobs
+                are <Mono>DISABLED</Mono> (migrated 2026-04-09). However,
+                OpenClaw may still have other enabled jobs (e.g. weekly news
+                summary, monthly prune) — check{" "}
+                <Mono>~/.openclaw/cron/jobs.json</Mono> on the server for
+                the full list.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 ml-5">
+              <span>
+                This page tracks OS crontab jobs only. OpenClaw job state
+                is not yet read automatically.
+              </span>
+            </div>
           </div>
         </CardContent>
       </Card>

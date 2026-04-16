@@ -1,17 +1,25 @@
 import { PageHeader } from "@/components/page-header"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Mono, formatTimestamp, formatPercent } from "@/components/format"
-import { readStrategyWeights, summarizePerformance, readResearchCounters } from "@/lib/data"
+import { readStrategyWeights, summarizePerformance, readResearchCounters, readPaperState } from "@/lib/data"
+import {
+  getCategoryWeight,
+  getCategoryAccuracy,
+  getCategorySamples,
+} from "@/lib/schemas/strategy-weights"
 import { cn } from "@/lib/utils"
+import { AlertTriangleIcon } from "lucide-react"
 
 export const dynamic = "force-dynamic"
 
 export default async function StrategyLabPage() {
-  const [weights, performance, researchCounters] = await Promise.all([
+  const [weights, performance, researchCounters, paperState] = await Promise.all([
     readStrategyWeights(),
     summarizePerformance(),
     readResearchCounters(undefined, { tailLines: 50 }),
+    readPaperState(),
   ])
 
   const strategyAccuracy = new Map<
@@ -21,13 +29,22 @@ export default async function StrategyLabPage() {
 
   if (performance) {
     for (const s of performance.byStrategy) {
-      const winRate = s.trades > 0 ? s.wins / s.trades : 0
       strategyAccuracy.set(s.key, {
         wins: s.wins,
         losses: s.trades - s.wins,
         pnl: s.pnl,
         trades: s.trades,
       })
+    }
+  }
+
+  let resolvedTotal = 0
+  let resolvedWithStrategies = 0
+  if (paperState) {
+    for (const t of paperState.trade_history) {
+      if (t.status === "OPEN") continue
+      resolvedTotal++
+      if (t.strategies && t.strategies.length > 0) resolvedWithStrategies++
     }
   }
 
@@ -48,12 +65,31 @@ export default async function StrategyLabPage() {
   for (const s of strategyAccuracy.keys()) allStrategies.add(s)
   for (const s of strategyFireRate.keys()) allStrategies.add(s)
 
+  const metadataCoverage =
+    resolvedTotal > 0 ? resolvedWithStrategies / resolvedTotal : 1
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Strategy Lab"
         description="Current strategy weights, fire rates, and how each strategy is contributing to outcomes. This is where you understand why the bot trusts or down-weights a strategy."
       />
+
+      {metadataCoverage < 0.5 && resolvedTotal > 0 ? (
+        <Alert>
+          <AlertTriangleIcon className="h-4 w-4" />
+          <AlertTitle>
+            Strategy metadata missing on {resolvedTotal - resolvedWithStrategies}/
+            {resolvedTotal} resolved trades
+          </AlertTitle>
+          <AlertDescription>
+            Only {Math.round(metadataCoverage * 100)}% of resolved trades have{" "}
+            <Mono>strategies</Mono> populated. Win/loss and P&L columns below
+            are undercounting — a strategy may have real history that is not
+            reflected here because older trades lack the field.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {weights ? (
         <Card>
@@ -91,7 +127,7 @@ export default async function StrategyLabPage() {
                 const fires = strategyFireRate.get(strat) ?? 0
                 const acc = strategyAccuracy.get(strat)
                 const diverged = w !== null && Math.abs(w - 1.0) > 0.001
-                const winRate =
+                const wr =
                   acc && acc.trades > 0 ? acc.wins / acc.trades : null
                 const state = diverged
                   ? "diverged"
@@ -119,14 +155,31 @@ export default async function StrategyLabPage() {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <Mono>{samples}</Mono>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="relative h-3 w-16 overflow-hidden rounded bg-muted/40">
+                          <div
+                            className={cn(
+                              "h-full rounded",
+                              samples >= (weights?.min_samples_threshold ?? 10)
+                                ? "bg-gain/60"
+                                : "bg-primary/40",
+                            )}
+                            style={{
+                              width: `${Math.min(100, (samples / (weights?.min_samples_threshold ?? 10)) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <Mono className="text-xs">
+                          {samples}/{weights?.min_samples_threshold ?? 10}
+                        </Mono>
+                      </div>
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       <Mono className="text-muted-foreground">{fires}</Mono>
                       {totalRuns > 0 ? (
                         <div className="text-[10px] text-muted-foreground">
-                          {((fires / totalRuns)).toFixed(1)}/run
+                          {(fires / totalRuns).toFixed(1)}/run
                         </div>
                       ) : null}
                     </td>
@@ -140,13 +193,13 @@ export default async function StrategyLabPage() {
                       )}
                     </td>
                     <td className="px-4 py-2.5 text-right">
-                      {winRate !== null ? (
+                      {wr !== null ? (
                         <Mono
                           className={cn(
-                            winRate >= 0.5 ? "text-gain" : "text-loss",
+                            wr >= 0.5 ? "text-gain" : "text-loss",
                           )}
                         >
-                          {formatPercent(winRate)}
+                          {formatPercent(wr)}
                         </Mono>
                       ) : (
                         <span className="text-muted-foreground">—</span>
@@ -223,28 +276,41 @@ export default async function StrategyLabPage() {
                       >
                         <td className="px-4 py-2.5 font-medium">{cat}</td>
                         {[...allStrategies].map((s) => {
-                          const v = catWeights[s]
-                          const diff =
-                            v !== undefined ? Math.abs(v - 1.0) > 0.001 : false
+                          const raw = catWeights[s]
+                          if (raw === undefined) {
+                            return (
+                              <td
+                                key={s}
+                                className="px-3 py-2.5 text-right text-muted-foreground"
+                              >
+                                —
+                              </td>
+                            )
+                          }
+                          const w = getCategoryWeight(raw)
+                          const acc = getCategoryAccuracy(raw)
+                          const n = getCategorySamples(raw)
+                          const diff = Math.abs(w - 1.0) > 0.001
                           return (
                             <td
                               key={s}
                               className="px-3 py-2.5 text-right"
                             >
-                              {v !== undefined ? (
-                                <Mono
-                                  className={cn(
-                                    diff && "text-primary",
-                                    !diff && "text-muted-foreground",
-                                  )}
-                                >
-                                  {v.toFixed(3)}
-                                </Mono>
-                              ) : (
-                                <span className="text-muted-foreground">
-                                  —
-                                </span>
-                              )}
+                              <Mono
+                                className={cn(
+                                  diff ? "text-primary" : "text-muted-foreground",
+                                )}
+                              >
+                                {w.toFixed(3)}
+                              </Mono>
+                              {acc !== null || n !== null ? (
+                                <div className="text-[10px] text-muted-foreground">
+                                  {acc !== null
+                                    ? `${(acc * 100).toFixed(0)}%`
+                                    : ""}
+                                  {n !== null ? ` n=${n}` : ""}
+                                </div>
+                              ) : null}
                             </td>
                           )
                         })}

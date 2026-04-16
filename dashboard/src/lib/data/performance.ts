@@ -162,7 +162,7 @@ export async function summarizePerformance(
   const byCategory = [...categoryMap.values()].sort((a, b) => b.pnl - a.pnl)
   const byStrategy = [...strategyMap.values()].sort((a, b) => b.pnl - a.pnl)
 
-  const totalResolved = wins + losses
+  const totalResolved = resolved.length
   const totalPnl = grossWin - grossLoss
 
   const stats: PerformanceStats = {

@@ -58,9 +58,12 @@ function levelForAge(
 export function StatusBar({ items }: { items: StatusItem[] }) {
   const [nowMs, setNowMs] = useState<number | null>(null)
   useEffect(() => {
-    setNowMs(Date.now())
+    const frame = requestAnimationFrame(() => setNowMs(Date.now()))
     const id = setInterval(() => setNowMs(Date.now()), 30_000)
-    return () => clearInterval(id)
+    return () => {
+      cancelAnimationFrame(frame)
+      clearInterval(id)
+    }
   }, [])
 
   const resolved: StatusItem[] = items.map((item) => {

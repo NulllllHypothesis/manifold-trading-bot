@@ -11,15 +11,21 @@ import {
   readDiagnostics,
   readPendingSwaps,
   readResearchCounters,
+  readStrategyWeights,
+  readTraderCounters,
   summarizePortfolio,
+  summarizeRecentCounters,
 } from "@/lib/data"
 import type { Trade } from "@/lib/schemas/portfolio"
 import { cn } from "@/lib/utils"
-import { AlertTriangleIcon, CheckCircle2Icon } from "lucide-react"
+import {
+  AlertTriangleIcon,
+  CheckCircle2Icon,
+} from "lucide-react"
 
 export const dynamic = "force-dynamic"
 
-type Alert = {
+type AlertItem = {
   level: "warn" | "error" | "info"
   title: string
   detail?: string
@@ -31,8 +37,88 @@ function buildAlerts(args: {
   pendingSwapCount: number
   aiNoResultRate: number | null
   aiAnalyzed: number
-}): Alert[] {
-  const out: Alert[] = []
+  bookFull: boolean
+  openCount: number
+  maxPositions: number
+  stalePositionCount: number
+  oldestOpenDays: number | null
+  daysSinceLastTrade: number | null
+  maxPositionsRejections: number
+  conversionRate: number | null
+  cashRatio: number | null
+  cashBalance: number | null
+  recentResolvedCount: number
+  strategyWeightsAllDefault: boolean
+  strategyWeightsSamples: number
+}): AlertItem[] {
+  const out: AlertItem[] = []
+
+  if (args.bookFull) {
+    out.push({
+      level: "error",
+      title: `Book full: ${args.openCount}/${args.maxPositions} positions`,
+      detail: `No new trades can execute. ${args.maxPositionsRejections > 0 ? `${args.maxPositionsRejections} recommendations rejected for max_positions in last 20 trader runs.` : "Free slots by resolving or swapping stale positions."}`,
+    })
+  }
+
+  if (args.cashRatio !== null && args.cashRatio < 0.25) {
+    out.push({
+      level: args.cashRatio < 0.10 ? "error" : "warn",
+      title: `Cash critically low: $${args.cashBalance?.toFixed(2) ?? "?"} (${Math.round(args.cashRatio * 100)}% of initial)`,
+      detail: "Most capital is locked in open positions. New trades will be undersized even if slots open up.",
+    })
+  }
+
+  if (args.daysSinceLastTrade !== null && args.daysSinceLastTrade >= 1) {
+    out.push({
+      level: args.daysSinceLastTrade >= 3 ? "error" : "warn",
+      title: `${args.daysSinceLastTrade} day${args.daysSinceLastTrade === 1 ? "" : "s"} since last trade`,
+      detail: "The pipeline is not converting. Check Opportunities page for rejection breakdown.",
+    })
+  }
+
+  if (args.stalePositionCount > 0) {
+    out.push({
+      level: args.stalePositionCount >= 5 ? "error" : "warn",
+      title: `${args.stalePositionCount} stale position${args.stalePositionCount === 1 ? "" : "s"} (>7 days old)`,
+      detail: args.oldestOpenDays
+        ? `Oldest position is ${args.oldestOpenDays} days old. Stale positions block new trades and starve the learning loop.`
+        : undefined,
+    })
+  }
+
+  if (args.recentResolvedCount === 0 && args.openCount > 0) {
+    out.push({
+      level: "warn",
+      title: "No trades resolved in last 3 days",
+      detail: "The book is stuck — no positions are resolving, so no slots free up and no data flows to calibration.",
+    })
+  }
+
+  if (args.aiNoResultRate !== null && args.aiNoResultRate > 0.4) {
+    out.push({
+      level: args.aiNoResultRate > 0.7 ? "error" : "warn",
+      title: `AI no_result rate ${Math.round(args.aiNoResultRate * 100)}% (acting as veto)`,
+      detail: `${args.aiAnalyzed} analyzed across last 5 research runs. no_result is currently treated as SKIP→ai_veto, suppressing trades and wiping EV.`,
+    })
+  }
+
+  if (args.conversionRate !== null && args.conversionRate < 1) {
+    out.push({
+      level: "warn",
+      title: `Pipeline conversion ${args.conversionRate.toFixed(1)}% (24h, markets→trades)`,
+      detail: "Very few recommendations are becoming trades. Check Pipeline Health for the funnel breakdown.",
+    })
+  }
+
+  if (args.strategyWeightsAllDefault) {
+    out.push({
+      level: "warn",
+      title: `Learning loop not active: all strategy weights at 1.0 (${args.strategyWeightsSamples} samples)`,
+      detail: "Strategy weights have not diverged from defaults. The bot is not yet adapting based on outcomes.",
+    })
+  }
+
   for (const f of args.missingFiles) {
     out.push({
       level: "error",
@@ -44,7 +130,8 @@ function buildAlerts(args: {
     out.push({
       level: "warn",
       title: `Stale: ${f.key}`,
-      detail: "File exists but has not been updated within its freshness window.",
+      detail:
+        "File exists but has not been updated within its freshness window.",
     })
   }
   if (args.pendingSwapCount > 0) {
@@ -56,23 +143,18 @@ function buildAlerts(args: {
       detail: "Review on the Swaps page.",
     })
   }
-  if (args.aiNoResultRate !== null && args.aiNoResultRate > 0.4) {
-    out.push({
-      level: args.aiNoResultRate > 0.7 ? "error" : "warn",
-      title: `AI no_result rate ${Math.round(args.aiNoResultRate * 100)}%`,
-      detail: `${args.aiAnalyzed} analyzed across last 5 research runs.`,
-    })
-  }
   return out
 }
 
 export default async function OverviewPage() {
-  const [portfolio, diagnostics, pendingSwaps, researchCounters] =
+  const [portfolio, diagnostics, pendingSwaps, researchCounters, traderCounters, strategyWeights] =
     await Promise.all([
       summarizePortfolio(),
       readDiagnostics(),
       readPendingSwaps(),
-      readResearchCounters(undefined, { tailLines: 5 }),
+      readResearchCounters(undefined, { tailLines: 20 }),
+      readTraderCounters(undefined, { tailLines: 20 }),
+      readStrategyWeights(),
     ])
 
   const staleFiles = diagnostics.files.filter((f) => f.exists && f.isStale)
@@ -83,12 +165,49 @@ export default async function OverviewPage() {
   const aiNoResult = recent.reduce((s, r) => s + (r.ai_no_result ?? 0), 0)
   const aiNoResultRate = aiAnalyzed > 0 ? aiNoResult / aiAnalyzed : null
 
+  const conversionWindow = await summarizeRecentCounters(undefined, { windowHours: 24 })
+  const totalMarketsFetched = conversionWindow.marketsFetched
+  const totalTradesExecuted = conversionWindow.tradesExecuted
+  const conversionRate =
+    totalMarketsFetched > 0
+      ? (totalTradesExecuted / totalMarketsFetched) * 100
+      : null
+
+  const maxPositionsRejections = traderCounters.reduce(
+    (s, r) => s + (r.rejected?.max_positions ?? 0),
+    0,
+  )
+
+  const recentResolvedCount = portfolio?.recentResolved.filter((t) => {
+    const ts = t.resolved_at ?? t.timestamp
+    if (!ts) return false
+    const age = (new Date(diagnostics.generatedAt).getTime() - Date.parse(ts)) / 86_400_000
+    return age < 3
+  }).length ?? 0
+
+  const swAllDefault = strategyWeights
+    ? Object.values(strategyWeights.weights).every((w) => Math.abs(w - 1.0) < 0.001)
+    : false
+
   const alerts = buildAlerts({
     staleFiles,
     missingFiles,
     pendingSwapCount: pendingSwaps.filter((s) => s.status === "pending").length,
     aiNoResultRate,
     aiAnalyzed,
+    bookFull: portfolio?.bookHealth.bookFull ?? false,
+    openCount: portfolio?.openPositionCount ?? 0,
+    maxPositions: portfolio?.bookHealth.maxPositions ?? 10,
+    stalePositionCount: portfolio?.bookHealth.stalePositionCount ?? 0,
+    oldestOpenDays: portfolio?.bookHealth.oldestOpenDays ?? null,
+    daysSinceLastTrade: portfolio?.bookHealth.daysSinceLastTrade ?? null,
+    maxPositionsRejections,
+    conversionRate,
+    cashRatio: portfolio?.bookHealth.cashRatio ?? null,
+    cashBalance: portfolio?.balance ?? null,
+    recentResolvedCount,
+    strategyWeightsAllDefault: swAllDefault,
+    strategyWeightsSamples: strategyWeights?.sample_count ?? 0,
   })
 
   const recentActivity: Trade[] = portfolio?.recentResolved ?? []
@@ -97,16 +216,16 @@ export default async function OverviewPage() {
     <div className="space-y-6">
       <PageHeader
         title="Overview"
-        description="Balance, current book, alerts, and the most recent resolutions."
+        description="Balance, pipeline health, and the most critical alerts."
       />
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
         <KpiCard
           label="Balance"
           value={portfolio ? formatCurrency(portfolio.balance) : "—"}
         />
         <KpiCard
-          label="Realized P&L"
+          label="Total P&L"
           value={
             portfolio
               ? formatCurrency(portfolio.realizedPnl, { signed: true })
@@ -121,16 +240,49 @@ export default async function OverviewPage() {
           }
         />
         <KpiCard
-          label="Open positions"
-          value={portfolio ? `${portfolio.openPositionCount} / 10` : "—"}
+          label="Today P&L"
+          value={
+            portfolio
+              ? formatCurrency(portfolio.todayPnl, { signed: true })
+              : "—"
+          }
+          tone={
+            portfolio
+              ? portfolio.todayPnl > 0
+                ? "gain"
+                : portfolio.todayPnl < 0
+                  ? "loss"
+                  : "muted"
+              : "muted"
+          }
+        />
+        <KpiCard
+          label="Open / Max"
+          value={
+            portfolio
+              ? `${portfolio.openPositionCount} / ${portfolio.bookHealth.maxPositions}`
+              : "—"
+          }
+          tone={portfolio?.bookHealth.bookFull ? "loss" : "default"}
+          subtitle={
+            portfolio?.bookHealth.bookFull ? "BOOK FULL" : undefined
+          }
         />
         <KpiCard
           label="Win rate"
           value={portfolio ? formatPercent(portfolio.winRate) : "—"}
           subtitle={
             portfolio
-              ? `${portfolio.winCount}W / ${portfolio.loseCount}L`
+              ? `${portfolio.winCount}W / ${portfolio.loseCount}L${portfolio.totalTrades - portfolio.winCount - portfolio.loseCount > 0 ? ` / ${portfolio.totalTrades - portfolio.winCount - portfolio.loseCount}N` : ""} of ${portfolio.totalTrades}`
               : undefined
+          }
+        />
+        <KpiCard
+          label="Conversion"
+          value={conversionRate !== null ? `${conversionRate.toFixed(1)}%` : "—"}
+          subtitle={`${totalTradesExecuted} trades / ${totalMarketsFetched} mkts`}
+          tone={
+            conversionRate !== null && conversionRate < 1 ? "loss" : "default"
           }
         />
       </div>
@@ -143,7 +295,7 @@ export default async function OverviewPage() {
           {alerts.length === 0 ? (
             <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
               <CheckCircle2Icon className="h-4 w-4 text-gain" />
-              All data files fresh, AI healthy, no pending actions.
+              All systems healthy, pipeline converting, book has capacity.
             </div>
           ) : (
             <ul className="divide-y divide-border">
@@ -152,14 +304,13 @@ export default async function OverviewPage() {
                   key={`${a.level}-${a.title}-${i}`}
                   className="flex items-start gap-3 px-4 py-3"
                 >
-                  <AlertTriangleIcon
-                    className={cn(
-                      "mt-0.5 h-4 w-4 shrink-0",
-                      a.level === "error" && "text-loss",
-                      a.level === "warn" && "text-warn",
-                      a.level === "info" && "text-muted-foreground",
-                    )}
-                  />
+                  {a.level === "error" ? (
+                    <AlertTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-loss" />
+                  ) : a.level === "warn" ? (
+                    <AlertTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
+                  ) : (
+                    <AlertTriangleIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="text-base font-medium">{a.title}</div>
                     {a.detail ? (
@@ -223,7 +374,10 @@ export default async function OverviewPage() {
                       {formatCurrency(t.profit ?? null, { signed: true })}
                     </Mono>
                     <Mono className="shrink-0 text-sm text-muted-foreground">
-                      {formatTimestamp(t.resolved_at ?? t.timestamp).slice(0, 10)}
+                      {formatTimestamp(t.resolved_at ?? t.timestamp).slice(
+                        0,
+                        10,
+                      )}
                     </Mono>
                   </li>
                 )

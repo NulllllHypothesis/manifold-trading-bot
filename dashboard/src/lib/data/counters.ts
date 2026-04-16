@@ -56,6 +56,20 @@ export type CounterSummary = {
   }
   /** Stages for a research-to-execution funnel chart. */
   funnel: FunnelStage[]
+  dedupWinners: Record<string, number>
+  noActiveSignals: number
+  finalByCategory: Record<string, number>
+  finalByStrategyMix: Record<string, number>
+  preFilter: {
+    skippedResolved: number
+    skippedLowLiquidity: number
+    skippedStale: number
+    skippedNoise: number
+  }
+  thinMarketConfirmations: number
+  tiedVotesDropped: number
+  topEvAtExec: Array<[string, number]>
+  passedFilter: number
 }
 
 export async function summarizeRecentCounters(
@@ -109,6 +123,36 @@ export async function summarizeRecentCounters(
     { label: "Trades executed", value: tradesExecuted },
   ]
 
+  let skippedResolved = 0
+  let skippedLowLiquidity = 0
+  let skippedStale = 0
+  let skippedNoise = 0
+  let thinMarketConfirmations = 0
+  let tiedVotesDropped = 0
+
+  const dedupAcc: Record<string, number> = {}
+  const catAcc: Record<string, number> = {}
+  const mixAcc: Record<string, number> = {}
+  let noActiveSignals = 0
+  for (const r of recentR) {
+    for (const [family, n] of Object.entries(r.dedup_winners ?? {})) {
+      dedupAcc[family] = (dedupAcc[family] ?? 0) + n
+    }
+    for (const [cat, n] of Object.entries(r.final_by_category ?? {})) {
+      catAcc[cat] = (catAcc[cat] ?? 0) + n
+    }
+    for (const [mix, n] of Object.entries(r.final_by_strategy_mix ?? {})) {
+      mixAcc[mix] = (mixAcc[mix] ?? 0) + n
+    }
+    noActiveSignals += r.no_active_signals ?? 0
+    skippedResolved += r.skipped_resolved ?? 0
+    skippedLowLiquidity += r.skipped_low_liquidity ?? 0
+    skippedStale += r.skipped_stale ?? 0
+    skippedNoise += r.skipped_noise ?? 0
+    thinMarketConfirmations += r.thin_market_confirmations ?? 0
+    tiedVotesDropped += r.tied_votes_dropped ?? 0
+  }
+
   return {
     windowHours,
     researchRuns: recentR.length,
@@ -127,5 +171,19 @@ export async function summarizeRecentCounters(
       noResult: aiNoResult,
     },
     funnel,
+    dedupWinners: dedupAcc,
+    noActiveSignals,
+    finalByCategory: catAcc,
+    finalByStrategyMix: mixAcc,
+    preFilter: {
+      skippedResolved,
+      skippedLowLiquidity,
+      skippedStale,
+      skippedNoise,
+    },
+    thinMarketConfirmations,
+    tiedVotesDropped,
+    topEvAtExec: (recentT.at(-1)?.top_ev_at_exec ?? []) as Array<[string, number]>,
+    passedFilter: recentT.reduce((s, t) => s + (t.passed_filter ?? 0), 0),
   }
 }

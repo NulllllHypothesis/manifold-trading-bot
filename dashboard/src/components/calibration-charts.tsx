@@ -2,14 +2,12 @@
 
 import {
   Line,
-  LineChart,
   CartesianGrid,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
-  Area,
   ComposedChart,
   Bar,
   BarChart,

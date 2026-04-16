@@ -4,6 +4,8 @@ import { PaperStateSchema, type PaperState, type Trade } from "@/lib/schemas/por
 import { readJsonFile } from "./_io"
 import { readMarketResearch } from "./research"
 
+import { inferCategory as inferCategoryFromQuestion } from "@/lib/category"
+
 export async function readPaperState(_botId: string = BOT_ID): Promise<PaperState | null> {
   return readJsonFile(DATA_PATHS.paperState(), PaperStateSchema)
 }
@@ -86,8 +88,27 @@ function withTitle(t: Trade, titles: Map<string, string>): Trade {
   return q ? { ...t, question: q } : t
 }
 
+export type CategorySlot = {
+  category: string
+  open: number
+  cap: number
+  full: boolean
+}
+
+export type BookHealth = {
+  maxPositions: number
+  bookFull: boolean
+  cashRatio: number
+  oldestOpenDays: number | null
+  stalePositionCount: number
+  categorySlots: CategorySlot[]
+  lastTradeTimestamp: string | null
+  daysSinceLastTrade: number | null
+}
+
 export type PortfolioSummary = {
   balance: number
+  todayPnl: number
   openPositionCount: number
   openExposure: number
   realizedPnl: number
@@ -98,6 +119,7 @@ export type PortfolioSummary = {
   winRate: number
   openPositions: Trade[]
   recentResolved: Trade[]
+  bookHealth: BookHealth
 }
 
 export async function summarizePortfolio(
@@ -131,19 +153,96 @@ export async function summarizePortfolio(
     if (t.status === "LOSE" || (t.status !== "WIN" && profit < 0)) loseCount++
   }
 
-  // Naive unrealized estimate: sum of profit_if_win for OPEN positions weighted by entry prob.
-  // True unrealized requires current market probability — not in state file.
   const unrealizedPnlEstimate = 0
 
   const recentResolved = resolved
-    .sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""))
+    .sort((a, b) =>
+      (b.resolved_at || b.timestamp || "").localeCompare(
+        a.resolved_at || a.timestamp || "",
+      ),
+    )
     .slice(0, 10)
 
-  const totalTrades = winCount + loseCount
+  const totalTrades = resolved.length
   const winRate = totalTrades > 0 ? winCount / totalTrades : 0
+
+  const MAX_POSITIONS = 10
+  const MAX_PER_CATEGORY = 3
+  const STALE_DAYS = 7
+
+  const categoryCounts = new Map<string, number>()
+  let legacyCount = 0
+  let oldestMs = Infinity
+  let staleCount = 0
+  for (const p of openPositions) {
+    const ts = Date.parse(p.timestamp)
+    if (!Number.isNaN(ts) && ts < oldestMs) oldestMs = ts
+    const ageDays = Number.isNaN(ts) ? 0 : (Date.now() - ts) / 86_400_000
+    if (ageDays >= STALE_DAYS) staleCount++
+
+    if (!p.category && !p.question) {
+      legacyCount++
+      continue
+    }
+    const cat = p.category ?? inferCategoryFromQuestion(p.question ?? "")
+    categoryCounts.set(cat, (categoryCounts.get(cat) ?? 0) + 1)
+  }
+
+  const allCategories = new Set<string>()
+  for (const cat of categoryCounts.keys()) allCategories.add(cat)
+
+  const categorySlots: CategorySlot[] = [...allCategories]
+    .sort((a, b) => (categoryCounts.get(b) ?? 0) - (categoryCounts.get(a) ?? 0))
+    .map((cat) => {
+      const open = categoryCounts.get(cat) ?? 0
+      const effectiveCap = cat === "other" ? MAX_POSITIONS : MAX_PER_CATEGORY
+      return { category: cat, open, cap: effectiveCap, full: open >= effectiveCap }
+    })
+  if (legacyCount > 0) {
+    categorySlots.push({
+      category: "legacy (uncategorized)",
+      open: legacyCount,
+      cap: MAX_POSITIONS,
+      full: false,
+    })
+  }
+
+  const oldestDays =
+    oldestMs < Infinity
+      ? Math.floor((Date.now() - oldestMs) / 86_400_000)
+      : null
+
+  const allTimestamps = [
+    ...openPositions.map((p) => p.timestamp),
+    ...resolved.map((t) => t.resolved_at ?? t.timestamp),
+  ].filter(Boolean).sort()
+  const lastTradeTimestamp = allTimestamps.at(-1) ?? null
+  const daysSinceLastTrade = lastTradeTimestamp
+    ? Math.floor((Date.now() - Date.parse(lastTradeTimestamp)) / 86_400_000)
+    : null
+
+  const initialBalance = state.initial_balance ?? 1000
+  const cashRatio = initialBalance > 0 ? state.balance / initialBalance : 0
+
+  const bookHealth: BookHealth = {
+    maxPositions: MAX_POSITIONS,
+    bookFull: openPositions.length >= MAX_POSITIONS,
+    cashRatio,
+    oldestOpenDays: oldestDays,
+    stalePositionCount: staleCount,
+    categorySlots,
+    lastTradeTimestamp,
+    daysSinceLastTrade,
+  }
+
+  const today = new Date().toISOString().slice(0, 10)
+  const todayPnl = resolved
+    .filter((t) => (t.resolved_at ?? t.timestamp ?? "").slice(0, 10) === today)
+    .reduce((sum, t) => sum + (t.profit ?? 0), 0)
 
   return {
     balance: state.balance,
+    todayPnl,
     openPositionCount: openPositions.length,
     openExposure,
     realizedPnl,
@@ -154,5 +253,6 @@ export async function summarizePortfolio(
     winRate,
     openPositions,
     recentResolved,
+    bookHealth,
   }
 }

@@ -69,7 +69,10 @@ export async function readAuditEvents(
   }
 
   if (state) {
+    const seenTradeIds = new Set<number>()
+
     for (const t of state.trade_history) {
+      seenTradeIds.add(t.trade_id)
       if (t.status === "OPEN") {
         events.push({
           type: "trade_executed",
@@ -89,13 +92,14 @@ export async function readAuditEvents(
         events.push({
           type: "trade_resolved",
           timestamp: t.resolved_at ?? t.timestamp,
-          title: `Position resolved: ${t.status}`,
+          title: `Position resolved: ${t.status}${!t.resolved_at ? " (date approximate)" : ""}`,
           detail: `${profit >= 0 ? "+" : ""}$${profit.toFixed(2)} on "${t.question || t.market_id}"`,
           metadata: {
             tradeId: t.trade_id,
             marketId: t.market_id,
             profit,
             status: t.status,
+            timestampApproximate: !t.resolved_at,
           },
         })
       }
@@ -103,7 +107,8 @@ export async function readAuditEvents(
 
     for (const trades of Object.values(state.positions)) {
       for (const t of trades) {
-        if (t.status === "OPEN") {
+        if (t.status === "OPEN" && !seenTradeIds.has(t.trade_id)) {
+          seenTradeIds.add(t.trade_id)
           events.push({
             type: "trade_executed",
             timestamp: t.timestamp,

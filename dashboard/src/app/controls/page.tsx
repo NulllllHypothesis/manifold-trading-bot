@@ -5,16 +5,29 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Mono, formatAge, formatTimestamp } from "@/components/format"
 import { readControlsSnapshot } from "@/lib/data"
 import { cn } from "@/lib/utils"
-import { LockIcon, ShieldIcon, SettingsIcon, ZapIcon, AlertTriangleIcon } from "lucide-react"
+import {
+  LockIcon,
+  ShieldIcon,
+  SettingsIcon,
+  ZapIcon,
+  AlertTriangleIcon,
+  BrainIcon,
+  SearchIcon,
+  RepeatIcon,
+  XOctagonIcon,
+} from "lucide-react"
 
 export const dynamic = "force-dynamic"
 
-const GROUP_CONFIG = {
+const GROUP_CONFIG: Record<string, { label: string; icon: typeof ShieldIcon; color: string }> = {
   risk: { label: "Risk Controls", icon: ShieldIcon, color: "text-loss" },
   trading: { label: "Trading Settings", icon: SettingsIcon, color: "text-primary" },
+  research: { label: "Research Pipeline", icon: SearchIcon, color: "text-primary" },
+  ai: { label: "AI Analysis", icon: BrainIcon, color: "text-warn" },
+  swap: { label: "Swap Checker", icon: RepeatIcon, color: "text-muted-foreground" },
   api: { label: "API Configuration", icon: ZapIcon, color: "text-muted-foreground" },
   features: { label: "Feature Flags", icon: ZapIcon, color: "text-warn" },
-} as const
+}
 
 export default async function ControlsPage() {
   const snapshot = await readControlsSnapshot()
@@ -29,8 +42,19 @@ export default async function ControlsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Controls"
-        description="Risk settings, confidence floor, position limits, and feature flags. Read-only reference parsed from config.py."
+        description="All runtime parameters across config.py, auto_research.py, auto_trader.py, ai_analyzer.py, and position_swap_checker.py."
       />
+
+      {snapshot.autotraderDisabled ? (
+        <Alert variant="destructive">
+          <XOctagonIcon className="h-4 w-4" />
+          <AlertTitle>Auto-trader is DISABLED</AlertTitle>
+          <AlertDescription>
+            <Mono>autotrader_disabled.flag</Mono> exists in workspace root. No
+            trades will be placed until the flag is removed.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <Alert>
         <LockIcon className="h-4 w-4" />

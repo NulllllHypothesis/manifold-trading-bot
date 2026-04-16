@@ -11,7 +11,7 @@ type CronOutputMapping = {
 const CRON_OUTPUT_MAP: Record<string, CronOutputMapping> = {
   research: { fileKeys: ["marketResearch", "researchCounters"], counterSource: "research" },
   resolution: { fileKeys: ["paperState"], counterSource: undefined },
-  trader: { fileKeys: ["paperState", "traderCounters"], counterSource: "trader" },
+  trader: { fileKeys: ["traderCounters"], counterSource: "trader" },
   "daily-summary": { fileKeys: [], counterSource: undefined },
   harvest: { fileKeys: ["calibrationDb", "calibrationTable"], counterSource: undefined },
   "m2-audit": { fileKeys: ["m2Audit"], counterSource: undefined },
@@ -34,6 +34,7 @@ export type CronJobStatus = {
     sizeBytes: number | null
   }>
   lastRunTimestamp: string | null
+  lastRunAgeSeconds: number | null
   health: "healthy" | "stale" | "overdue" | "unknown"
   nextExpectedRun: string | null
 }
@@ -84,7 +85,9 @@ function computeInterval(cron: string): number {
   return 7 * 86400
 }
 
-export async function readAutomationStatus(): Promise<CronJobStatus[]> {
+export async function readAutomationStatus(
+  nowMs?: number,
+): Promise<CronJobStatus[]> {
   const [researchCounters, traderCounters] = await Promise.all([
     readResearchCounters(undefined, { tailLines: 5 }),
     readTraderCounters(undefined, { tailLines: 5 }),
@@ -93,7 +96,8 @@ export async function readAutomationStatus(): Promise<CronJobStatus[]> {
   const lastResearchTs = researchCounters.at(-1)?.timestamp ?? null
   const lastTraderTs = traderCounters.at(-1)?.timestamp ?? null
 
-  const now = new Date()
+  const now = nowMs ?? Date.now()
+  const nowDate = new Date(now)
 
   return CRON_JOBS.map((job) => {
     const mapping = CRON_OUTPUT_MAP[job.id]
@@ -117,22 +121,27 @@ export async function readAutomationStatus(): Promise<CronJobStatus[]> {
     const intervalSec = computeInterval(job.schedule)
     const staleThreshold = intervalSec * 1.5
 
-    let health: CronJobStatus["health"] = "unknown"
-    if (outputFiles.length > 0) {
-      const primaryFile = outputFiles[0]!
-      if (!primaryFile.exists) {
-        health = "unknown"
-      } else if (primaryFile.ageSeconds !== null && primaryFile.ageSeconds > staleThreshold) {
-        health = "overdue"
-      } else {
-        health = "healthy"
-      }
-    } else if (lastRunTimestamp) {
-      const age = (Date.now() - Date.parse(lastRunTimestamp)) / 1000
-      health = age > staleThreshold ? "overdue" : "healthy"
+    let lastRunAgeSeconds: number | null = null
+    if (lastRunTimestamp) {
+      lastRunAgeSeconds = Math.floor((now - Date.parse(lastRunTimestamp)) / 1000)
     }
 
-    const nextRun = computeNextRun(job.schedule, now)
+    let health: CronJobStatus["health"] = "unknown"
+
+    if (lastRunTimestamp) {
+      health = lastRunAgeSeconds !== null && lastRunAgeSeconds > staleThreshold
+        ? "overdue"
+        : "healthy"
+    } else if (outputFiles.length > 0) {
+      const freshest = outputFiles
+        .filter((f) => f.exists && f.ageSeconds !== null)
+        .sort((a, b) => (a.ageSeconds ?? Infinity) - (b.ageSeconds ?? Infinity))[0]
+      if (freshest) {
+        health = freshest.ageSeconds! > staleThreshold ? "overdue" : "healthy"
+      }
+    }
+
+    const nextRun = computeNextRun(job.schedule, nowDate)
 
     return {
       id: job.id,
@@ -141,6 +150,7 @@ export async function readAutomationStatus(): Promise<CronJobStatus[]> {
       intervalDescription: describeSchedule(job.schedule),
       outputFiles,
       lastRunTimestamp,
+      lastRunAgeSeconds,
       health,
       nextExpectedRun: nextRun.toISOString(),
     }

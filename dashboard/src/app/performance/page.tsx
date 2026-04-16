@@ -80,7 +80,7 @@ export default async function PerformancePage() {
           Window:{" "}
           <Mono>{perf.windowFrom ?? "—"}</Mono> → <Mono>{perf.windowTo ?? "—"}</Mono>{" "}
           · <Mono>{stats.totalResolved}</Mono> resolved trades ·{" "}
-          <Mono>{stats.wins}W</Mono> / <Mono>{stats.losses}L</Mono>
+          <Mono>{stats.wins}W</Mono> / <Mono>{stats.losses}L</Mono>{stats.totalResolved - stats.wins - stats.losses > 0 ? <>{" "}/ <Mono>{stats.totalResolved - stats.wins - stats.losses}N</Mono></> : null}
         </CardContent>
       </Card>
 
@@ -93,7 +93,7 @@ export default async function PerformancePage() {
         <KpiCard
           label="Win rate"
           value={formatPercent(stats.winRate, 0)}
-          subtitle={`${stats.wins}W / ${stats.losses}L`}
+          subtitle={`${stats.wins}W / ${stats.losses}L${stats.totalResolved - stats.wins - stats.losses > 0 ? ` / ${stats.totalResolved - stats.wins - stats.losses}N` : ""} of ${stats.totalResolved}`}
         />
         <KpiCard
           label="Profit factor"
