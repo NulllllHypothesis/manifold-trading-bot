@@ -289,30 +289,31 @@ def _infer_market_category(question: str) -> str:
 
 
 # ── Position classification (V2 Phase 2.1) ──────────────────────────────────
-# Markets differ on TWO dimensions that change how they should be managed:
+# Every market gets labelled on two dimensions so the trader can allocate
+# slots intelligently:
 #
-#   1. horizon     — when is the market expected to resolve?
-#   2. reliability — will it actually resolve, or will the creator abandon it?
+#   1. term          — how soon will it resolve? (short-term / medium / long)
+#   2. resolvability — HOW LIKELY is it to actually resolve? (high / medium / low)
 #
-# Short-fuse high-reliability markets (sports match tomorrow, scheduled election)
-# produce outcomes in days and feed the learning loop fast. Long-term low-reliability
-# markets (creator-dependent abstract questions) can sit unresolved for months.
+# Short-term + high-resolvability markets (sports match tomorrow, scheduled
+# election) feed the learning loop fast. Long-term + low-resolvability markets
+# (creator-dependent abstract questions) can sit unresolved for months.
 #
-# The slot allocation favors short and reliable, biasing the book toward fast,
-# trustworthy resolution — which is what the bot needs to actually learn.
+# The combined (term, resolvability) pair maps to a `position_class` which is
+# what the trader uses for cap enforcement. Caps favor short+reliable markets.
 
-# Horizon thresholds in days
-_HORIZON_SHORT_DAYS = 7
-_HORIZON_MEDIUM_DAYS = 30
-# (>_HORIZON_MEDIUM_DAYS → long)
+# Term thresholds in days (measured against closeTime)
+_SHORT_TERM_DAYS  = 7     # ≤7 days away
+_MEDIUM_TERM_DAYS = 30    # 8-30 days away
+# (>30 days → long-term)
 
-# Reliability heuristics — category-based baseline. These are first-pass signals;
-# can be refined later with creator activity + resolution-rate data.
-_RELIABILITY_HIGH_CATEGORIES = frozenset({
-    'sports',       # external score data, scheduled resolution
+# Resolvability heuristics — category-based baseline. These are first-pass
+# signals; can be refined later with creator-activity + past-resolution-rate data.
+_RESOLVABLE_HIGH_CATEGORIES = frozenset({
+    'sports',       # external score data, automatic resolution source
     'economics',    # scheduled releases (CPI, Fed announcements)
 })
-_RELIABILITY_MEDIUM_CATEGORIES = frozenset({
+_RESOLVABLE_MEDIUM_CATEGORIES = frozenset({
     'politics',     # elections have deadlines, but creator still has to click resolve
     'ai_tech',      # dated product launches are usually resolved
     'entertainment',  # scheduled releases (movies, awards)
@@ -321,12 +322,12 @@ _RELIABILITY_MEDIUM_CATEGORIES = frozenset({
     'business',     # earnings dates, IPO dates
     'crypto',       # price-dependent; creator dependent for non-price markets
 })
-# Anything in 'other' or not in the maps → low reliability
+# Anything in 'other' or not in the maps → low resolvability
 
-# Question text patterns that suggest low reliability (abandonment risk).
-# Signals open-ended "when will X eventually happen" framing with no deadline.
-_LOW_RELIABILITY_QUESTION_PATTERNS = (
-    ' ever ',            # "Will humans ever colonize Mars?" / "Will X ever be legal?"
+# Question text patterns that signal "when will X eventually happen" framing —
+# no deadline, open-ended, high abandonment risk.
+_LOW_RESOLVABILITY_PATTERNS = (
+    ' ever ',            # "Will humans ever colonize Mars?"
     'ever happen',
     'at some point',
     'eventually',
@@ -337,15 +338,14 @@ _LOW_RELIABILITY_QUESTION_PATTERNS = (
 )
 
 
-def _classify_horizon(close_time_ms: Optional[int], now_ms: Optional[float] = None) -> str:
+def _classify_term(close_time_ms: Optional[int], now_ms: Optional[float] = None) -> str:
     """
-    Classify market horizon from closeTime (unix ms).
+    Classify a market's term from closeTime (unix ms).
 
-    Returns one of: 'short', 'medium', 'long', 'unknown'.
+    Returns one of: 'short' | 'medium' | 'long' | 'unknown'.
 
-    'unknown' covers markets with no closeTime (perpetual questions) or invalid
-    closeTime values. Treated like 'long' for slot policy purposes but kept
-    distinct for observability.
+    'unknown' = no closeTime / invalid closeTime. Treated like 'long' for
+    slot policy (see _derive_position_class) but kept distinct in reporting.
     """
     if not close_time_ms:
         return 'unknown'
@@ -354,44 +354,44 @@ def _classify_horizon(close_time_ms: Optional[int], now_ms: Optional[float] = No
     now = now_ms if now_ms is not None else time.time() * 1000
     days_to_close = (close_time_ms - now) / 86_400_000
     if days_to_close <= 0:
-        # Already past closeTime — likely awaiting resolution. Treat as 'short'
-        # because nothing is going to make this longer; it just needs the
-        # creator to click resolve.
+        # Already past closeTime — just awaiting creator resolution. 'short'
+        # because nothing is going to make the wait longer from here.
         return 'short'
-    if days_to_close <= _HORIZON_SHORT_DAYS:
+    if days_to_close <= _SHORT_TERM_DAYS:
         return 'short'
-    if days_to_close <= _HORIZON_MEDIUM_DAYS:
+    if days_to_close <= _MEDIUM_TERM_DAYS:
         return 'medium'
     return 'long'
 
 
-def _classify_reliability(market: Dict) -> str:
+def _classify_resolvability(market: Dict) -> str:
     """
-    Classify market resolution reliability as 'high', 'medium', or 'low'.
+    Return 'high' | 'medium' | 'low' for how likely the market is to resolve
+    in a timely, trustworthy way.
 
-    Heuristics (first-pass, refinable later):
-    - Category-based: sports/economics → high, most others → medium, other/unknown → low
-    - Question text: 'will X ever happen' / 'by 2050' patterns → low
-    - Liquidity as community-attention proxy: very low liquidity → lean lower
-    - Bettor count: very few bettors → lean lower
+    Heuristics (first-pass, refinable):
+    - Category baseline: sports/economics → high; politics/tech/etc → medium;
+      other / unknown → low
+    - Question patterns: 'will X ever happen' / 'by 2050' → low
+    - Liquidity + bettor count as community-attention proxy: very low → demote
     """
     question = market.get('question', '') or ''
     category = market.get('category') or _infer_market_category(question)
     q_lower = question.lower()
 
-    # Explicit low-reliability question patterns
-    if any(pat in q_lower for pat in _LOW_RELIABILITY_QUESTION_PATTERNS):
+    # Open-ended question patterns override everything else
+    if any(pat in q_lower for pat in _LOW_RESOLVABILITY_PATTERNS):
         return 'low'
 
     # Category-based baseline
-    if category in _RELIABILITY_HIGH_CATEGORIES:
+    if category in _RESOLVABLE_HIGH_CATEGORIES:
         baseline = 'high'
-    elif category in _RELIABILITY_MEDIUM_CATEGORIES:
+    elif category in _RESOLVABLE_MEDIUM_CATEGORIES:
         baseline = 'medium'
     else:
         baseline = 'low'
 
-    # Demote based on community-attention signals
+    # Demote on weak community-attention signals
     liquidity = market.get('totalLiquidity', 0) or market.get('liquidity', 0) or 0
     bettors = market.get('uniqueBettorCount', 0) or 0
 
@@ -403,50 +403,55 @@ def _classify_reliability(market: Dict) -> str:
     return baseline
 
 
-def _slot_bucket(horizon: str, reliability: str) -> str:
+def _derive_position_class(term: str, resolvability: str) -> str:
     """
-    Map (horizon, reliability) to a slot-accounting bucket.
+    Map (term, resolvability) to a position_class used for slot-cap enforcement.
 
-    Buckets and default caps (enforced in auto_trader.py):
-      short            — 5 slots
-      medium           — 3 slots
-      long_high        — 1 slot (long-term but reliable resolution source)
-      long_mid_low     — 0-1 slot (long + risk) — use flex slot if available
-      unknown          — 0-1 slot (treat like long_mid_low)
-      flex             — 1 slot for overflow, any horizon/reliability
+    Class values and default caps (enforced in auto_trader._POSITION_CLASS_CAPS):
+      'short'          — 5 slots. Any short-term market.
+      'medium'         — 3 slots. Any medium-term market.
+      'long_reliable'  — 1 slot.  Long-term with high resolvability (scheduled
+                                  external event, e.g. Olympics).
+      'long_risky'     — 1 slot.  Long-term with medium/low resolvability OR
+                                  unknown-term markets. Highest abandonment
+                                  risk, so capped tightest.
 
-    Total default: 5 + 3 + 1 + 0-1 + 1 = 10.
+    Total: 5 + 3 + 1 + 1 = 10.
     """
-    if horizon == 'short':
+    if term == 'short':
         return 'short'
-    if horizon == 'medium':
+    if term == 'medium':
         return 'medium'
-    if horizon == 'long' and reliability == 'high':
-        return 'long_high'
-    # long+medium, long+low, unknown — all handled by the same restrictive bucket
-    return 'long_mid_low'
+    if term == 'long' and resolvability == 'high':
+        return 'long_reliable'
+    # long + medium/low resolvability, or unknown term → tight cap
+    return 'long_risky'
 
 
 def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
     """
-    Classify a market into horizon × reliability × slot_bucket.
+    Label a market with everything the trader and dashboard need for slot
+    accounting.
 
-    Returns:
-        {
-            'horizon':     'short' | 'medium' | 'long' | 'unknown',
-            'reliability': 'high' | 'medium' | 'low',
-            'slot_bucket': 'short' | 'medium' | 'long_high' | 'long_mid_low',
-            'close_time_ms': int | None,
-            'days_to_close': float | None,
-        }
+    Returns a dict with these fields:
+      term          — 'short' | 'medium' | 'long' | 'unknown'
+                      How soon the market is expected to resolve.
+      resolvability — 'high'  | 'medium' | 'low'
+                      How likely the market is to actually get resolved.
+      position_class — 'short' | 'medium' | 'long_reliable' | 'long_risky'
+                       The bucket used for slot-cap enforcement. Derived
+                       deterministically from (term, resolvability).
+      close_time_ms — int | None   Unix-ms closeTime from the Manifold API.
+      days_to_close — float | None Days from now until closeTime (negative if
+                                   already past close).
 
     Used by:
-    - auto_research.py to tag every recommendation with horizon/reliability
-    - auto_trader.py to apply per-bucket slot caps
-    - dashboard Portfolio page to show slot usage per bucket
+    - auto_research.py to tag every recommendation
+    - auto_trader.py to enforce per-class slot caps
+    - paper_trader.py to persist the labels on the position record
+    - dashboard to show classification per position
 
-    Does NOT make trading decisions on its own — just labels the market.
-    The trader and research pipeline decide what to do with the labels.
+    Pure function — does not make any trading decision. Just labels the market.
     """
     close_time_ms = market.get('closeTime')
     if close_time_ms and not isinstance(close_time_ms, (int, float)):
@@ -457,16 +462,16 @@ def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
     if close_time_ms:
         days_to_close = (close_time_ms - now) / 86_400_000
 
-    horizon = _classify_horizon(close_time_ms, now_ms=now)
-    reliability = _classify_reliability(market)
-    bucket = _slot_bucket(horizon, reliability)
+    term           = _classify_term(close_time_ms, now_ms=now)
+    resolvability  = _classify_resolvability(market)
+    position_class = _derive_position_class(term, resolvability)
 
     return {
-        'horizon':     horizon,
-        'reliability': reliability,
-        'slot_bucket': bucket,
-        'close_time_ms': int(close_time_ms) if close_time_ms else None,
-        'days_to_close': round(days_to_close, 2) if days_to_close is not None else None,
+        'term':           term,
+        'resolvability':  resolvability,
+        'position_class': position_class,
+        'close_time_ms':  int(close_time_ms) if close_time_ms else None,
+        'days_to_close':  round(days_to_close, 2) if days_to_close is not None else None,
     }
 
 

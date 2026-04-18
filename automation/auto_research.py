@@ -689,7 +689,7 @@ class MarketResearcher:
                     for p in self.trader.positions.get(market_id, [])
                 )
 
-                # V2 Phase 2.1: classify position horizon × reliability
+                # V2 Phase 2.1: classify by term × resolvability
                 classification = classify_position(market)
 
                 recommendation = {
@@ -702,11 +702,12 @@ class MarketResearcher:
                     'liquidity': liquidity,
                     'unique_bettors': market.get('uniqueBettorCount') or 0,
                     'last_bet_time_ms': market.get('lastBetTime'),
-                    'close_time_ms': classification['close_time_ms'],
-                    'days_to_close': classification['days_to_close'],
-                    'horizon': classification['horizon'],
-                    'reliability': classification['reliability'],
-                    'slot_bucket': classification['slot_bucket'],
+                    # V2 Phase 2.1 classification
+                    'close_time_ms':  classification['close_time_ms'],
+                    'days_to_close':  classification['days_to_close'],
+                    'term':           classification['term'],
+                    'resolvability':  classification['resolvability'],
+                    'position_class': classification['position_class'],
                     'recommendation': overall_rec,
                     'confidence': round(confidence, 2),
                     'strategies': [s['strategy'] for s in active_signals] + (['thin_market'] if thin_market_fired else []),

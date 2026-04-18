@@ -48,7 +48,7 @@ def _new_trader_counters() -> dict:
             "existing_open":        0,
             "max_positions":        0,
             "category_cap":         0,
-            "slot_bucket_full":     0,      # V2 Phase 2.1: horizon/reliability bucket cap
+            "position_class_full":  0,      # V2 Phase 2.1: term/resolvability class cap
             "liquidity":            0,
             "kelly_no_edge":        0,
             "size_too_small":       0,
@@ -60,29 +60,30 @@ def _new_trader_counters() -> dict:
     }
 
 
-# V2 Phase 2.1: slot caps by classification bucket.
-# Favors short-fuse and high-reliability markets (they produce learning data
-# faster). Total = 5 + 3 + 1 + 1 = 10 matches MAX_POSITIONS.
-#
-# The 'flex' slot is shared — any bucket can use it once when their own bucket
-# is full. Prevents edge cases where e.g. 4 excellent short-term opportunities
-# arrive when short bucket is already at 5.
-_SLOT_BUCKET_CAPS = {
-    'short':        5,
-    'medium':       3,
-    'long_high':    1,
-    'long_mid_low': 1,  # acts as the "flex" slot
+# V2 Phase 2.1: slot caps by position_class.
+# Favors short-term and high-resolvability markets because they produce
+# learning data faster. Total = 5 + 3 + 1 + 1 = 10 (matches MAX_POSITIONS).
+_POSITION_CLASS_CAPS = {
+    'short':         5,   # any short-term market
+    'medium':        3,   # any medium-term market
+    'long_reliable': 1,   # long-term + high resolvability (scheduled event)
+    'long_risky':    1,   # long-term + medium/low resolvability, or unknown term
 }
 
 
-def _count_open_in_bucket(positions: dict, target_bucket: str) -> int:
-    """Count open positions whose slot_bucket matches target_bucket.
-
-    Legacy positions without slot_bucket metadata are classified on the fly
-    from whatever fields are present; if classification fails (no closeTime,
-    no question), they're counted against 'long_mid_low' as the safest default.
+def _count_open_in_class(positions: dict, target_class: str) -> int:
     """
-    # Local import to avoid circular — strategies imports nothing from automation
+    Count OPEN positions whose position_class matches target_class.
+
+    Prefers the persisted position_class field (written by place_paper_bet).
+    Falls back to on-the-fly classification for legacy positions that predate
+    V2 Phase 2.1 — those get classified from stored close_time_ms + question +
+    category. If all of those are missing, classify_position returns term=unknown
+    and the position lands in 'long_risky' (safest bucket for something we
+    can't reason about).
+    """
+    # Local import: strategies doesn't import from automation, so this avoids
+    # any circular import risk at module load time.
     from manifold_bot.strategies import classify_position
 
     n = 0
@@ -90,18 +91,18 @@ def _count_open_in_bucket(positions: dict, target_bucket: str) -> int:
         for pos in pos_list:
             if pos.get('status') != 'OPEN':
                 continue
-            bucket = pos.get('slot_bucket')
-            if not bucket:
-                # Legacy position — classify from what we have
+            pclass = pos.get('position_class')
+            if not pclass:
+                # Legacy position — classify from what's available
                 synthetic = {
-                    'question': pos.get('question', ''),
-                    'category': pos.get('category'),
-                    'closeTime': pos.get('close_time_ms'),
-                    'totalLiquidity': pos.get('liquidity', 0),
+                    'question':          pos.get('question', ''),
+                    'category':          pos.get('category'),
+                    'closeTime':         pos.get('close_time_ms'),
+                    'totalLiquidity':    pos.get('liquidity', 0),
                     'uniqueBettorCount': pos.get('unique_bettors', 0),
                 }
-                bucket = classify_position(synthetic)['slot_bucket']
-            if bucket == target_bucket:
+                pclass = classify_position(synthetic)['position_class']
+            if pclass == target_class:
                 n += 1
     return n
 
@@ -376,18 +377,17 @@ class AutoTrader:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
             return "max_positions"
 
-        # V2 Phase 2.1 — Check slot-bucket cap (horizon × reliability).
-        # This biases the book toward fast-resolving reliable markets so the
-        # learning loop gets fed faster. Long-horizon low-reliability markets
-        # get at most 1 slot because they tie up capital for the longest with
-        # the highest abandonment risk.
-        slot_bucket = recommendation.get('slot_bucket')
-        if slot_bucket and slot_bucket in _SLOT_BUCKET_CAPS:
-            cap = _SLOT_BUCKET_CAPS[slot_bucket]
-            open_in_bucket = _count_open_in_bucket(self.trader.positions, slot_bucket)
-            if open_in_bucket >= cap:
-                print(f"  Slot bucket full: {slot_bucket} has {open_in_bucket}/{cap} open positions")
-                return "slot_bucket_full"
+        # V2 Phase 2.1 — Check position_class cap (term × resolvability).
+        # Biases the book toward fast-resolving reliable markets so the learning
+        # loop gets fed faster. Long-term risky markets get at most 1 slot
+        # because they tie up capital longest with highest abandonment risk.
+        position_class = recommendation.get('position_class')
+        if position_class and position_class in _POSITION_CLASS_CAPS:
+            cap = _POSITION_CLASS_CAPS[position_class]
+            open_in_class = _count_open_in_class(self.trader.positions, position_class)
+            if open_in_class >= cap:
+                print(f"  Position class full: {position_class} has {open_in_class}/{cap} open positions")
+                return "position_class_full"
 
         # Check category exposure cap — prevent over-concentration in one topic.
         # Category comes from the research recommendation; fall back to inference
@@ -623,12 +623,12 @@ class AutoTrader:
             category=recommendation.get('category'),
             question=recommendation.get('question'),
             # V2 Phase 2.1 — persist classification on the position record so
-            # _count_open_in_bucket() reads the exact bucket the trader approved.
-            # Without this, the on-the-fly classify_position() fallback sees no
-            # close_time_ms and misclassifies every position as long_mid_low.
-            horizon=recommendation.get('horizon'),
-            reliability=recommendation.get('reliability'),
-            slot_bucket=recommendation.get('slot_bucket'),
+            # _count_open_in_class() reads the exact class the trader approved.
+            # Without this, the on-the-fly classify_position() fallback sees
+            # no close_time_ms and misclassifies every position as long_risky.
+            term=recommendation.get('term'),
+            resolvability=recommendation.get('resolvability'),
+            position_class=recommendation.get('position_class'),
             close_time_ms=recommendation.get('close_time_ms'),
         )
 
