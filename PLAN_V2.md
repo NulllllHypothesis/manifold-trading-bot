@@ -747,7 +747,7 @@ This is the "if I could only do one thing at a time, what order?" list:
 3. ✅ **Analyze-once AI cache** (Phase 1.3) — SHIPPED
 4. ✅ **Skip AI on held markets** (Phase 1 extension) — SHIPPED
 5. ✅ **Position classification + 3-class caps** (Phase 2.1) — SHIPPED
-6. **Active repricing** (Phase 2.2) — next up
+6. **Active repricing** (Phase 2.2) — **IN REVIEW** (PR #14)
 7. **Early close + swap logic** (Phase 2.3) — enables real book turnover
 8. **STRANDED / ABANDONED state** (Phase 2.4) — honest stale handling
 9. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
