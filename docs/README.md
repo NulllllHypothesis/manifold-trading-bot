@@ -125,26 +125,20 @@ The bot tracks:
 - **Daily P&L**: Profit/loss by day
 - **Market Performance**: P&L by market
 
-## Dashboard
+## Operator Dashboard
 
-The dashboard provides:
-- Balance over time chart
-- Daily P&L bar chart
-- Win/loss distribution pie chart
-- Top markets performance
-- Text-based console output
+A 15-page Next.js web dashboard for monitoring the bot in real time. Reads every data file the bot produces and surfaces the exact operational state.
 
-```python
-from manifold_bot.dashboard import TradingDashboard
-
-trader = PaperTrader()
-dashboard = TradingDashboard(trader)
-dashboard.print_dashboard()
-
-# Generate visualizations (requires plotly)
-fig = dashboard.create_visualizations()
-fig.show()
+```bash
+cd dashboard && pnpm install
+pnpm dev:sandbox    # syncs live data from sandbox, opens at http://localhost:3000
 ```
+
+**Pages:** Overview (alerts + KPIs), Opportunities (blocked opportunity debugger), Portfolio (book health + slot usage), Swaps, Performance (equity curve + charts), Pipeline Health (research-to-trade funnel), Automation (live cron + OpenClaw job state), Strategy Lab (weights + fire rates), Calibration (crowd bias curves), Learning Loop (full feedback chain), News Impact (headline attribution), Controls (all runtime parameters), Audit (event timeline), Diagnostics (file freshness).
+
+**Prerequisites:** Node.js 20+, pnpm, SSH access to sandbox (key or password in `.env`).
+
+See [dashboard/README.md](../dashboard/README.md) for complete setup, architecture, and per-page documentation.
 
 ## Learning Resources
 
