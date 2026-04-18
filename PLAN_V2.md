@@ -38,6 +38,16 @@ V2 cuts all three loops. It also adds two new capabilities the dashboard has bee
 
 ---
 
+## Design Principles (from reviewer, applied throughout)
+
+1. **Honest accounting**: no fake `P&L = 0` closes. Either mark-to-market at real AMM price, or explicit `STRANDED` / `ABANDONED` status. Never pretend we know a sale price we don't.
+2. **Live-trade gates stay conservative**: min samples ≥ 10 for live weight changes. Historical backtest gets a SEPARATE promotion path with its own higher sample requirement and a dampening factor — we don't mix the two.
+3. **EV must work without AI**: `estimated_ev` requires a probability estimate. If AI doesn't provide one, use a stat-derived fallback. Otherwise calibration stays dark.
+4. **Balance reset is an experiment, not a fix**: more paper cash doesn't teach the bot anything. If we reset, we mark it as a new "Phase 2 capital" epoch and don't pretend it's continuous performance.
+5. **Make it smarter BEFORE giving it more room**: ship Phase 1 (AI fixes, EV fallback, analyze-once cache) first. THEN drop stale positions. THEN consider balance increase. Order matters because otherwise we let the bot make the same mistakes with more capital.
+
+---
+
 ## Phase 1 — Unblock the Pipeline (Week 1)
 
 The pipeline is built correctly. Specific bugs and wrong defaults are blocking it. Fix those first.
@@ -143,40 +153,57 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 The bot currently operates like a vault: trade goes in, nothing comes out until Manifold resolves it. V2 turns this into a managed book.
 
-### 2.1 — Position lifecycle categorization
+### 2.1 — Position classification: horizon × resolution_reliability
 
-**The idea** (user's): not all positions are equal. Some markets have obvious close dates (sports match tomorrow, election on Tuesday). Others are open-ended ("Will crypto ever be banned?"). Short-term and long-term positions should be managed differently and sized differently.
+**The idea**: long-term alone is not always bad. A market with a clear official resolution source (sports league, election commission, regulated agency) can be long-term but still safe. The dangerous category is creator-abandoned markets that stay unresolved forever. So we need **two dimensions**.
 
-**Categories:**
+**Dimension 1: horizon** (time to expected resolution)
 
-| Type | Definition | Expected resolution | Slot policy |
-|------|-----------|---------------------|-------------|
-| **Short-term** | closeTime < 7 days | Almost certain to resolve within slot budget | Liberal — can hold many, they'll free up |
-| **Medium-term** | 7-30 days | Usually resolves | Standard cap |
-| **Long-term** | 30-90 days | Often drags, sometimes resolves late | Tight cap — high opportunity cost |
-| **Open-ended** | >90 days or no closeTime | Likely never resolves without creator attention | Avoid entirely or cap at 1-2 |
+| Horizon | Definition |
+|---------|-----------|
+| `short` | closeTime ≤ 7 days away |
+| `medium` | closeTime 8-30 days away |
+| `long` | closeTime >30 days away |
+
+**Dimension 2: resolution_reliability** (will this market actually resolve?)
+
+| Reliability | Signals |
+|-------------|---------|
+| `high` | Official external source (sports score, election result, regulator announcement), active creator (updated within 7 days), high liquidity |
+| `medium` | Dated question with external reference but unclear resolution source, moderate creator activity |
+| `low` | Creator-dependent resolution with no external anchor, inactive creator (>30d), or question with ambiguous resolution criteria |
+
+**Slot policy** (favors short-fuse, high-reliability for fast learning):
+
+| Bucket | Cap |
+|--------|-----|
+| `short` | 5 slots |
+| `medium` | 3 slots |
+| `long` + `high` reliability | 1 slot |
+| `flexible` (any horizon/reliability, overflow) | 1 slot |
+| `low_reliability` | 0-1 slot max (prefer 0) |
+| **Total** | 10 slots |
+
+**Why this order**: the bot learns from resolved outcomes. Short-term high-reliability markets produce outcomes in days. Long-term low-reliability markets may never produce outcomes. Biasing the book toward fast, reliable resolution maximizes learning rate.
 
 **Detection:**
-- **Primary signal**: `closeTime` from Manifold API
-- **Secondary signal**: keyword patterns in question text
-  - Sports: contains match/game/final/vs pattern → short-term
-  - Dated political: "by Nov 2026", "before Q1" → deadline parsed from text
-  - Open-ended: no time marker, abstract question → probably long-term
-- **Tertiary signal**: historical resolution data for the creator (do they usually resolve on time?)
+- **Horizon** — primary from `closeTime` field in Manifold API response
+- **Reliability** — composite signal:
+  - Category + keyword heuristics (sports/elections/earnings → high; "will X ever happen" → low)
+  - Creator's `lastActive` timestamp (available from `/v0/user/{creatorId}`)
+  - Resolution rate of creator's past markets (fetch last N markets, count `isResolved`)
+  - Liquidity as a proxy for community attention (more bettors = more likely someone nags creator to resolve)
 
 **Changes:**
-- New function `classify_market_horizon(market)` in `manifold_bot/strategies.py`
-- Recommendations include `horizon` field: `short` / `medium` / `long` / `openended`
-- `auto_trader.py` uses horizon to choose position cap:
-  - `MAX_SHORT_TERM_POSITIONS = 7`
-  - `MAX_MEDIUM_TERM_POSITIONS = 4`
-  - `MAX_LONG_TERM_POSITIONS = 2`
-  - `MAX_OPENENDED_POSITIONS = 1` (or 0)
-- Dashboard Portfolio page adds horizon column + per-horizon slot usage table
+- New function `classify_position(market)` in `manifold_bot/strategies.py` — returns `{ horizon, reliability, slot_bucket }`
+- Recommendations include `horizon` and `reliability` fields
+- `auto_trader.py` uses slot buckets for caps, not flat MAX_POSITIONS
+- `auto_trader.py` prefers high-reliability short-fuse markets when ranking eligible trades (tie-breaker: earlier closeTime + higher reliability wins)
+- Dashboard Portfolio page adds horizon + reliability columns, per-bucket slot usage
 
-**Impact**: Bot naturally balances a mix of fast-resolving and slow-burning trades. Book never gets jammed with 10 open-ended positions. Short-term positions are encouraged — they're the ones that actually produce learning data quickly.
+**Impact**: Bot naturally builds a book tilted toward fast, reliable resolution. No more jammed book with 10 creator-abandonment markets.
 
-**Estimated effort**: 3 days (detection logic is the hard part).
+**Estimated effort**: 2-3 days (creator activity lookup is the slow part).
 
 ---
 
@@ -251,82 +278,119 @@ Then for each position, consider three actions:
 
 ---
 
-### 2.4 — Stale position auto-detection and dropping
+### 2.4 — Stale position detection + STRANDED state (honest accounting)
 
-**Problem**: Independent of the scoring logic in 2.3, some positions are just dead weight. Market creator abandoned the market. Close time passed weeks ago with no resolution. No bet activity in days. These positions have near-zero probability of resolving anytime soon. They eat slots and tie up capital for nothing.
+**Problem**: Dead positions eat slots. But "closing them at fake $0" is lying to ourselves about our performance. We need two different outcomes depending on whether the market is still tradable.
 
-**What "stale" means, concretely** (ANY condition triggers stale flag):
+**Two states, not one close-all-the-same approach**:
 
-| Signal | Threshold | Rationale |
-|--------|-----------|-----------|
-| Age since entry | `> 14 days` and horizon ≠ long | Position has outlived its expected resolution window |
-| Past closeTime | `closeTime < now AND resolved == false` | Market closed to betting but creator hasn't resolved |
-| No bet activity | `last_bet_time > 7 days ago AND position age > 7 days` | Nobody is betting — creator likely walked away |
-| Legacy position | `category IS NULL AND question IS NULL AND age > 14d` | Pre-metadata positions that have been stuck since original bot era |
-| Creator inactive | Creator's `lastUpdated > 30 days ago` | Creator account hasn't done anything on Manifold |
+1. **Market still open + tradable** → Close early at **current AMM mark-to-market price** (real sale value, could be profit or loss)
+2. **Market closed but unresolved** (past `closeTime`, creator hasn't resolved) → Move to **STRANDED** state. Removed from active book (no longer consuming slots) but NOT marked as WIN/LOSE/CLOSED. Kept in a separate column in dashboard, awaiting eventual resolution or long-timeout write-off.
 
-**Decision policy**:
+This matches reality: a past-close unresolved market has no current trade price because nobody is betting. We can't sell it. But we can stop pretending it's blocking a slot.
+
+**Detection signals** (each independently scored):
+
+| Signal | Threshold | Action |
+|--------|-----------|--------|
+| Market still open, position age >14d | age > 14 AND horizon ≠ long | Re-score via § 2.3, decide hold/close/swap |
+| Market closed, unresolved, grace period passed | closeTime < now - 48h AND NOT isResolved | Move to STRANDED |
+| Market closed, unresolved, long timeout | closeTime < now - 90d AND NOT isResolved | Administrative write-off: mark `ABANDONED` (explicit status, NOT fake CLOSED) |
+| No bet activity on market | lastBetTime > 14d ago AND market is open | Flag as low-reliability, apply close-early via § 2.3 |
+| Creator inactive | Creator lastActive > 30d ago | Flag as low-reliability, avoid re-adding to book |
+
+**Three possible outcomes per stale position** (not one):
 
 ```
-For each open position:
-  1. Compute stale_signals[] = list of triggered conditions
-  2. If stale_signals is empty → skip (not stale)
-  3. If stale_signals includes "past closeTime + not resolved":
-     - Wait 48 more hours (creator might still resolve it)
-     - If still not resolved → CLOSE at current AMM price
-  4. If stale_signals includes "no bet activity" or "creator inactive":
-     - CLOSE at current AMM price immediately
-     - Record stale_reason in bet_outcomes
-  5. If stale_signals only includes "age > 14d" without other signals:
-     - Re-score using position_score from 2.3
-     - Let the scoring logic decide hold/close/swap
-     - Don't auto-drop — the position might still be valuable
+evaluate_stale(position):
+    market = fetch_market(position.market_id)
+
+    if market.isResolved:
+        return  # resolve_positions.py will handle it
+
+    if market.closeTime > now():
+        # Still tradable
+        if position_score(position) < threshold:
+            close_early_at_mark_to_market(position, market.probability)
+            # Record real P&L based on AMM price
+        else:
+            hold()  # still has value, let it run
+        return
+
+    # Market closed, unresolved
+    grace_period_end = market.closeTime + 48h
+
+    if now() < grace_period_end:
+        hold()  # creator might still resolve
+        return
+
+    if now() < market.closeTime + 90d:
+        move_to_stranded(position)  # out of active slot accounting
+        return
+
+    # Long-timeout write-off
+    mark_abandoned(position)  # explicit ABANDONED status
 ```
 
-**Critical: close at real price, not fake P&L=0**
+**STRANDED state specifics**:
+- New `status` value in `paper_trading_state.json`: `"STRANDED"`
+- Stored amount remains on record (we didn't recover the capital)
+- NOT counted in `openPositionCount` for slot purposes
+- NOT counted in realized P&L (no exit event yet)
+- Shown in dashboard Portfolio page in a separate "Stranded" section
+- If market eventually resolves later, a separate reconciliation script can convert STRANDED → WIN/LOSE using `resolve_positions.py`
 
-When closing a stale position:
+**ABANDONED state specifics**:
+- Only applied after 90 days past close with no resolution
+- `status = "ABANDONED"`, `profit = -amount` (full write-off)
+- Counted as realized LOSS (honest)
+- Reason: at this point the money is gone, we should stop pretending otherwise
+- Shown separately on dashboard — distinct from normal CLOSED trades
+
+**Close-early mechanics** (for markets still open):
 - Fetch current market probability from Manifold API
-- Compute sale value: `current_value = amount × (current_prob / entry_prob)` (for YES) or `amount × ((1-current_prob) / (1-entry_prob))` (for NO)
-- If current_prob unavailable (market is REALLY dead) → close at entry price (P&L = 0 is a FALLBACK, not the default)
-- Record `stale_reason` field: `abandoned_by_creator`, `past_close_time`, `no_bet_activity`, etc.
+- Use AMM formula for sale value:
+  - YES position: `sale_value = amount × (current_prob / entry_prob)`
+  - NO position: `sale_value = amount × ((1-current_prob) / (1-entry_prob))`
+- `profit = sale_value - amount` (real, could be negative)
+- `status = "CLOSED_EARLY"`, `stale_reason` recorded
 
 **What the script does**:
 
 `scripts/detect_stale_positions.py`:
 1. Load `paper_trading_state.json`
 2. For each OPEN position, fetch market metadata from Manifold API:
-   - `closeTime`
-   - `isResolved`
-   - `lastBetTime`
-   - Current probability
-   - Creator's `lastActive` if available
-3. Apply stale detection rules above
-4. For stale positions, call `paper_trader.close_position_early(market_id, current_prob, reason)`
-5. Log actions taken: how many dropped, per-reason breakdown
-6. Write audit event to event log (Phase 5.1)
-7. Send Telegram summary if any positions dropped
+   - `closeTime`, `isResolved`, `lastBetTime`, current `probability`
+   - Creator's `lastActive` (from `/v0/user/{creatorId}`)
+3. Classify into: still_tradable / past_close_grace / past_close_long / already_resolved
+4. Apply the decision flow above per position
+5. Write status updates atomically to `paper_trading_state.json`
+6. Record outcomes in `calibration.db:bet_outcomes`:
+   - `CLOSED_EARLY` with real P&L → era = `early_close`
+   - `STRANDED` → era = `stranded` (no profit recorded, pending)
+   - `ABANDONED` → era = `write_off` with full loss
+7. Log action summary + Telegram notification
 
-**Schedule**:
-- Add to OS crontab: hourly at :45 (after the :20 trader run and :30 eval run, so drops take effect before next :00 research)
-- Or: daily at 13:00 UTC if hourly is too aggressive
+**Schedule**: Daily at 13:00 UTC (not hourly — this is slow to change, no need to thrash).
 
-**Dashboard integration** (Portfolio page):
-- Add "stale_signals" column — badges showing which conditions triggered
-- Add "Drop stale now" button (writes a request file the cron picks up on next run; v2 becomes a direct action in Phase 5.3)
+**Dashboard integration**:
+- Portfolio page: add "Stranded positions" section (separate from Open)
+- Add "Abandoned (write-offs)" section in Performance page
+- Stale signals column with badges showing triggered conditions
+- Daily summary Telegram message includes: X closed early, Y stranded, Z written off
 
-**Impact on current state**:
-- 8 of 10 current open positions are legacy with no metadata. Most are >14 days old.
-- After this script runs once: expect 5-8 positions dropped, freeing 5-8 slots immediately
-- The bot can actually trade again
-- Real P&L gets crystallized (some may be losses — that's honest, not cosmetic)
+**Impact on current state** (8 legacy positions on locally stored state):
+- Most have closeTime in the past but aren't formally resolved
+- Expected outcome on first run: 3-5 moved to STRANDED, 1-2 closed early at real mark-to-market, 0-2 held (still tradable and scoring well)
+- Frees 4-7 slots without fake accounting
+- Preserves performance record honesty
 
 **What this is NOT**:
-- It's NOT "close everything older than 14 days" — that's too aggressive
-- It's NOT "mark P&L as $0 to make the dashboard look clean" — that's fake accounting
-- It's a principled decision: markets that are abandoned are worth liquidating at fair value
+- Not "close everything old at fake $0" — that was the wrong earlier proposal
+- Not applied to short-term positions that still have time to resolve
+- Not a way to manipulate P&L — STRANDED is explicitly not counted until real resolution
 
-**Estimated effort**: 1 day (includes API calls for creator activity, detection logic, close execution, audit logging).
+**Estimated effort**: 1.5-2 days (creator activity lookup + STRANDED status wiring + dashboard updates).
 
 ---
 
@@ -357,11 +421,11 @@ The backtest pipeline exists. In this workspace it's not producing artifacts bec
 
 ### 3.1 — Expanded harvest + snapshot reconstruction
 
-**Problem**:
-- `harvest_resolved.py` has pulled 2016 resolved markets
-- `m2_audit` says 267 are usable for M3
-- `reconstruct_snapshots.py` produced 0 reconstructed rows in the current workspace (`market_snapshots.db` has 7683 live rows, 0 reconstructed)
-- Live snapshots only start from 2026-04-09, resolved corpus ends 2026-04-07 — no overlap
+**Problem** (verified on local workspace 2026-04-18):
+- `harvest_resolved.py` has pulled **1121 resolved markets** in `calibration.db:resolved_markets`
+- `market_snapshots.db` has **7950 live rows, 0 reconstructed rows**
+- `bet_outcomes` has **3 rows** (not 12)
+- Live snapshots and resolved corpus don't overlap — resolved corpus ends before live snapshots started
 
 **Fix**: Three actions.
 
@@ -397,29 +461,37 @@ Currently `market_snapshots.db` has 7683 live rows starting 2026-04-09. For any 
 
 ---
 
-### 3.2 — Lower activation gates
+### 3.2 — Separate backtest promotion from live activation gates
 
-**Problem**: The gates are set conservatively (strategy: 10 samples, category: 8 samples, global EV: 20 samples). Combined with the slow data collection, they block adaptation for months.
+**Problem**: Currently we have ONE gate (`min_samples_threshold = 10`) deciding whether a weight is adopted, regardless of whether the samples came from live trades or historical backtest. That's wrong — backtest and live are fundamentally different signal sources.
 
-**Fix**: With 2000+ backtest samples per § 3.1, we can lower these gates without taking on noise risk.
+**Fix**: TWO independent promotion paths, each with its own gate.
 
-**Proposed new gates:**
-- `_MIN_SAMPLES_PER_STRATEGY`: 10 → 20 (scale with total samples)
-- `_MIN_SAMPLES_PER_CATEGORY`: 8 → 15
-- `_MIN_BUCKET_SAMPLES`: 15 → 25 (per (category, probability-bucket) cell)
-- `MIN_SAMPLES_GLOBAL_EV`: 20 → 30
+**Path A: Live-trade gate (stays conservative)**
+- `MIN_SAMPLES_PER_STRATEGY_LIVE = 10` — unchanged
+- A weight only activates from live data when we have 10+ real bet outcomes for that strategy
+- Why conservative: real trades have real money consequences, we want strong evidence before adapting
+- This is the only path that has been available so far. With current 3 bet_outcomes, we're nowhere near 10.
 
-Wait — these are HIGHER, not lower? Yes. The gates were low because we had no data. With 2000+ samples, we can afford stricter statistical significance AND still activate adaptation.
+**Path B: Backtest promotion (new, with its own rules)**
+- `MIN_BACKTEST_SAMPLES_PER_STRATEGY = 50` — higher than live because backtest is noisier (reconstruction errors)
+- `MIN_BACKTEST_ACCURACY_THRESHOLD = 0.55` — only promote if accuracy is meaningfully above 50%
+- `BACKTEST_WEIGHT_DAMPENING = 0.7` — a weight derived from backtest-only gets applied at 70% strength vs the full 100% it would get from live data
+- Why dampened: backtest was run on reconstructed historical state which has inherent error vs what the bot actually saw in real-time
 
-**The real fix**: make gates *dependent on total sample count*, not absolute. If total samples = 50, gate each strategy at 10 (activates at small scale). If total = 2000, gate each at 30 (high confidence).
+**Merge rule** (when both paths have signal):
+- Live samples ≥ live gate → use live-only weight at full strength
+- Live samples < live gate but backtest qualifies → use backtest weight with dampening
+- Neither → weight stays at 1.0 (default, no adaptation)
 
 **Changes:**
-- New function `compute_adaptive_gate(total_samples, base_gate)` in `compute_strategy_weights.py`
-- Dashboard Learning Loop page: show current gate value with rationale
+- `compute_strategy_weights.py`: separate live weight computation from backtest weight computation
+- `strategy_weights.json` shape: add `source: "live" | "backtest" | "live+backtest"` and `confidence: 0.0-1.0` per strategy
+- Dashboard Learning Loop page: show weight source per strategy with confidence indicator
 
-**Impact**: As data grows, gates auto-tune. No more "stuck at 1.0 forever" state.
+**Why this matters**: the reviewer correctly pointed out that blindly lowering live gates from 10→5 would cause the bot to adapt on noise. Keeping live gates at 10 + adding a separate backtest promotion path means we can benefit from historical data NOW without taking on live-trading noise risk.
 
-**Estimated effort**: 0.5 day.
+**Estimated effort**: 1 day.
 
 ---
 
