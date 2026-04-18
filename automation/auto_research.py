@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 import statistics as _stats
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 import os
@@ -162,6 +163,104 @@ _AI_TIMEOUT_COOLDOWN_HOURS = 24   # how long a market stays on cooldown
 # fails=4 means a market must time out consistently across multiple hours
 # before exclusion — one or two cold starts won't permanently block it.
 _AI_TIMEOUT_MAX_FAILS = 4         # failures within that window before exclusion
+
+# ── AI analysis cache (Phase 1.3 of V2) ─────────────────────────────────────
+# Analyze-once cache: store AI results per market so we don't re-analyze the
+# same market every hour when nothing has changed. Invalidation rules:
+#   - TTL: entry is >24h old
+#   - Probability moved >5pp since last analysis
+#   - 24h volume doubled since last analysis
+#
+# When a cache entry is valid, we skip AI for that market and reuse the
+# cached result. This frees AI bandwidth to analyze NEW markets instead of
+# cycling through the same top-3 every hour.
+_AI_ANALYSIS_CACHE_PATH = os.path.join(_ROOT, "data", "ai_analysis_cache.json")
+_AI_CACHE_TTL_HOURS = 24
+_AI_CACHE_PROB_INVALIDATION = 0.05   # 5pp probability move invalidates cache
+_AI_CACHE_VOLUME_MULTIPLIER = 2.0    # 2x volume24h growth invalidates cache
+
+
+def _load_ai_analysis_cache() -> dict:
+    """
+    Load {market_id: {result, analyzed_at, market_state_at_analysis}} from
+    data/ai_analysis_cache.json. Prunes entries older than the TTL so the
+    file stays small. Returns empty dict on any read error.
+    """
+    try:
+        if not os.path.exists(_AI_ANALYSIS_CACHE_PATH):
+            return {}
+        with open(_AI_ANALYSIS_CACHE_PATH) as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            return {}
+        # Prune stale entries
+        now = time.time()
+        ttl_sec = _AI_CACHE_TTL_HOURS * 3600
+        pruned = {}
+        for mid, entry in cache.items():
+            if not isinstance(entry, dict):
+                continue
+            analyzed_at = entry.get('analyzed_at', 0)
+            if not isinstance(analyzed_at, (int, float)):
+                continue
+            if now - analyzed_at < ttl_sec:
+                pruned[mid] = entry
+        return pruned
+    except Exception:
+        return {}
+
+
+def _save_ai_analysis_cache(cache: dict) -> None:
+    """Persist AI analysis cache to disk. Silent on write errors."""
+    try:
+        os.makedirs(os.path.dirname(_AI_ANALYSIS_CACHE_PATH), exist_ok=True)
+        with open(_AI_ANALYSIS_CACHE_PATH, 'w') as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
+def _is_cache_valid(entry: dict, current_market: dict) -> bool:
+    """
+    Check if a cached AI result is still valid given current market state.
+
+    Returns False if:
+    - Entry is malformed
+    - Market state moved enough to warrant re-analysis (prob > 5pp or vol 2x)
+    - TTL already handled at load time in _load_ai_analysis_cache()
+    """
+    if not isinstance(entry, dict):
+        return False
+    prior_state = entry.get('market_state_at_analysis')
+    if not isinstance(prior_state, dict):
+        return False
+
+    prior_prob = prior_state.get('probability')
+    curr_prob = current_market.get('probability')
+    if isinstance(prior_prob, (int, float)) and isinstance(curr_prob, (int, float)):
+        if abs(float(curr_prob) - float(prior_prob)) > _AI_CACHE_PROB_INVALIDATION:
+            return False
+
+    prior_vol = prior_state.get('volume24h', 0)
+    curr_vol = current_market.get('volume24Hours', current_market.get('volume24h', 0))
+    if isinstance(prior_vol, (int, float)) and isinstance(curr_vol, (int, float)):
+        if prior_vol > 0 and float(curr_vol) >= float(prior_vol) * _AI_CACHE_VOLUME_MULTIPLIER:
+            return False
+
+    return True
+
+
+def _cache_ai_result(cache: dict, market_id: str, market: dict, ai_result: dict) -> None:
+    """Write an AI result to the in-memory cache dict (caller persists later)."""
+    cache[market_id] = {
+        'result': ai_result,
+        'analyzed_at': time.time(),
+        'market_state_at_analysis': {
+            'probability': market.get('probability'),
+            'volume24h': market.get('volume24Hours', market.get('volume24h', 0)),
+            'unique_bettors': market.get('uniqueBettorCount'),
+        },
+    }
 
 
 def _load_ai_timeout_cooldown() -> dict:
@@ -753,9 +852,29 @@ class MarketResearcher:
                 )
 
             if candidate_markets:
-                print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
-                counters["ai_analyzed"] = len(candidate_markets)
-                ai_results = {}
+                # ── AI analysis cache check (Phase 1.3 of V2) ────────────────
+                # Split candidates into "cache hit" (reuse prior AI result) and
+                # "fresh" (need new AI call). Cache hits don't burn AI bandwidth
+                # and don't count against the per-cycle max_markets limit.
+                ai_cache = _load_ai_analysis_cache()
+                cache_hit_results = {}
+                fresh_candidates = []
+                for mkt in candidate_markets:
+                    mid = mkt.get('id')
+                    cached = ai_cache.get(mid)
+                    if cached and _is_cache_valid(cached, mkt):
+                        cache_hit_results[mid] = cached['result']
+                    else:
+                        fresh_candidates.append(mkt)
+
+                if cache_hit_results:
+                    print(f"  AI cache: {len(cache_hit_results)} hit(s), {len(fresh_candidates)} need fresh analysis")
+
+                print(f"  Running AI analysis on {len(fresh_candidates)} fresh candidate(s) (skipping {len(cache_hit_results)} cached)...")
+                counters["ai_analyzed"] = len(candidate_markets)  # count total analyzed (incl. cache hits)
+                counters.setdefault("ai_cache_hits", 0)
+                counters["ai_cache_hits"] = len(cache_hit_results)
+                ai_results = dict(cache_hit_results)  # start with cache hits
 
                 # Snapshot pre-AI confidence scores so we can restore them if the AI
                 # pass fails partway through. Without this, a mid-loop timeout would
@@ -772,13 +891,24 @@ class MarketResearcher:
                     # undocumented internal behaviour.
                     # per_market_timeout=90 prevents a hung Ollama call from stalling the
                     # hourly cron job indefinitely.
-                    ai_results = batch_analyze(
-                        candidate_markets,
+                    fresh_ai_results = batch_analyze(
+                        fresh_candidates,
                         max_markets=3,
                         delay=2,
                         per_market_timeout=90,
                         news_by_id=news_by_market_id,
-                    )
+                    ) if fresh_candidates else {}
+                    ai_results.update(fresh_ai_results)
+
+                    # Write successful fresh results back to cache for future hourly runs.
+                    # Skip caching cache-hit results — they're already in the cache.
+                    # Skip caching None/failed results — only cache positive outcomes.
+                    for mkt in fresh_candidates:
+                        mid = mkt.get('id')
+                        fresh = fresh_ai_results.get(mid)
+                        if fresh is not None:
+                            _cache_ai_result(ai_cache, mid, mkt, fresh)
+                    _save_ai_analysis_cache(ai_cache)
                     # Warn if any result came from the paid API fallback
                     for r in ai_results.values():
                         if r.get('source') == 'deepseek_api':
@@ -786,10 +916,12 @@ class MarketResearcher:
                             break
                     # Record per-market failures: candidate got no result at all (not SKIP,
                     # which is a valid response — only missing entries indicate a timeout).
-                    missing_ai = [mid for mid in top_candidate_ids if ai_results.get(mid) is None]
+                    # Only count fresh candidates that failed — cache hits never fail here.
+                    fresh_ids = {m.get('id') for m in fresh_candidates}
+                    missing_ai = [mid for mid in fresh_ids if fresh_ai_results.get(mid) is None]
                     counters["ai_no_result"] += len(missing_ai)
                     if missing_ai:
-                        print(f"  AI no-result for {len(missing_ai)} candidate(s) — recording for cooldown")
+                        print(f"  AI no-result for {len(missing_ai)} fresh candidate(s) — recording for cooldown")
                         _record_ai_timeout(missing_ai, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
                 except TimeoutError as e:

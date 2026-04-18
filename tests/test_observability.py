@@ -687,5 +687,107 @@ class TestStatDerivedProbability(unittest.TestCase):
         self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='', current_prob=0.5))
 
 
+class TestAiAnalysisCache(unittest.TestCase):
+    """
+    AI analyze-once cache (Phase 1.3): reuse prior AI results when the market
+    state hasn't changed meaningfully. Frees AI bandwidth for NEW markets
+    instead of re-analyzing the same top-3 every hour.
+    """
+
+    def test_valid_cache_entry_when_state_unchanged(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES', 'confidence': 0.75},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        current_market = {'probability': 0.61, 'volume24Hours': 105}
+        self.assertTrue(_is_cache_valid(entry, current_market))
+
+    def test_invalidates_on_large_prob_move(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 10pp probability move → invalidate
+        current_market = {'probability': 0.70, 'volume24Hours': 105}
+        self.assertFalse(_is_cache_valid(entry, current_market))
+
+    def test_invalidates_on_double_volume(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 2x volume → invalidate
+        current_market = {'probability': 0.61, 'volume24Hours': 200}
+        self.assertFalse(_is_cache_valid(entry, current_market))
+
+    def test_small_prob_move_stays_valid(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 3pp move → still valid (threshold is 5pp)
+        current_market = {'probability': 0.63, 'volume24Hours': 110}
+        self.assertTrue(_is_cache_valid(entry, current_market))
+
+    def test_malformed_entry_invalidates(self):
+        from automation.auto_research import _is_cache_valid
+        self.assertFalse(_is_cache_valid(None, {'probability': 0.5}))
+        self.assertFalse(_is_cache_valid("not a dict", {'probability': 0.5}))
+        self.assertFalse(_is_cache_valid({'result': {}}, {'probability': 0.5}))  # missing state
+
+    def test_cache_ai_result_stores_state_snapshot(self):
+        from automation.auto_research import _cache_ai_result
+        cache = {}
+        market = {'probability': 0.65, 'volume24Hours': 150, 'uniqueBettorCount': 20}
+        result = {'recommendation': 'YES', 'confidence': 0.80}
+        _cache_ai_result(cache, 'mkt_xyz', market, result)
+
+        self.assertIn('mkt_xyz', cache)
+        self.assertEqual(cache['mkt_xyz']['result'], result)
+        self.assertEqual(cache['mkt_xyz']['market_state_at_analysis']['probability'], 0.65)
+        self.assertEqual(cache['mkt_xyz']['market_state_at_analysis']['volume24h'], 150)
+        self.assertIsInstance(cache['mkt_xyz']['analyzed_at'], float)
+
+    def test_load_cache_prunes_expired_entries(self):
+        from automation.auto_research import _load_ai_analysis_cache, _AI_CACHE_TTL_HOURS
+        import tempfile
+        import json as _json
+        import time as _time
+
+        now = _time.time()
+        cache_contents = {
+            'fresh': {
+                'result': {'recommendation': 'YES'},
+                'analyzed_at': now - 3600,  # 1h ago
+                'market_state_at_analysis': {'probability': 0.6, 'volume24h': 100},
+            },
+            'expired': {
+                'result': {'recommendation': 'NO'},
+                'analyzed_at': now - (_AI_CACHE_TTL_HOURS + 1) * 3600,  # beyond TTL
+                'market_state_at_analysis': {'probability': 0.4, 'volume24h': 50},
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+            _json.dump(cache_contents, tmp)
+            tmp_path = tmp.name
+
+        try:
+            with patch('automation.auto_research._AI_ANALYSIS_CACHE_PATH', tmp_path):
+                loaded = _load_ai_analysis_cache()
+            self.assertIn('fresh', loaded)
+            self.assertNotIn('expired', loaded)
+        finally:
+            os.unlink(tmp_path)
+
+
 if __name__ == "__main__":
     unittest.main()
