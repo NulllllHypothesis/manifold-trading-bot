@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 import statistics as _stats
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 import os
@@ -16,7 +17,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market
+from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market, classify_position
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY, MAX_BET_AMOUNT
@@ -68,6 +69,7 @@ def _new_research_counters() -> dict:
         # AI flow
         "ai_eligible":     0,   # recs with confidence above _STAT_BOOST_FLOOR
         "ai_cooled_down":  0,   # filtered out by AI-timeout cooldown
+        "ai_skipped_held": 0,   # skipped: already hold an open position in this market
         "ai_analyzed":     0,   # actually sent to the AI
         "ai_agree":        0,
         "ai_disagree":     0,
@@ -122,6 +124,7 @@ def _print_research_counters(counters: dict) -> None:
     print(f"    AI flow:")
     print(f"      eligible     {counters['ai_eligible']:>4}"
           f"    cooled-down  {counters['ai_cooled_down']:>4}"
+          f"    held-skip   {counters.get('ai_skipped_held', 0):>4}"
           f"    analyzed    {counters['ai_analyzed']:>4}")
     print(f"      agree        {counters['ai_agree']:>4}"
           f"    disagree     {counters['ai_disagree']:>4}"
@@ -162,6 +165,105 @@ _AI_TIMEOUT_COOLDOWN_HOURS = 24   # how long a market stays on cooldown
 # fails=4 means a market must time out consistently across multiple hours
 # before exclusion — one or two cold starts won't permanently block it.
 _AI_TIMEOUT_MAX_FAILS = 4         # failures within that window before exclusion
+
+# ── AI analysis cache (Phase 1.3 of V2) ─────────────────────────────────────
+# Analyze-once cache: store AI results per market so we don't re-analyze the
+# same market every hour when nothing has changed. Invalidation rules:
+#   - TTL: entry is >24h old
+#   - Probability moved >5pp since last analysis
+#   - 24h volume doubled since last analysis
+#
+# When a cache entry is valid, we skip AI for that market and reuse the
+# cached result. This frees AI bandwidth to analyze NEW markets instead of
+# cycling through the same top-3 every hour.
+_AI_ANALYSIS_CACHE_PATH = os.path.join(_ROOT, "data", "ai_analysis_cache.json")
+_AI_CACHE_TTL_HOURS = 24
+_AI_CACHE_PROB_INVALIDATION = 0.05   # 5pp probability move invalidates cache
+_AI_CACHE_VOLUME_MULTIPLIER = 2.0    # 2x volume24h growth invalidates cache
+
+
+def _load_ai_analysis_cache() -> dict:
+    """
+    Load {market_id: {result, analyzed_at, market_state_at_analysis}} from
+    data/ai_analysis_cache.json. Prunes entries older than the TTL so the
+    file stays small. Returns empty dict on any read error.
+    """
+    try:
+        if not os.path.exists(_AI_ANALYSIS_CACHE_PATH):
+            return {}
+        with open(_AI_ANALYSIS_CACHE_PATH) as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            return {}
+        # Prune stale entries
+        now = time.time()
+        ttl_sec = _AI_CACHE_TTL_HOURS * 3600
+        pruned = {}
+        for mid, entry in cache.items():
+            if not isinstance(entry, dict):
+                continue
+            analyzed_at = entry.get('analyzed_at', 0)
+            if not isinstance(analyzed_at, (int, float)):
+                continue
+            if now - analyzed_at < ttl_sec:
+                pruned[mid] = entry
+        return pruned
+    except Exception:
+        return {}
+
+
+def _save_ai_analysis_cache(cache: dict) -> None:
+    """Persist AI analysis cache to disk. Silent on write errors."""
+    try:
+        os.makedirs(os.path.dirname(_AI_ANALYSIS_CACHE_PATH), exist_ok=True)
+        with open(_AI_ANALYSIS_CACHE_PATH, 'w') as f:
+            json.dump(cache, f)
+    except Exception:
+        # Silent on write errors to avoid breaking the research run
+        pass
+
+
+def _is_cache_valid(entry: dict, current_market: dict) -> bool:
+    """
+    Check if a cached AI result is still valid given current market state.
+
+    Returns False if:
+    - Entry is malformed
+    - Market state moved enough to warrant re-analysis (prob > 5pp or vol 2x)
+    - TTL already handled at load time in _load_ai_analysis_cache()
+    """
+    if not isinstance(entry, dict):
+        return False
+    prior_state = entry.get('market_state_at_analysis')
+    if not isinstance(prior_state, dict):
+        return False
+
+    prior_prob = prior_state.get('probability')
+    curr_prob = current_market.get('probability')
+    if isinstance(prior_prob, (int, float)) and isinstance(curr_prob, (int, float)):
+        if abs(float(curr_prob) - float(prior_prob)) > _AI_CACHE_PROB_INVALIDATION:
+            return False
+
+    prior_vol = prior_state.get('volume24h', 0)
+    curr_vol = current_market.get('volume24Hours', current_market.get('volume24h', 0))
+    if isinstance(prior_vol, (int, float)) and isinstance(curr_vol, (int, float)):
+        if prior_vol > 0 and float(curr_vol) >= float(prior_vol) * _AI_CACHE_VOLUME_MULTIPLIER:
+            return False
+
+    return True
+
+
+def _cache_ai_result(cache: dict, market_id: str, market: dict, ai_result: dict) -> None:
+    """Write an AI result to the in-memory cache dict (caller persists later)."""
+    cache[market_id] = {
+        'result': ai_result,
+        'analyzed_at': time.time(),
+        'market_state_at_analysis': {
+            'probability': market.get('probability'),
+            'volume24h': market.get('volume24Hours', market.get('volume24h', 0)),
+            'unique_bettors': market.get('uniqueBettorCount'),
+        },
+    }
 
 
 def _load_ai_timeout_cooldown() -> dict:
@@ -587,6 +689,9 @@ class MarketResearcher:
                     for p in self.trader.positions.get(market_id, [])
                 )
 
+                # V2 Phase 2.1: classify by term × resolvability
+                classification = classify_position(market)
+
                 recommendation = {
                     'market_id': market_id,
                     'question': question,
@@ -597,6 +702,12 @@ class MarketResearcher:
                     'liquidity': liquidity,
                     'unique_bettors': market.get('uniqueBettorCount') or 0,
                     'last_bet_time_ms': market.get('lastBetTime'),
+                    # V2 Phase 2.1 classification
+                    'close_time_ms':  classification['close_time_ms'],
+                    'days_to_close':  classification['days_to_close'],
+                    'term':           classification['term'],
+                    'resolvability':  classification['resolvability'],
+                    'position_class': classification['position_class'],
                     'recommendation': overall_rec,
                     'confidence': round(confidence, 2),
                     'strategies': [s['strategy'] for s in active_signals] + (['thin_market'] if thin_market_fired else []),
@@ -730,6 +841,25 @@ class MarketResearcher:
                 above_floor = [r for r in above_floor if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
                 below_floor  = [r for r in below_floor  if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
 
+            # Skip AI for markets where we already have an open position — we can't
+            # trade them again anyway (auto_trader.py rejects with existing_open).
+            # Burning an AI slot on a held market means another market that COULD
+            # be traded never gets analyzed. This is a direct waste-of-AI fix.
+            #
+            # Approved (held) vs Declined:
+            # - Approved: existing_position=True (we already own it). Filter here.
+            # - Declined (stat rejection): below_floor already drops these; no need.
+            # - Declined (AI skip): Phase 1.3 AI cache remembers for 24h; no need.
+            n_held = sum(
+                1 for r in (above_floor + below_floor)
+                if r.get('existing_position')
+            )
+            counters["ai_skipped_held"] = n_held
+            if n_held:
+                print(f"  AI filter: skipping {n_held} market(s) we already hold")
+                above_floor = [r for r in above_floor if not r.get('existing_position')]
+                below_floor = [r for r in below_floor if not r.get('existing_position')]
+
             recent_top = (above_floor + below_floor)[:_AI_CANDIDATE_COUNT]
             top_candidate_ids = {r['market_id'] for r in recent_top}
             candidate_markets = [m for m in markets if m.get('id') in top_candidate_ids]
@@ -753,9 +883,29 @@ class MarketResearcher:
                 )
 
             if candidate_markets:
-                print(f"  Running AI analysis on top {len(candidate_markets)} candidates...")
-                counters["ai_analyzed"] = len(candidate_markets)
-                ai_results = {}
+                # ── AI analysis cache check (Phase 1.3 of V2) ────────────────
+                # Split candidates into "cache hit" (reuse prior AI result) and
+                # "fresh" (need new AI call). Cache hits don't burn AI bandwidth
+                # and don't count against the per-cycle max_markets limit.
+                ai_cache = _load_ai_analysis_cache()
+                cache_hit_results = {}
+                fresh_candidates = []
+                for mkt in candidate_markets:
+                    mid = mkt.get('id')
+                    cached = ai_cache.get(mid)
+                    if cached and _is_cache_valid(cached, mkt):
+                        cache_hit_results[mid] = cached['result']
+                    else:
+                        fresh_candidates.append(mkt)
+
+                if cache_hit_results:
+                    print(f"  AI cache: {len(cache_hit_results)} hit(s), {len(fresh_candidates)} need fresh analysis")
+
+                print(f"  Running AI analysis on {len(fresh_candidates)} fresh candidate(s) (skipping {len(cache_hit_results)} cached)...")
+                counters["ai_analyzed"] = len(candidate_markets)  # count total analyzed (incl. cache hits)
+                counters.setdefault("ai_cache_hits", 0)
+                counters["ai_cache_hits"] = len(cache_hit_results)
+                ai_results = dict(cache_hit_results)  # start with cache hits
 
                 # Snapshot pre-AI confidence scores so we can restore them if the AI
                 # pass fails partway through. Without this, a mid-loop timeout would
@@ -772,13 +922,24 @@ class MarketResearcher:
                     # undocumented internal behaviour.
                     # per_market_timeout=90 prevents a hung Ollama call from stalling the
                     # hourly cron job indefinitely.
-                    ai_results = batch_analyze(
-                        candidate_markets,
+                    fresh_ai_results = batch_analyze(
+                        fresh_candidates,
                         max_markets=3,
                         delay=2,
                         per_market_timeout=90,
                         news_by_id=news_by_market_id,
-                    )
+                    ) if fresh_candidates else {}
+                    ai_results.update(fresh_ai_results)
+
+                    # Write successful fresh results back to cache for future hourly runs.
+                    # Skip caching cache-hit results — they're already in the cache.
+                    # Skip caching None/failed results — only cache positive outcomes.
+                    for mkt in fresh_candidates:
+                        mid = mkt.get('id')
+                        fresh = fresh_ai_results.get(mid)
+                        if fresh is not None:
+                            _cache_ai_result(ai_cache, mid, mkt, fresh)
+                    _save_ai_analysis_cache(ai_cache)
                     # Warn if any result came from the paid API fallback
                     for r in ai_results.values():
                         if r.get('source') == 'deepseek_api':
@@ -786,45 +947,61 @@ class MarketResearcher:
                             break
                     # Record per-market failures: candidate got no result at all (not SKIP,
                     # which is a valid response — only missing entries indicate a timeout).
-                    missing_ai = [mid for mid in top_candidate_ids if ai_results.get(mid) is None]
+                    # Only count fresh candidates that failed — cache hits never fail here.
+                    fresh_ids = {m.get('id') for m in fresh_candidates}
+                    missing_ai = [mid for mid in fresh_ids if fresh_ai_results.get(mid) is None]
                     counters["ai_no_result"] += len(missing_ai)
                     if missing_ai:
-                        print(f"  AI no-result for {len(missing_ai)} candidate(s) — recording for cooldown")
+                        print(f"  AI no-result for {len(missing_ai)} fresh candidate(s) — recording for cooldown")
                         _record_ai_timeout(missing_ai, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
                 except TimeoutError as e:
-                    print(f"  Warning: AI analysis timed out ({e}), continuing without AI scores")
-                    # Restore pre-AI confidence scores to prevent partially-blended
-                    # confidences from being written to schema_version=1 output.
+                    # Fresh AI batch timed out. Cache hits are independent of this batch —
+                    # they were looked up from disk BEFORE the batch call — so they must
+                    # NOT be discarded. Only fresh candidates timed out; only they should
+                    # be recorded in cooldown.
+                    print(f"  Warning: AI fresh analysis timed out ({e}); preserving {len(cache_hit_results)} cache hit(s)")
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
-                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    fresh_ids_only = [m.get('id') for m in fresh_candidates if m.get('id')]
+                    if fresh_ids_only:
+                        _record_ai_timeout(fresh_ids_only, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
-                    ai_results = {}
+                    counters["ai_no_result"] += len(fresh_ids_only)
+                    ai_results = dict(cache_hit_results)  # preserve cache hits
                 except Exception as e:
-                    print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
-                    # Restore pre-AI confidence scores to prevent partially-blended
-                    # confidences from being written to schema_version=1 output.
+                    print(f"  Warning: AI fresh analysis failed ({e}); preserving {len(cache_hit_results)} cache hit(s)")
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
-                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    fresh_ids_only = [m.get('id') for m in fresh_candidates if m.get('id')]
+                    if fresh_ids_only:
+                        _record_ai_timeout(fresh_ids_only, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
-                    ai_results = {}
+                    counters["ai_no_result"] += len(fresh_ids_only)
+                    ai_results = dict(cache_hit_results)  # preserve cache hits
 
                 for rec in recommendations:
                     ai = ai_results.get(rec['market_id'])
                     is_ai_candidate = rec['market_id'] in top_candidate_ids
 
                     # ai_was_candidate: was this market sent to AI at all?
-                    # ai_returned_skip: AI ran but said SKIP (vs not in top 5)
+                    # ai_status: explicit state of AI analysis. One of:
+                    #   'not_run'    — market wasn't in the top-3 AI candidates
+                    #   'no_result'  — AI invoked but timeout / parse error / no response
+                    #   'skip'       — AI ran and explicitly said "no edge here"
+                    #   'agree'      — AI recommendation matches stat recommendation
+                    #   'disagree'   — AI disagrees with stat
+                    # ai_returned_skip: DEPRECATED legacy field. Kept for backward
+                    # compatibility with auto_trader.py until both sides move to ai_status.
                     rec['ai_was_candidate'] = is_ai_candidate
-                    rec['ai_returned_skip'] = False
 
                     if not is_ai_candidate:
                         # Market was never sent to AI (not in top-3) — use None (not 'SKIP')
                         # to avoid conflating "AI considered and skipped" with "never analyzed".
+                        rec['ai_status'] = 'not_run'
+                        rec['ai_returned_skip'] = False
                         rec['ai_recommendation'] = None
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
@@ -835,23 +1012,29 @@ class MarketResearcher:
                     if not ai:
                         # AI was invoked but returned no usable result (timeout,
                         # parse error, etc.). Already counted in ai_no_result above.
-                        # Do NOT also count as ai_skip — that's for explicit SKIPs.
-                        rec['ai_recommendation'] = 'SKIP'
+                        # This is NOT a skip — we had no signal either way.
+                        # Previous versions wrote ai_recommendation='SKIP' here,
+                        # causing the trader to veto. Now we mark ai_status='no_result'
+                        # and leave ai_recommendation=None, so the trader falls back
+                        # to stat-only trading for this market.
+                        rec['ai_status'] = 'no_result'
+                        rec['ai_returned_skip'] = False  # was True previously — caused veto
+                        rec['ai_recommendation'] = None
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
-                        rec['ai_returned_skip'] = True
                         # No counter increment here — ai_no_result already counted it
                         continue
 
                     if ai['recommendation'] == 'SKIP':
                         # AI explicitly returned SKIP — it analyzed the market and
-                        # decided there's no edge. This is a real signal, not an error.
+                        # decided there's no edge. This IS a real signal — veto the trade.
+                        rec['ai_status'] = 'skip'
+                        rec['ai_returned_skip'] = True  # legacy flag kept for trader compat
                         rec['ai_recommendation'] = 'SKIP'
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
-                        rec['ai_returned_skip'] = True
                         counters["ai_skip"] += 1
                         continue
 
@@ -870,6 +1053,8 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         counters["ai_agree"] += 1
+                        rec['ai_status'] = 'agree'
+                        rec['ai_returned_skip'] = False
                         # Only blend upward on agreement: a low-confidence AI agreement
                         # must not reduce a strong statistical signal. Take the maximum of
                         # stat_conf and the blended value so the stat signal is always the
@@ -886,6 +1071,8 @@ class MarketResearcher:
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
                         counters["ai_disagree"] += 1
+                        rec['ai_status'] = 'disagree'
+                        rec['ai_returned_skip'] = False
                         # AI disagrees — scale the confidence multiplier by AI confidence.
                         # Formula: confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
                         #   ai_conf=1.0 → confidence_multiplier=0.40 (AI certain → hardest reduction, keeps 40% of stat score)
@@ -894,7 +1081,10 @@ class MarketResearcher:
                         ai_conf = max(0.0, min(1.0, ai['confidence']))
                         confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
                         rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
-                    # if ai returned something unexpected, leave confidence unchanged
+                    else:
+                        # AI returned something unexpected — treat as no_result
+                        rec['ai_status'] = 'no_result'
+                        rec['ai_returned_skip'] = False
 
             # Compute two EV figures for every recommendation now that
             # ai_estimated_probability is set:

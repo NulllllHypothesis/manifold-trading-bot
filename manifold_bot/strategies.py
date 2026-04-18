@@ -288,6 +288,201 @@ def _infer_market_category(question: str) -> str:
     return 'other'
 
 
+# ── Position classification (V2 Phase 2.1) ──────────────────────────────────
+# Every market gets labelled on two dimensions so the trader can allocate
+# slots intelligently:
+#
+#   1. term          — how soon will it resolve? (short-term / medium / long)
+#   2. resolvability — HOW LIKELY is it to actually resolve? (high / medium / low)
+#
+# Short-term + high-resolvability markets (sports match tomorrow, scheduled
+# election) feed the learning loop fast. Long-term + low-resolvability markets
+# (creator-dependent abstract questions) can sit unresolved for months.
+#
+# The combined (term, resolvability) pair maps to a `position_class` which is
+# what the trader uses for cap enforcement. Caps favor short+reliable markets.
+
+# Term thresholds in days (measured against closeTime)
+_SHORT_TERM_DAYS  = 7     # ≤7 days away
+_MEDIUM_TERM_DAYS = 30    # 8-30 days away
+# (>30 days → long-term)
+
+# Resolvability heuristics — category-based baseline. These are first-pass
+# signals; can be refined later with creator-activity + past-resolution-rate data.
+_RESOLVABLE_HIGH_CATEGORIES = frozenset({
+    'sports',       # external score data, automatic resolution source
+    'economics',    # scheduled releases (CPI, Fed announcements)
+})
+_RESOLVABLE_MEDIUM_CATEGORIES = frozenset({
+    'politics',     # elections have deadlines, but creator still has to click resolve
+    'ai_tech',      # dated product launches are usually resolved
+    'entertainment',  # scheduled releases (movies, awards)
+    'gaming',       # scheduled releases
+    'science',      # scheduled missions, publication dates
+    'business',     # earnings dates, IPO dates
+    'crypto',       # price-dependent; creator dependent for non-price markets
+})
+# Anything in 'other' or not in the maps → low resolvability
+
+# Question text patterns that signal "when will X eventually happen" framing —
+# no deadline, open-ended, high abandonment risk.
+_LOW_RESOLVABILITY_PATTERNS = (
+    ' ever ',            # "Will humans ever colonize Mars?"
+    'ever happen',
+    'at some point',
+    'eventually',
+    ' by 2030',
+    ' by 2035',
+    ' by 2040',
+    ' by 2050',
+)
+
+
+def _classify_term(close_time_ms: Optional[int], now_ms: Optional[float] = None) -> str:
+    """
+    Classify a market's term from closeTime (unix ms).
+
+    Returns one of: 'short' | 'medium' | 'long' | 'unknown'.
+
+    'unknown' = no closeTime / invalid closeTime. Treated like 'long' for
+    slot policy (see _derive_position_class) but kept distinct in reporting.
+    """
+    if not close_time_ms:
+        return 'unknown'
+    if not isinstance(close_time_ms, (int, float)):
+        return 'unknown'
+    now = now_ms if now_ms is not None else time.time() * 1000
+    days_to_close = (close_time_ms - now) / 86_400_000
+    if days_to_close <= 0:
+        # Already past closeTime — just awaiting creator resolution. 'short'
+        # because nothing is going to make the wait longer from here.
+        return 'short'
+    if days_to_close <= _SHORT_TERM_DAYS:
+        return 'short'
+    if days_to_close <= _MEDIUM_TERM_DAYS:
+        return 'medium'
+    return 'long'
+
+
+def _classify_resolvability(market: Dict) -> str:
+    """
+    Return 'high' | 'medium' | 'low' for how likely the market is to resolve
+    in a timely, trustworthy way.
+
+    Heuristics (first-pass, refinable):
+    - Category baseline: sports/economics → high; politics/tech/etc → medium;
+      other / unknown → low
+    - Question patterns: 'will X ever happen' / 'by 2050' → low
+    - Liquidity + bettor count as community-attention proxy: very low → demote
+    """
+    question = market.get('question', '') or ''
+    category = market.get('category') or _infer_market_category(question)
+    q_lower = question.lower()
+
+    # Open-ended question patterns override everything else
+    if any(pat in q_lower for pat in _LOW_RESOLVABILITY_PATTERNS):
+        return 'low'
+
+    # Category-based baseline
+    if category in _RESOLVABLE_HIGH_CATEGORIES:
+        baseline = 'high'
+    elif category in _RESOLVABLE_MEDIUM_CATEGORIES:
+        baseline = 'medium'
+    else:
+        baseline = 'low'
+
+    # Demote on weak community-attention signals
+    liquidity = market.get('totalLiquidity', 0) or market.get('liquidity', 0) or 0
+    bettors = market.get('uniqueBettorCount', 0) or 0
+
+    if baseline == 'high' and (liquidity < 300 or bettors < 5):
+        baseline = 'medium'
+    if baseline == 'medium' and (liquidity < 200 or bettors < 3):
+        baseline = 'low'
+
+    return baseline
+
+
+def _derive_position_class(term: str, resolvability: str) -> str:
+    """
+    Map (term, resolvability) to a position_class used for slot-cap enforcement.
+
+    Three classes for a 10-slot book. Four was too fine-grained:
+    long_reliable vs long_risky splits capital 1-1 and makes single
+    misclassifications costly. `resolvability` is still stored as a label
+    on every position for dashboard / sorting / soft ranking — it just
+    doesn't drive a separate hard cap.
+
+    Class values and default caps (enforced in auto_trader._POSITION_CLASS_CAPS):
+      'short'             — 5 slots. Any short-term market.
+      'medium'            — 3 slots. Any medium-term market.
+      'long_or_uncertain' — 2 slots. Long-term (any resolvability) or
+                            unknown-term markets. Tightest cap because
+                            these tie up capital longest and carry the
+                            highest abandonment risk.
+
+    Total: 5 + 3 + 2 = 10.
+    """
+    del resolvability  # intentionally unused; stored separately as a soft label
+    if term == 'short':
+        return 'short'
+    if term == 'medium':
+        return 'medium'
+    # long + any resolvability, or unknown term → single conservative bucket
+    return 'long_or_uncertain'
+
+
+def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
+    """
+    Label a market with everything the trader and dashboard need for slot
+    accounting.
+
+    Returns a dict with these fields:
+      term          — 'short' | 'medium' | 'long' | 'unknown'
+                      How soon the market is expected to resolve.
+      resolvability — 'high'  | 'medium' | 'low'
+                      How likely the market is to actually get resolved.
+                      Persisted as a soft label (for dashboard, sorting,
+                      ranking); does NOT drive a separate hard cap.
+      position_class — 'short' | 'medium' | 'long_or_uncertain'
+                       The 3-bucket class used for slot-cap enforcement.
+                       Currently derived from term only; resolvability is
+                       ignored at this layer to keep the enforcement
+                       surface small for a 10-slot book.
+      close_time_ms — int | None   Unix-ms closeTime from the Manifold API.
+      days_to_close — float | None Days from now until closeTime (negative if
+                                   already past close).
+
+    Used by:
+    - auto_research.py to tag every recommendation
+    - auto_trader.py to enforce per-class slot caps
+    - paper_trader.py to persist the labels on the position record
+    - dashboard to show classification per position
+
+    Pure function — does not make any trading decision. Just labels the market.
+    """
+    close_time_ms = market.get('closeTime')
+    if close_time_ms and not isinstance(close_time_ms, (int, float)):
+        close_time_ms = None
+
+    now = now_ms if now_ms is not None else time.time() * 1000
+    days_to_close: Optional[float] = None
+    if close_time_ms:
+        days_to_close = (close_time_ms - now) / 86_400_000
+
+    term           = _classify_term(close_time_ms, now_ms=now)
+    resolvability  = _classify_resolvability(market)
+    position_class = _derive_position_class(term, resolvability)
+
+    return {
+        'term':           term,
+        'resolvability':  resolvability,
+        'position_class': position_class,
+        'close_time_ms':  int(close_time_ms) if close_time_ms else None,
+        'days_to_close':  round(days_to_close, 2) if days_to_close is not None else None,
+    }
+
+
 class TradingStrategies:
     """Collection of trading strategies."""
 

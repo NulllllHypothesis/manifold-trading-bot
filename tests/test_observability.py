@@ -50,7 +50,7 @@ class TestResearchCountersShape(unittest.TestCase):
             "skipped_resolved", "skipped_low_liquidity", "skipped_stale", "skipped_noise",
             "raw_fires", "dedup_winners",
             "thin_market_confirmations", "no_active_signals", "tied_votes_dropped",
-            "ai_eligible", "ai_cooled_down", "ai_analyzed",
+            "ai_eligible", "ai_cooled_down", "ai_skipped_held", "ai_analyzed",
             "ai_agree", "ai_disagree", "ai_skip", "ai_no_result",
             "final_recommendations", "final_by_strategy_mix", "final_by_category",
         }
@@ -169,8 +169,8 @@ class TestTraderCountersShape(unittest.TestCase):
         """Every gate in _trade_rejection_reason() must have a counter slot."""
         expected = {
             "ai_veto", "low_confidence", "existing_open", "max_positions",
-            "category_cap", "liquidity", "kelly_no_edge", "size_too_small",
-            "market_unverifiable",
+            "category_cap", "position_class_full", "liquidity", "kelly_no_edge",
+            "size_too_small", "market_unverifiable",
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():
@@ -223,6 +223,103 @@ class TestTradeRejectionReason(unittest.TestCase):
             self._make_rec(ai_returned_skip=True, ai_recommendation="SKIP"),
         )
         self.assertEqual(reason, "ai_veto")
+
+    def test_ai_status_skip_vetoes(self):
+        """New ai_status='skip' is the authoritative veto signal."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(ai_status="skip", ai_recommendation="SKIP", ai_returned_skip=True),
+        )
+        self.assertEqual(reason, "ai_veto")
+
+    def test_ai_status_no_result_does_not_veto(self):
+        """AI failure (no_result) must NOT veto — falls back to stat-only trading."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                ai_status="no_result",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_ai_status_not_run_does_not_veto(self):
+        """Markets not sent to AI should trade on stat alone."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                ai_status="not_run",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_ai_status_agree_does_not_veto(self):
+        """AI agreement should let trade proceed."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(ai_status="agree", ai_recommendation="YES"),
+        )
+        self.assertIsNone(reason)
+
+    def test_legacy_real_skip_record_still_vetoes(self):
+        """Real legacy skip shape: ai_recommendation='SKIP', ai_returned_skip=True,
+        ai_confidence=0.0, ai_reasoning='', ai_source=None. Must still veto."""
+        trader = self._make_trader_with_empty_book()
+        rec = self._make_rec(
+            ai_recommendation="SKIP",
+            ai_returned_skip=True,
+            ai_confidence=0.0,
+            ai_reasoning="",
+            ai_source=None,
+        )
+        rec.pop("ai_status", None)
+        reason = trader._trade_rejection_reason("mkt_test", rec)
+        self.assertEqual(reason, "ai_veto")
+
+    def test_legacy_no_result_record_also_vetoes_for_safety(self):
+        """Real legacy no_result shape is IDENTICAL to real legacy skip shape:
+        ai_recommendation='SKIP', ai_returned_skip=True, ai_confidence=0.0,
+        ai_reasoning='', ai_source=None. They are indistinguishable in stored
+        market_research.json files.
+
+        We default to the SAFE choice: veto both. The next research run will
+        rewrite the file with explicit ai_status fields, fixing future cycles.
+        This test locks in the conservative legacy behavior."""
+        trader = self._make_trader_with_empty_book()
+        # Same shape as above — that's the whole point of the bug
+        rec = self._make_rec(
+            ai_recommendation="SKIP",
+            ai_returned_skip=True,
+            ai_confidence=0.0,
+            ai_reasoning="",
+            ai_source=None,
+        )
+        rec.pop("ai_status", None)
+        reason = trader._trade_rejection_reason("mkt_test", rec)
+        # Can't distinguish from real skip — veto is the safe default
+        self.assertEqual(reason, "ai_veto")
+
+    def test_new_no_result_record_does_not_veto(self):
+        """After this PR, new producer writes ai_status='no_result' + ai_recommendation=None
+        for AI failures. Trader must NOT veto these — they fall through to stat-only."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                ai_status="no_result",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+                ai_confidence=0.0,
+            ),
+        )
+        self.assertIsNone(reason)
 
     def test_low_confidence_reason(self):
         trader = self._make_trader_with_empty_book()
@@ -577,6 +674,234 @@ class TestAnalyzeMarketsZeroCandidatePath(unittest.TestCase):
                              "zero-candidate path must still write schema_version=2")
         finally:
             os.unlink(tmp.name)
+
+
+class TestStatDerivedProbability(unittest.TestCase):
+    """
+    Stat-derived probability fallback for estimated_ev.
+
+    Used when AI doesn't provide ai_estimated_probability — ensures EV is
+    computed on every trade, not just AI-analyzed ones. Otherwise the EV
+    calibration feedback loop has no data to work with.
+    """
+
+    def test_yes_direction_maps_confidence_to_p_yes(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.70, recommendation_direction='YES', current_prob=0.50)
+        self.assertEqual(p, 0.70)
+
+    def test_no_direction_maps_confidence_to_one_minus_p(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.70, recommendation_direction='NO', current_prob=0.50)
+        self.assertAlmostEqual(p, 0.30, places=6)  # 1 - 0.70
+
+    def test_extreme_confidence_clamped(self):
+        from automation.auto_trader import _stat_derived_probability
+        # confidence > 0.99 would produce p > 0.99 and then 1-p = 0 for NO
+        # — but confidence is always < 1 so we clamp internally
+        p = _stat_derived_probability(confidence=0.999, recommendation_direction='YES', current_prob=0.5)
+        self.assertLessEqual(p, 0.99)
+        self.assertGreater(p, 0.95)
+
+    def test_low_confidence_still_produces_estimate(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.55, recommendation_direction='YES', current_prob=0.50)
+        self.assertEqual(p, 0.55)
+
+    def test_invalid_confidence_returns_none(self):
+        from automation.auto_trader import _stat_derived_probability
+        self.assertIsNone(_stat_derived_probability(confidence=0.0, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=1.0, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=None, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence="0.65", recommendation_direction='YES', current_prob=0.5))
+
+    def test_invalid_direction_returns_none(self):
+        from automation.auto_trader import _stat_derived_probability
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='SKIP', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction=None, current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='', current_prob=0.5))
+
+
+class TestAiAnalysisCache(unittest.TestCase):
+    """
+    AI analyze-once cache (Phase 1.3): reuse prior AI results when the market
+    state hasn't changed meaningfully. Frees AI bandwidth for NEW markets
+    instead of re-analyzing the same top-3 every hour.
+    """
+
+    def _market(self, market_id: str, prob: float,
+                question: str = "Will GPT-5 be released this year?") -> dict:
+        """Small realistic market fixture that clears the normal research filters."""
+        import time
+        now_ms = time.time() * 1000
+        return {
+            "id": market_id,
+            "question": question,
+            "probability": prob,
+            "volume24Hours": 50.0,
+            "uniqueBettorCount": 10,
+            "totalLiquidity": 500,
+            "isResolved": False,
+            "lastBetTime": now_ms - 3_600_000,
+            "closeTime": now_ms + 7 * 86_400_000,
+        }
+
+    def test_valid_cache_entry_when_state_unchanged(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES', 'confidence': 0.75},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        current_market = {'probability': 0.61, 'volume24Hours': 105}
+        self.assertTrue(_is_cache_valid(entry, current_market))
+
+    def test_invalidates_on_large_prob_move(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 10pp probability move → invalidate
+        current_market = {'probability': 0.70, 'volume24Hours': 105}
+        self.assertFalse(_is_cache_valid(entry, current_market))
+
+    def test_invalidates_on_double_volume(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 2x volume → invalidate
+        current_market = {'probability': 0.61, 'volume24Hours': 200}
+        self.assertFalse(_is_cache_valid(entry, current_market))
+
+    def test_small_prob_move_stays_valid(self):
+        from automation.auto_research import _is_cache_valid
+        entry = {
+            'result': {'recommendation': 'YES'},
+            'analyzed_at': 1234567890,
+            'market_state_at_analysis': {'probability': 0.60, 'volume24h': 100},
+        }
+        # 3pp move → still valid (threshold is 5pp)
+        current_market = {'probability': 0.63, 'volume24Hours': 110}
+        self.assertTrue(_is_cache_valid(entry, current_market))
+
+    def test_malformed_entry_invalidates(self):
+        from automation.auto_research import _is_cache_valid
+        self.assertFalse(_is_cache_valid(None, {'probability': 0.5}))
+        self.assertFalse(_is_cache_valid("not a dict", {'probability': 0.5}))
+        self.assertFalse(_is_cache_valid({'result': {}}, {'probability': 0.5}))  # missing state
+
+    def test_cache_ai_result_stores_state_snapshot(self):
+        from automation.auto_research import _cache_ai_result
+        cache = {}
+        market = {'probability': 0.65, 'volume24Hours': 150, 'uniqueBettorCount': 20}
+        result = {'recommendation': 'YES', 'confidence': 0.80}
+        _cache_ai_result(cache, 'mkt_xyz', market, result)
+
+        self.assertIn('mkt_xyz', cache)
+        self.assertEqual(cache['mkt_xyz']['result'], result)
+        self.assertEqual(cache['mkt_xyz']['market_state_at_analysis']['probability'], 0.65)
+        self.assertEqual(cache['mkt_xyz']['market_state_at_analysis']['volume24h'], 150)
+        self.assertIsInstance(cache['mkt_xyz']['analyzed_at'], float)
+
+    def test_load_cache_prunes_expired_entries(self):
+        from automation.auto_research import _load_ai_analysis_cache, _AI_CACHE_TTL_HOURS
+        import tempfile
+        import json as _json
+        import time as _time
+
+        now = _time.time()
+        cache_contents = {
+            'fresh': {
+                'result': {'recommendation': 'YES'},
+                'analyzed_at': now - 3600,  # 1h ago
+                'market_state_at_analysis': {'probability': 0.6, 'volume24h': 100},
+            },
+            'expired': {
+                'result': {'recommendation': 'NO'},
+                'analyzed_at': now - (_AI_CACHE_TTL_HOURS + 1) * 3600,  # beyond TTL
+                'market_state_at_analysis': {'probability': 0.4, 'volume24h': 50},
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+            _json.dump(cache_contents, tmp)
+            tmp_path = tmp.name
+
+        try:
+            with patch('automation.auto_research._AI_ANALYSIS_CACHE_PATH', tmp_path):
+                loaded = _load_ai_analysis_cache()
+            self.assertIn('fresh', loaded)
+            self.assertNotIn('expired', loaded)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_cache_hits_survive_fresh_batch_exception(self):
+        """
+        End-to-end regression test for the mixed cache/fresh failure path.
+
+        If one fresh AI batch raises TimeoutError, cached AI results must still
+        be applied to their markets, and only the fresh candidate IDs should be
+        recorded in cooldown.
+        """
+        from automation.auto_research import MarketResearcher
+
+        markets = [
+            self._market("mkt_cached", 0.80),
+            self._market("mkt_fresh_1", 0.82),
+            self._market("mkt_fresh_2", 0.85),
+        ]
+        cached_entry = {
+            "result": {"recommendation": "SKIP"},
+            "analyzed_at": 1234567890.0,
+            "market_state_at_analysis": {"probability": 0.80, "volume24h": 50.0},
+        }
+
+        with patch("automation.auto_research.PaperTrader") as MockTrader, \
+             patch("automation.auto_research.api_client") as mock_api, \
+             patch("automation.auto_research._write_market_snapshots"), \
+             patch("automation.auto_research._load_strategy_weights", return_value=({}, {})), \
+             patch("automation.auto_research.NEWS_API_KEY", None), \
+             patch("automation.auto_research._load_ai_timeout_cooldown", return_value={}), \
+             patch("automation.auto_research._save_ai_timeout_cooldown"), \
+             patch("automation.auto_research._record_ai_timeout") as mock_record_timeout, \
+             patch("automation.auto_research._load_ai_analysis_cache", return_value={"mkt_cached": cached_entry}), \
+             patch("automation.auto_research.batch_analyze", side_effect=TimeoutError("boom")):
+
+            mock_api.get_markets.return_value = markets
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            MockTrader.return_value = mock_instance
+
+            researcher = MarketResearcher()
+            recs = researcher.analyze_markets(limit=10)
+
+        self.assertGreaterEqual(len(recs), 3, "Expected recommendations for all three test markets")
+
+        by_market = {rec["market_id"]: rec for rec in recs}
+        cached = by_market["mkt_cached"]
+        fresh_1 = by_market["mkt_fresh_1"]
+        fresh_2 = by_market["mkt_fresh_2"]
+
+        # Cached AI decision survives the fresh-batch timeout.
+        self.assertTrue(cached["ai_was_candidate"])
+        self.assertEqual(cached["ai_status"], "skip")
+        self.assertEqual(cached["ai_recommendation"], "SKIP")
+        self.assertTrue(cached["ai_returned_skip"])
+
+        # Fresh candidates fall back to explicit no_result.
+        self.assertEqual(fresh_1["ai_status"], "no_result")
+        self.assertEqual(fresh_2["ai_status"], "no_result")
+
+        # Cooldown should only be recorded for the fresh IDs, never the cache hit.
+        mock_record_timeout.assert_called_once()
+        timed_out_ids = mock_record_timeout.call_args.args[0]
+        self.assertEqual(set(timed_out_ids), {"mkt_fresh_1", "mkt_fresh_2"})
+        self.assertNotIn("mkt_cached", timed_out_ids)
 
 
 if __name__ == "__main__":

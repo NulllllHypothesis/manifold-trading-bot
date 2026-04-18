@@ -48,11 +48,15 @@ V2 cuts all three loops. It also adds two new capabilities the dashboard has bee
 
 ---
 
-## Phase 1 — Unblock the Pipeline (Week 1)
+## Phase 1 — Unblock the Pipeline (Week 1) — **✅ SHIPPED (PR #12)**
+
+**Status**: All three core fixes merged into `feature/v2-ai-smarter`, along with a Phase 1 extension (skip AI on held markets) and all of Phase 2.1 including 6 rounds of reviewer-driven fixes (persistence, rename, 3-class collapse, obsolete-value migration on positions, obsolete-value migration on recommendations). **563 tests pass** (was 513, +50 net). Phase 1.4 (legacy backfill) deferred to Phase 2 batch since it depends on stale detection infrastructure.
+
+All V2 work stays on **one branch, one PR** (`feature/v2-ai-smarter` → PR #12) per user preference. Currently at commit `875f88f`.
 
 The pipeline is built correctly. Specific bugs and wrong defaults are blocking it. Fix those first.
 
-### 1.1 — Separate AI states (`ai_status` field)
+### 1.1 — Separate AI states (`ai_status` field) ✅
 
 **Problem**: When AI times out, `auto_research.py` writes `ai_recommendation = 'SKIP'` and `ai_returned_skip = True`. The trader then vetoes identically to a real SKIP. AI failure becomes AI rejection.
 
@@ -74,7 +78,7 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-### 1.2 — Stat-derived probability fallback for EV
+### 1.2 — Stat-derived probability fallback for EV ✅
 
 **Problem**: `estimated_ev = P(win) × payout - stake` requires a probability estimate. Currently only AI provides one. AI rarely produces one (0% of current research), so `estimated_ev` is null on every trade record. The entire EV calibration loop is dark.
 
@@ -94,7 +98,7 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-### 1.3 — Analyze-once AI cache
+### 1.3 — Analyze-once AI cache ✅
 
 **Problem**: The same top-3 markets are re-picked every hour. They all fail AI. After 4 hours, they hit the cooldown. But by then 10+ other markets are also cycling into the failed set. Result: 7-10 out of 10-11 eligible markets are cooled down at any given time.
 
@@ -149,61 +153,71 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-## Phase 2 — Active Portfolio Management (Week 2)
+## Phase 2 — Active Portfolio Management (Week 2) — **partially shipped**
+
+**Status**:
+- § 2.1 Position classification → ✅ SHIPPED (see below)
+- § 2.2 Active repricing → next
+- § 2.3 Early close + swap at real price → pending
+- § 2.4 STRANDED state → pending
+- § 2.5 Dashboard Position Management page → pending
 
 The bot currently operates like a vault: trade goes in, nothing comes out until Manifold resolves it. V2 turns this into a managed book.
 
-### 2.1 — Position classification: horizon × resolution_reliability
+### 2.1 — Position classification: term × resolvability ✅ SHIPPED
 
-**The idea**: long-term alone is not always bad. A market with a clear official resolution source (sports league, election commission, regulated agency) can be long-term but still safe. The dangerous category is creator-abandoned markets that stay unresolved forever. So we need **two dimensions**.
+**Final shape** (after rename + reviewer-driven simplification):
 
-**Dimension 1: horizon** (time to expected resolution)
+Three labels on every recommendation and position. Only one drives hard caps; the other two are soft labels for dashboard, sorting, and future ranking.
 
-| Horizon | Definition |
-|---------|-----------|
+**term** (how soon the market resolves — primary from Manifold `closeTime`):
+| term | definition |
+|------|-----------|
 | `short` | closeTime ≤ 7 days away |
-| `medium` | closeTime 8-30 days away |
-| `long` | closeTime >30 days away |
+| `medium` | 8-30 days away |
+| `long` | >30 days away |
+| `unknown` | no closeTime / invalid |
 
-**Dimension 2: resolution_reliability** (will this market actually resolve?)
+**resolvability** (how likely the market is to actually resolve — soft label):
+| resolvability | category baseline |
+|---------------|-------------------|
+| `high` | sports, economics |
+| `medium` | politics, ai_tech, entertainment, gaming, science, business, crypto |
+| `low` | other; "will X ever happen" question patterns; demoted for low liquidity/bettors |
 
-| Reliability | Signals |
-|-------------|---------|
-| `high` | Official external source (sports score, election result, regulator announcement), active creator (updated within 7 days), high liquidity |
-| `medium` | Dated question with external reference but unclear resolution source, moderate creator activity |
-| `low` | Creator-dependent resolution with no external anchor, inactive creator (>30d), or question with ambiguous resolution criteria |
+**position_class** (the ONLY cap-enforcement bucket — derived from term):
 
-**Slot policy** (favors short-fuse, high-reliability for fast learning):
+| class | cap | who lands here |
+|-------|-----|----------------|
+| `short` | 5 slots | any short-term market |
+| `medium` | 3 slots | any medium-term market |
+| `long_or_uncertain` | 2 slots | any long-term or unknown-term market |
+| **Total** | **10** | |
 
-| Bucket | Cap |
-|--------|-----|
-| `short` | 5 slots |
-| `medium` | 3 slots |
-| `long` + `high` reliability | 1 slot |
-| `flexible` (any horizon/reliability, overflow) | 1 slot |
-| `low_reliability` | 0-1 slot max (prefer 0) |
-| **Total** | 10 slots |
+**Why 3 classes, not 4**: a 10-slot book is small. Splitting long-term into `long_reliable` vs `long_risky` (1 slot each) made single misclassifications costly. Collapsing them into `long_or_uncertain` (2 slots) keeps almost all the signal with less fragility. `resolvability` is still persisted for soft ranking — just doesn't drive a separate hard cap.
 
-**Why this order**: the bot learns from resolved outcomes. Short-term high-reliability markets produce outcomes in days. Long-term low-reliability markets may never produce outcomes. Biasing the book toward fast, reliable resolution maximizes learning rate.
+**Why this favors learning**: short-term high-resolvability markets produce outcomes in days. The bot learns from resolved trades, so biasing toward fast-resolving markets maximizes learning rate per slot-day.
 
-**Detection:**
-- **Horizon** — primary from `closeTime` field in Manifold API response
-- **Reliability** — composite signal:
-  - Category + keyword heuristics (sports/elections/earnings → high; "will X ever happen" → low)
-  - Creator's `lastActive` timestamp (available from `/v0/user/{creatorId}`)
-  - Resolution rate of creator's past markets (fetch last N markets, count `isResolved`)
-  - Liquidity as a proxy for community attention (more bettors = more likely someone nags creator to resolve)
+**Honest legacy handling**: positions with NO `position_class`, NO `close_time_ms`, NO `question`, NO `category` are skipped from class-cap accounting. They still count against `MAX_POSITIONS` (global cap), so the book never exceeds size. This prevents the 8 current metadata-poor legacy positions from eating all 2 `long_or_uncertain` slots during transition.
 
-**Changes:**
-- New function `classify_position(market)` in `manifold_bot/strategies.py` — returns `{ horizon, reliability, slot_bucket }`
-- Recommendations include `horizon` and `reliability` fields
-- `auto_trader.py` uses slot buckets for caps, not flat MAX_POSITIONS
-- `auto_trader.py` prefers high-reliability short-fuse markets when ranking eligible trades (tie-breaker: earlier closeTime + higher reliability wins)
-- Dashboard Portfolio page adds horizon + reliability columns, per-bucket slot usage
+**New rejection reason**: `position_class_full` (distinct from `max_positions` so we can diagnose which bucket is bottlenecking).
 
-**Impact**: Bot naturally builds a book tilted toward fast, reliable resolution. No more jammed book with 10 creator-abandonment markets.
+**What NOT in this phase** (deferred from original plan):
+- Creator `lastActive` API lookup — first-pass uses category + question heuristics only; can be added later
+- Active creator-resolution-rate tracking — same
 
-**Estimated effort**: 2-3 days (creator activity lookup is the slow part).
+**Shipped in** (on `feature/v2-ai-smarter`, all in PR #12):
+
+| Commit | What it did |
+|--------|-------------|
+| `b213e23` | Initial classification + slot caps |
+| `08782b6` | Persistence fix — plumb position_class through place_paper_bet |
+| `e44b910` | Rename: horizon → term, reliability → resolvability, slot_bucket → position_class |
+| `0bb4a4e` | 3-class simplification (merged long_reliable + long_risky → long_or_uncertain) + honest metadata-poor handling |
+| `9e704be` | Normalize obsolete values on position read |
+| `875f88f` | Normalize obsolete values + legacy field name on recommendation read too |
+
+Current at `875f88f`. 563 tests pass. 6 reviewer rounds, all findings resolved.
 
 ---
 
@@ -728,25 +742,26 @@ Once the bot is actually trading and learning, the observability layer needs to 
 
 This is the "if I could only do one thing at a time, what order?" list:
 
-1. **AI status fix** (Phase 1.1) — unblocks trades immediately
-2. **Stat-derived EV fallback** (Phase 1.2) — unblocks EV feedback loop
-3. **Analyze-once AI cache** (Phase 1.3) — unblocks AI bandwidth
-4. **Legacy metadata backfill** (Phase 1.4) — cleans up current data
-5. **Position horizon categorization** (Phase 2.1) — changes how the bot thinks about slot usage
-6. **Active repricing** (Phase 2.2) — enables real P&L tracking
-7. **Early close + swap logic** (Phase 2.3) — unblocks book turnover
-8. **Stale position auto-detection** (Phase 2.4) — drops abandoned positions, frees slots immediately
-9. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
-10. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-11. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-12. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-13. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-14. **Polymarket integration** (Phase 4.1) — multiply training data
-15. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-16. **Dashboard API** (Phase 5.2) — real-time updates
-17. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-18. **Dashboard write surface** (Phase 5.3) — operator can act
-19. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+1. ✅ **AI status fix** (Phase 1.1) — SHIPPED
+2. ✅ **Stat-derived EV fallback** (Phase 1.2) — SHIPPED
+3. ✅ **Analyze-once AI cache** (Phase 1.3) — SHIPPED
+4. ✅ **Skip AI on held markets** (Phase 1 extension) — SHIPPED
+5. ✅ **Position classification + 3-class caps** (Phase 2.1) — SHIPPED
+6. **Active repricing** (Phase 2.2) — next up
+7. **Early close + swap logic** (Phase 2.3) — enables real book turnover
+8. **STRANDED / ABANDONED state** (Phase 2.4) — honest stale handling
+9. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
+10. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
+11. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+12. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+13. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+14. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+15. **Polymarket integration** (Phase 4.1) — multiply training data
+16. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+17. **Dashboard API** (Phase 5.2) — real-time updates
+18. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+19. **Dashboard write surface** (Phase 5.3) — operator can act
+20. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.

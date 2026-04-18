@@ -188,7 +188,11 @@ class PaperTrader:
                        ai_estimated_probability: Optional[float] = None,
                        strategies: Optional[List[str]] = None,
                        category: Optional[str] = None,
-                       question: Optional[str] = None) -> bool:
+                       question: Optional[str] = None,
+                       term: Optional[str] = None,
+                       resolvability: Optional[str] = None,
+                       position_class: Optional[str] = None,
+                       close_time_ms: Optional[int] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
@@ -204,6 +208,13 @@ class PaperTrader:
                                      the probability estimate itself. Stored in bet_outcomes
                                      to enable AI calibration curve analysis.
             strategies:              List of strategy names that triggered this trade
+            term:                    V2 Phase 2.1: 'short' / 'medium' / 'long' / 'unknown'
+            resolvability:           V2 Phase 2.1: 'high' / 'medium' / 'low'
+            position_class:          V2 Phase 2.1: class used for slot-cap enforcement
+                                     ('short' / 'medium' / 'long_reliable' / 'long_risky')
+            close_time_ms:           V2 Phase 2.1: Manifold closeTime in unix ms.
+                                     Persisted so legacy positions can be re-classified
+                                     if position_class is missing.
 
         Returns:
             bool: True if trade successful
@@ -258,6 +269,14 @@ class PaperTrader:
             # Category and question stored for exposure-cap counting and daily summary
             'category': category or 'other',
             'question': question or market_id,
+            # V2 Phase 2.1 — position classification for per-class slot caps.
+            # Persisted so _count_open_in_class() doesn't have to fall back to
+            # on-the-fly classification (which misses closeTime and misclassifies
+            # short/medium positions as unknown→long_risky).
+            'term':           term,
+            'resolvability':  resolvability,
+            'position_class': position_class,
+            'close_time_ms':  close_time_ms,
         }
         
         # Update balance and positions

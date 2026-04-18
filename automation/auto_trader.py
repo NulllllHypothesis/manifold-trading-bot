@@ -48,6 +48,7 @@ def _new_trader_counters() -> dict:
             "existing_open":        0,
             "max_positions":        0,
             "category_cap":         0,
+            "position_class_full":  0,      # V2 Phase 2.1: term/resolvability class cap
             "liquidity":            0,
             "kelly_no_edge":        0,
             "size_too_small":       0,
@@ -57,6 +58,119 @@ def _new_trader_counters() -> dict:
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
         "trades_executed":          0,
     }
+
+
+# V2 Phase 2.1: slot caps by position_class.
+# Three buckets for a 10-slot book. Favors short-term markets because they
+# produce learning data faster. Total = 5 + 3 + 2 = 10 (matches MAX_POSITIONS).
+_POSITION_CLASS_CAPS = {
+    'short':             5,  # any short-term market (≤7 days)
+    'medium':            3,  # any medium-term market (8-30 days)
+    'long_or_uncertain': 2,  # long-term or unknown-term — tightest cap because
+                             # capital sits longest and abandonment risk is highest
+}
+
+
+# Intermediate revisions of feature/v2-ai-smarter persisted position_class
+# values from an earlier 4-bucket design. Map those to the current 3-bucket
+# model on read so old-format positions don't become orphans that consume
+# no cap. Once all such positions resolve, this map can be removed.
+_OBSOLETE_POSITION_CLASS_MIGRATIONS = {
+    'long_reliable': 'long_or_uncertain',  # merged: long + high resolvability
+    'long_risky':    'long_or_uncertain',  # merged: long + medium/low resolvability
+    'long_high':     'long_or_uncertain',  # even earlier name (pre-rename)
+    'long_mid_low':  'long_or_uncertain',  # even earlier name (pre-rename)
+}
+
+
+def _normalize_position_class(pclass: Optional[str]) -> Optional[str]:
+    """
+    Map obsolete position_class values from intermediate branch revisions to
+    the current 3-class model. Unknown or None values pass through unchanged.
+    """
+    if not pclass:
+        return pclass
+    return _OBSOLETE_POSITION_CLASS_MIGRATIONS.get(pclass, pclass)
+
+
+def _extract_normalized_position_class(record: dict) -> Optional[str]:
+    """
+    Read position_class from a recommendation or position record, normalizing
+    both the field NAME and the VALUE.
+
+    Two layers of obsolete shape exist:
+
+      (a) Pre-rename field name: earliest V2 commits persisted the field
+          as `slot_bucket`. The later rename to `position_class` kept the
+          values but moved the key.
+
+      (b) Obsolete values: both `slot_bucket` and early `position_class`
+          records can hold `long_high` / `long_mid_low` (pre-rename) or
+          `long_reliable` / `long_risky` (post-rename, pre-3-class-collapse).
+
+    This helper reads whichever field is present (prefers `position_class`
+    when both exist), then normalizes the value through the migration map.
+    Used by both `_trade_rejection_reason()` (on recommendations) and
+    `_count_open_in_class()` (on positions).
+    """
+    raw = record.get('position_class') or record.get('slot_bucket')
+    return _normalize_position_class(raw)
+
+
+def _count_open_in_class(positions: dict, target_class: str) -> int:
+    """
+    Count OPEN positions whose position_class matches target_class.
+
+    Four cases, in order:
+    1. Position has persisted position_class matching a known current class
+       → count it (fast path).
+    2. Position has an OBSOLETE persisted class (long_reliable, long_risky,
+       long_high, long_mid_low from intermediate branch revisions) → normalize
+       to the current 3-class model, then count.
+    3. Position is legacy with no position_class but has enough metadata
+       (close_time_ms or question or category) to re-classify → classify
+       on the fly and count.
+    4. Position is truly metadata-poor (no position_class, no close_time_ms,
+       no question, no category) → **not counted against any class cap**.
+       Rationale: if we can't classify, it would be dishonest to silently
+       dump it into one arbitrary bucket. Such positions still count against
+       MAX_POSITIONS (the global total cap), so the bot never exceeds book
+       size — it just won't let legacy mystery positions prevent new trades
+       in any specific class.
+
+    Cases 2 and 4 are only relevant during V2 transition. Once legacy
+    positions resolve or are backfilled, both paths go to zero.
+    """
+    # Local import: strategies doesn't import from automation, so this avoids
+    # any circular import risk at module load time.
+    from manifold_bot.strategies import classify_position
+
+    n = 0
+    for pos_list in positions.values():
+        for pos in pos_list:
+            if pos.get('status') != 'OPEN':
+                continue
+            # Handle both legacy field name (slot_bucket) and obsolete values
+            pclass = _extract_normalized_position_class(pos)
+            if not pclass:
+                # No persisted class — check if we can classify from metadata
+                has_close_time = pos.get('close_time_ms') is not None
+                has_question   = bool(pos.get('question'))
+                has_category   = bool(pos.get('category'))
+                if not (has_close_time or has_question or has_category):
+                    # Truly metadata-poor legacy position — skip class accounting
+                    continue
+                synthetic = {
+                    'question':          pos.get('question', ''),
+                    'category':          pos.get('category'),
+                    'closeTime':         pos.get('close_time_ms'),
+                    'totalLiquidity':    pos.get('liquidity', 0),
+                    'uniqueBettorCount': pos.get('unique_bettors', 0),
+                }
+                pclass = classify_position(synthetic)['position_class']
+            if pclass == target_class:
+                n += 1
+    return n
 
 
 def _print_trader_counters(counters: dict) -> None:
@@ -94,6 +208,48 @@ def _load_weights_file(root: str) -> tuple[dict, dict, int, int]:
         return d.get("weights", {}), d.get("by_category", {}), d.get("sample_count", 0), d.get("min_samples_threshold", 10)
     except Exception:
         return {}, {}, 0, 10
+
+
+def _stat_derived_probability(
+    confidence: float,
+    recommendation_direction: str | None,
+    current_prob: float,
+) -> float | None:
+    """
+    Stat-derived probability estimate used when AI doesn't provide one.
+
+    The bot's confidence represents how strongly it believes the direction is
+    correct, NOT the probability of the YES outcome. We map it to a probability
+    using the recommendation direction:
+
+        direction='YES' → our estimate of P(YES) = confidence
+                          (we think YES is `confidence`-likely to happen)
+        direction='NO'  → our estimate of P(YES) = 1 - confidence
+                          (we think YES is only (1-confidence)-likely to happen)
+
+    We intentionally DON'T apply calibration bias adjustments here — that would
+    double-count against adjustments already baked into the strategies. The
+    estimate is a deliberately simple read of what the bot's confidence means.
+
+    This gets us off the "estimated_ev is always null" floor. It's not as good
+    as a real probability estimate from an LLM, but it's better than nothing —
+    and importantly it lets the EV calibration feedback loop actually collect
+    data (weekly_ev_report.py needs a value to regress against).
+
+    Guards:
+    - confidence must be in (0, 1) to produce meaningful estimate
+    - direction must be YES or NO (other values → None, no estimate)
+    - Result is clamped to (0.01, 0.99) to avoid zero-edge-zero-payout cases
+    - current_prob is accepted but not used (could be used for bias-aware
+      variants in a future iteration)
+    """
+    if not isinstance(confidence, (int, float)) or not 0 < confidence < 1:
+        return None
+    if recommendation_direction not in ('YES', 'NO'):
+        return None
+    del current_prob  # reserved for future bias-aware extension
+    p_yes = float(confidence) if recommendation_direction == 'YES' else 1.0 - float(confidence)
+    return max(0.01, min(0.99, p_yes))
 
 
 def _load_category_accuracy_file(root: str) -> dict:
@@ -222,15 +378,47 @@ class AutoTrader:
         The returned reason strings match the keys in
         _new_trader_counters()['rejected'] exactly.
         """
-        # AI veto — if the market was analyzed by AI and explicitly rejected, never trade it.
-        # This must be checked BEFORE the confidence threshold: when AI returns SKIP,
-        # auto_research.py leaves stat confidence unchanged (no penalty is applied), so the
-        # market can pass the confidence gate with its original stat score even though the AI
-        # read the question text and said "no edge here". Ignoring the veto causes the bot to
-        # trade every market the AI explicitly flags as noise.
-        if recommendation.get('ai_returned_skip') or recommendation.get('ai_recommendation') == 'SKIP':
-            print(f"  AI vetoed this market (SKIP) — skipping regardless of confidence")
+        # AI veto — only when AI EXPLICITLY said "skip" after analyzing the market.
+        # This is different from "AI failed to produce a result" (timeout / parse error).
+        # Previously those two states collapsed together and both triggered a veto, which
+        # meant AI outages silently blocked stat-only trades. Now we check ai_status as
+        # the authoritative field:
+        #
+        #   ai_status='skip'       → REAL AI rejection. Veto.
+        #   ai_status='no_result'  → AI failed. Fall through to stat-only trading.
+        #   ai_status='not_run'    → Market wasn't in top-3 AI candidates. No AI signal.
+        #                             Trade on stat alone.
+        #   ai_status='agree'      → AI confirmed stat signal. Trade.
+        #   ai_status='disagree'   → AI disagreed; confidence already scaled down in research.
+        #                             Trade if confidence still clears floor.
+        #
+        # Backward compatibility: old recommendations without ai_status use ai_returned_skip
+        # (which for historical records reflected the buggy "no_result becomes skip" logic).
+        # We only treat it as veto if ai_recommendation is explicitly 'SKIP' and there's no
+        # ai_status field present — otherwise trust ai_status.
+        ai_status = recommendation.get('ai_status')
+        if ai_status == 'skip':
+            print(f"  AI vetoed this market (ai_status=skip) — skipping regardless of confidence")
             return "ai_veto"
+        if ai_status is None:
+            # Legacy record (pre-ai_status). In the old producer, BOTH "AI no_result"
+            # and "real AI SKIP" produced identical output shape:
+            #   ai_recommendation='SKIP', ai_returned_skip=True, ai_confidence=0.0,
+            #   ai_reasoning='', ai_source=None
+            # They are literally indistinguishable in stored market_research.json.
+            #
+            # We can't safely tell them apart, so we default to the SAFE choice:
+            # veto any legacy SKIP record. This means a small transition cost —
+            # the first hourly research run after this PR lands will rewrite
+            # market_research.json with ai_status fields, and subsequent trader
+            # runs will correctly distinguish no_result from skip.
+            #
+            # For the ~1 hour before that first new research run completes, the
+            # trader continues to veto legacy SKIP records. Better to miss a
+            # trade than to trade on a market the AI genuinely rejected.
+            if recommendation.get('ai_recommendation') == 'SKIP':
+                print(f"  AI vetoed this market (legacy SKIP record — pre-ai_status) — skipping")
+                return "ai_veto"
 
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
@@ -254,6 +442,22 @@ class AutoTrader:
         if open_positions >= self.max_positions:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
             return "max_positions"
+
+        # V2 Phase 2.1 — Check position_class cap (3 buckets: short, medium,
+        # long_or_uncertain). Biases the book toward fast-resolving markets.
+        #
+        # _extract_normalized_position_class handles two legacy shapes:
+        # 1. Pre-rename field name 'slot_bucket' in stale market_research.json
+        # 2. Obsolete values (long_reliable / long_risky / long_high / long_mid_low)
+        # so stale recommendations from intermediate branch revisions can't
+        # bypass the cap by carrying values that match none of the current keys.
+        position_class = _extract_normalized_position_class(recommendation)
+        if position_class and position_class in _POSITION_CLASS_CAPS:
+            cap = _POSITION_CLASS_CAPS[position_class]
+            open_in_class = _count_open_in_class(self.trader.positions, position_class)
+            if open_in_class >= cap:
+                print(f"  Position class full: {position_class} has {open_in_class}/{cap} open positions")
+                return "position_class_full"
 
         # Check category exposure cap — prevent over-concentration in one topic.
         # Category comes from the research recommendation; fall back to inference
@@ -444,22 +648,36 @@ class AutoTrader:
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
         # Compute estimated EV before placing the bet — it is deterministic given
-        # current_prob, ai_estimated_probability, outcome, and amount.
+        # current_prob, ai_estimated_probability (or stat fallback), outcome, and amount.
         # Passing it into place_paper_bet ensures the position record in
         # paper_trading_state.json has a non-null ev, so resolve_market() writes
-        # it correctly to bet_outcomes for calibration. (Previously estimated_ev=None
-        # was passed in, leaving all calibration rows null.)
+        # it correctly to bet_outcomes for calibration.
+        #
+        # Probability estimate priority:
+        #   1. AI estimate (ai_estimated_probability) if present
+        #   2. Stat-derived fallback: map confidence to probability using the bot's
+        #      recommendation direction. This ensures EV is NEVER null — previously
+        #      AI failures meant calibration got zero data.
         ai_prob = recommendation.get('ai_estimated_probability')
-        if ai_prob is not None:
+        p_estimate = ai_prob
+
+        if p_estimate is None:
+            p_estimate = _stat_derived_probability(
+                confidence=confidence,
+                recommendation_direction=recommendation.get('recommendation'),
+                current_prob=current_prob,
+            )
+
+        if p_estimate is not None:
             if outcome == 'YES':
                 payout_if_win = amount / current_prob if current_prob > 0 else 0
-                win_prob = float(ai_prob)
+                win_prob = float(p_estimate)
             else:  # NO
                 payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
-                win_prob = 1.0 - float(ai_prob)
+                win_prob = 1.0 - float(p_estimate)
             estimated_ev = win_prob * payout_if_win - amount
         else:
-            estimated_ev = None  # no AI estimate; calibration will mark this row as null
+            estimated_ev = None  # truly unknown — don't fake a value
 
         # Place paper trade — estimated_ev now flows into the position record so
         # resolve_market() → _write_bet_outcome() can store it in bet_outcomes.
@@ -474,6 +692,14 @@ class AutoTrader:
             strategies=recommendation.get('strategies', []),
             category=recommendation.get('category'),
             question=recommendation.get('question'),
+            # V2 Phase 2.1 — persist classification on the position record so
+            # _count_open_in_class() reads the exact class the trader approved.
+            # Without this, the on-the-fly classify_position() fallback sees
+            # no close_time_ms and misclassifies every position as long_risky.
+            term=recommendation.get('term'),
+            resolvability=recommendation.get('resolvability'),
+            position_class=recommendation.get('position_class'),
+            close_time_ms=recommendation.get('close_time_ms'),
         )
 
         if success:
