@@ -818,13 +818,21 @@ class MarketResearcher:
                     is_ai_candidate = rec['market_id'] in top_candidate_ids
 
                     # ai_was_candidate: was this market sent to AI at all?
-                    # ai_returned_skip: AI ran but said SKIP (vs not in top 5)
+                    # ai_status: explicit state of AI analysis. One of:
+                    #   'not_run'    — market wasn't in the top-3 AI candidates
+                    #   'no_result'  — AI invoked but timeout / parse error / no response
+                    #   'skip'       — AI ran and explicitly said "no edge here"
+                    #   'agree'      — AI recommendation matches stat recommendation
+                    #   'disagree'   — AI disagrees with stat
+                    # ai_returned_skip: DEPRECATED legacy field. Kept for backward
+                    # compatibility with auto_trader.py until both sides move to ai_status.
                     rec['ai_was_candidate'] = is_ai_candidate
-                    rec['ai_returned_skip'] = False
 
                     if not is_ai_candidate:
                         # Market was never sent to AI (not in top-3) — use None (not 'SKIP')
                         # to avoid conflating "AI considered and skipped" with "never analyzed".
+                        rec['ai_status'] = 'not_run'
+                        rec['ai_returned_skip'] = False
                         rec['ai_recommendation'] = None
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
@@ -835,23 +843,29 @@ class MarketResearcher:
                     if not ai:
                         # AI was invoked but returned no usable result (timeout,
                         # parse error, etc.). Already counted in ai_no_result above.
-                        # Do NOT also count as ai_skip — that's for explicit SKIPs.
-                        rec['ai_recommendation'] = 'SKIP'
+                        # This is NOT a skip — we had no signal either way.
+                        # Previous versions wrote ai_recommendation='SKIP' here,
+                        # causing the trader to veto. Now we mark ai_status='no_result'
+                        # and leave ai_recommendation=None, so the trader falls back
+                        # to stat-only trading for this market.
+                        rec['ai_status'] = 'no_result'
+                        rec['ai_returned_skip'] = False  # was True previously — caused veto
+                        rec['ai_recommendation'] = None
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
-                        rec['ai_returned_skip'] = True
                         # No counter increment here — ai_no_result already counted it
                         continue
 
                     if ai['recommendation'] == 'SKIP':
                         # AI explicitly returned SKIP — it analyzed the market and
-                        # decided there's no edge. This is a real signal, not an error.
+                        # decided there's no edge. This IS a real signal — veto the trade.
+                        rec['ai_status'] = 'skip'
+                        rec['ai_returned_skip'] = True  # legacy flag kept for trader compat
                         rec['ai_recommendation'] = 'SKIP'
                         rec['ai_confidence'] = 0.0
                         rec['ai_reasoning'] = ''
                         rec['ai_source'] = None
-                        rec['ai_returned_skip'] = True
                         counters["ai_skip"] += 1
                         continue
 
@@ -870,6 +884,8 @@ class MarketResearcher:
                     stat_conf = rec['confidence']
                     if ai['recommendation'] == rec['recommendation']:
                         counters["ai_agree"] += 1
+                        rec['ai_status'] = 'agree'
+                        rec['ai_returned_skip'] = False
                         # Only blend upward on agreement: a low-confidence AI agreement
                         # must not reduce a strong statistical signal. Take the maximum of
                         # stat_conf and the blended value so the stat signal is always the
@@ -886,6 +902,8 @@ class MarketResearcher:
                         rec['strategies'] = rec['strategies'] + ['ai_analysis']
                     elif ai['recommendation'] in ('YES', 'NO'):
                         counters["ai_disagree"] += 1
+                        rec['ai_status'] = 'disagree'
+                        rec['ai_returned_skip'] = False
                         # AI disagrees — scale the confidence multiplier by AI confidence.
                         # Formula: confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
                         #   ai_conf=1.0 → confidence_multiplier=0.40 (AI certain → hardest reduction, keeps 40% of stat score)
@@ -894,7 +912,10 @@ class MarketResearcher:
                         ai_conf = max(0.0, min(1.0, ai['confidence']))
                         confidence_multiplier = 0.4 + (1 - ai_conf) * 0.4
                         rec['confidence'] = max(0.0, round(stat_conf * confidence_multiplier, 3))
-                    # if ai returned something unexpected, leave confidence unchanged
+                    else:
+                        # AI returned something unexpected — treat as no_result
+                        rec['ai_status'] = 'no_result'
+                        rec['ai_returned_skip'] = False
 
             # Compute two EV figures for every recommendation now that
             # ai_estimated_probability is set:

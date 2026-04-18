@@ -222,15 +222,35 @@ class AutoTrader:
         The returned reason strings match the keys in
         _new_trader_counters()['rejected'] exactly.
         """
-        # AI veto — if the market was analyzed by AI and explicitly rejected, never trade it.
-        # This must be checked BEFORE the confidence threshold: when AI returns SKIP,
-        # auto_research.py leaves stat confidence unchanged (no penalty is applied), so the
-        # market can pass the confidence gate with its original stat score even though the AI
-        # read the question text and said "no edge here". Ignoring the veto causes the bot to
-        # trade every market the AI explicitly flags as noise.
-        if recommendation.get('ai_returned_skip') or recommendation.get('ai_recommendation') == 'SKIP':
-            print(f"  AI vetoed this market (SKIP) — skipping regardless of confidence")
+        # AI veto — only when AI EXPLICITLY said "skip" after analyzing the market.
+        # This is different from "AI failed to produce a result" (timeout / parse error).
+        # Previously those two states collapsed together and both triggered a veto, which
+        # meant AI outages silently blocked stat-only trades. Now we check ai_status as
+        # the authoritative field:
+        #
+        #   ai_status='skip'       → REAL AI rejection. Veto.
+        #   ai_status='no_result'  → AI failed. Fall through to stat-only trading.
+        #   ai_status='not_run'    → Market wasn't in top-3 AI candidates. No AI signal.
+        #                             Trade on stat alone.
+        #   ai_status='agree'      → AI confirmed stat signal. Trade.
+        #   ai_status='disagree'   → AI disagreed; confidence already scaled down in research.
+        #                             Trade if confidence still clears floor.
+        #
+        # Backward compatibility: old recommendations without ai_status use ai_returned_skip
+        # (which for historical records reflected the buggy "no_result becomes skip" logic).
+        # We only treat it as veto if ai_recommendation is explicitly 'SKIP' and there's no
+        # ai_status field present — otherwise trust ai_status.
+        ai_status = recommendation.get('ai_status')
+        if ai_status == 'skip':
+            print(f"  AI vetoed this market (ai_status=skip) — skipping regardless of confidence")
             return "ai_veto"
+        if ai_status is None:
+            # Legacy record (pre-ai_status). Apply old logic but only if ai_recommendation
+            # is explicitly 'SKIP' — don't veto on ai_returned_skip alone, because that
+            # flag was incorrectly set for AI failures in the old producer.
+            if recommendation.get('ai_recommendation') == 'SKIP':
+                print(f"  AI vetoed this market (legacy SKIP record) — skipping")
+                return "ai_veto"
 
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:

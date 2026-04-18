@@ -224,6 +224,68 @@ class TestTradeRejectionReason(unittest.TestCase):
         )
         self.assertEqual(reason, "ai_veto")
 
+    def test_ai_status_skip_vetoes(self):
+        """New ai_status='skip' is the authoritative veto signal."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(ai_status="skip", ai_recommendation="SKIP", ai_returned_skip=True),
+        )
+        self.assertEqual(reason, "ai_veto")
+
+    def test_ai_status_no_result_does_not_veto(self):
+        """AI failure (no_result) must NOT veto — falls back to stat-only trading."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                ai_status="no_result",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_ai_status_not_run_does_not_veto(self):
+        """Markets not sent to AI should trade on stat alone."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                ai_status="not_run",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_ai_status_agree_does_not_veto(self):
+        """AI agreement should let trade proceed."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(ai_status="agree", ai_recommendation="YES"),
+        )
+        self.assertIsNone(reason)
+
+    def test_legacy_record_without_ai_status_still_vetoes_on_skip(self):
+        """Backward compatibility: old records with ai_recommendation='SKIP' still veto."""
+        trader = self._make_trader_with_empty_book()
+        rec = self._make_rec(ai_recommendation="SKIP", ai_returned_skip=True)
+        rec.pop("ai_status", None)
+        reason = trader._trade_rejection_reason("mkt_test", rec)
+        self.assertEqual(reason, "ai_veto")
+
+    def test_legacy_record_ai_returned_skip_without_skip_rec_does_not_veto(self):
+        """Legacy records where ai_returned_skip=True but ai_recommendation is None
+        (the buggy no_result case) must NOT veto — trust ai_recommendation only when
+        ai_status is absent."""
+        trader = self._make_trader_with_empty_book()
+        rec = self._make_rec(ai_returned_skip=True, ai_recommendation=None)
+        rec.pop("ai_status", None)
+        reason = trader._trade_rejection_reason("mkt_test", rec)
+        self.assertIsNone(reason)
+
     def test_low_confidence_reason(self):
         trader = self._make_trader_with_empty_book()
         reason = trader._trade_rejection_reason(
