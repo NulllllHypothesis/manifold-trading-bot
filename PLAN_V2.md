@@ -251,7 +251,86 @@ Then for each position, consider three actions:
 
 ---
 
-### 2.4 — Dashboard: Position Management page
+### 2.4 — Stale position auto-detection and dropping
+
+**Problem**: Independent of the scoring logic in 2.3, some positions are just dead weight. Market creator abandoned the market. Close time passed weeks ago with no resolution. No bet activity in days. These positions have near-zero probability of resolving anytime soon. They eat slots and tie up capital for nothing.
+
+**What "stale" means, concretely** (ANY condition triggers stale flag):
+
+| Signal | Threshold | Rationale |
+|--------|-----------|-----------|
+| Age since entry | `> 14 days` and horizon ≠ long | Position has outlived its expected resolution window |
+| Past closeTime | `closeTime < now AND resolved == false` | Market closed to betting but creator hasn't resolved |
+| No bet activity | `last_bet_time > 7 days ago AND position age > 7 days` | Nobody is betting — creator likely walked away |
+| Legacy position | `category IS NULL AND question IS NULL AND age > 14d` | Pre-metadata positions that have been stuck since original bot era |
+| Creator inactive | Creator's `lastUpdated > 30 days ago` | Creator account hasn't done anything on Manifold |
+
+**Decision policy**:
+
+```
+For each open position:
+  1. Compute stale_signals[] = list of triggered conditions
+  2. If stale_signals is empty → skip (not stale)
+  3. If stale_signals includes "past closeTime + not resolved":
+     - Wait 48 more hours (creator might still resolve it)
+     - If still not resolved → CLOSE at current AMM price
+  4. If stale_signals includes "no bet activity" or "creator inactive":
+     - CLOSE at current AMM price immediately
+     - Record stale_reason in bet_outcomes
+  5. If stale_signals only includes "age > 14d" without other signals:
+     - Re-score using position_score from 2.3
+     - Let the scoring logic decide hold/close/swap
+     - Don't auto-drop — the position might still be valuable
+```
+
+**Critical: close at real price, not fake P&L=0**
+
+When closing a stale position:
+- Fetch current market probability from Manifold API
+- Compute sale value: `current_value = amount × (current_prob / entry_prob)` (for YES) or `amount × ((1-current_prob) / (1-entry_prob))` (for NO)
+- If current_prob unavailable (market is REALLY dead) → close at entry price (P&L = 0 is a FALLBACK, not the default)
+- Record `stale_reason` field: `abandoned_by_creator`, `past_close_time`, `no_bet_activity`, etc.
+
+**What the script does**:
+
+`scripts/detect_stale_positions.py`:
+1. Load `paper_trading_state.json`
+2. For each OPEN position, fetch market metadata from Manifold API:
+   - `closeTime`
+   - `isResolved`
+   - `lastBetTime`
+   - Current probability
+   - Creator's `lastActive` if available
+3. Apply stale detection rules above
+4. For stale positions, call `paper_trader.close_position_early(market_id, current_prob, reason)`
+5. Log actions taken: how many dropped, per-reason breakdown
+6. Write audit event to event log (Phase 5.1)
+7. Send Telegram summary if any positions dropped
+
+**Schedule**:
+- Add to OS crontab: hourly at :45 (after the :20 trader run and :30 eval run, so drops take effect before next :00 research)
+- Or: daily at 13:00 UTC if hourly is too aggressive
+
+**Dashboard integration** (Portfolio page):
+- Add "stale_signals" column — badges showing which conditions triggered
+- Add "Drop stale now" button (writes a request file the cron picks up on next run; v2 becomes a direct action in Phase 5.3)
+
+**Impact on current state**:
+- 8 of 10 current open positions are legacy with no metadata. Most are >14 days old.
+- After this script runs once: expect 5-8 positions dropped, freeing 5-8 slots immediately
+- The bot can actually trade again
+- Real P&L gets crystallized (some may be losses — that's honest, not cosmetic)
+
+**What this is NOT**:
+- It's NOT "close everything older than 14 days" — that's too aggressive
+- It's NOT "mark P&L as $0 to make the dashboard look clean" — that's fake accounting
+- It's a principled decision: markets that are abandoned are worth liquidating at fair value
+
+**Estimated effort**: 1 day (includes API calls for creator activity, detection logic, close execution, audit logging).
+
+---
+
+### 2.5 — Dashboard: Position Management page
 
 **Purpose**: Show the operator the full lifecycle of every position.
 
@@ -584,17 +663,18 @@ This is the "if I could only do one thing at a time, what order?" list:
 5. **Position horizon categorization** (Phase 2.1) — changes how the bot thinks about slot usage
 6. **Active repricing** (Phase 2.2) — enables real P&L tracking
 7. **Early close + swap logic** (Phase 2.3) — unblocks book turnover
-8. **Position Management dashboard page** (Phase 2.4) — operator visibility on 2.1-2.3
-9. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-10. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-11. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-12. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-13. **Polymarket integration** (Phase 4.1) — multiply training data
-14. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-15. **Dashboard API** (Phase 5.2) — real-time updates
-16. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-17. **Dashboard write surface** (Phase 5.3) — operator can act
-18. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+8. **Stale position auto-detection** (Phase 2.4) — drops abandoned positions, frees slots immediately
+9. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
+10. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+11. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+12. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+13. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+14. **Polymarket integration** (Phase 4.1) — multiply training data
+15. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+16. **Dashboard API** (Phase 5.2) — real-time updates
+17. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+18. **Dashboard write surface** (Phase 5.3) — operator can act
+19. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.
