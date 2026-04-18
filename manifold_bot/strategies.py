@@ -407,25 +407,29 @@ def _derive_position_class(term: str, resolvability: str) -> str:
     """
     Map (term, resolvability) to a position_class used for slot-cap enforcement.
 
-    Class values and default caps (enforced in auto_trader._POSITION_CLASS_CAPS):
-      'short'          — 5 slots. Any short-term market.
-      'medium'         — 3 slots. Any medium-term market.
-      'long_reliable'  — 1 slot.  Long-term with high resolvability (scheduled
-                                  external event, e.g. Olympics).
-      'long_risky'     — 1 slot.  Long-term with medium/low resolvability OR
-                                  unknown-term markets. Highest abandonment
-                                  risk, so capped tightest.
+    Three classes for a 10-slot book. Four was too fine-grained:
+    long_reliable vs long_risky splits capital 1-1 and makes single
+    misclassifications costly. `resolvability` is still stored as a label
+    on every position for dashboard / sorting / soft ranking — it just
+    doesn't drive a separate hard cap.
 
-    Total: 5 + 3 + 1 + 1 = 10.
+    Class values and default caps (enforced in auto_trader._POSITION_CLASS_CAPS):
+      'short'             — 5 slots. Any short-term market.
+      'medium'            — 3 slots. Any medium-term market.
+      'long_or_uncertain' — 2 slots. Long-term (any resolvability) or
+                            unknown-term markets. Tightest cap because
+                            these tie up capital longest and carry the
+                            highest abandonment risk.
+
+    Total: 5 + 3 + 2 = 10.
     """
+    del resolvability  # intentionally unused; stored separately as a soft label
     if term == 'short':
         return 'short'
     if term == 'medium':
         return 'medium'
-    if term == 'long' and resolvability == 'high':
-        return 'long_reliable'
-    # long + medium/low resolvability, or unknown term → tight cap
-    return 'long_risky'
+    # long + any resolvability, or unknown term → single conservative bucket
+    return 'long_or_uncertain'
 
 
 def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
@@ -438,9 +442,13 @@ def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
                       How soon the market is expected to resolve.
       resolvability — 'high'  | 'medium' | 'low'
                       How likely the market is to actually get resolved.
-      position_class — 'short' | 'medium' | 'long_reliable' | 'long_risky'
-                       The bucket used for slot-cap enforcement. Derived
-                       deterministically from (term, resolvability).
+                      Persisted as a soft label (for dashboard, sorting,
+                      ranking); does NOT drive a separate hard cap.
+      position_class — 'short' | 'medium' | 'long_or_uncertain'
+                       The 3-bucket class used for slot-cap enforcement.
+                       Currently derived from term only; resolvability is
+                       ignored at this layer to keep the enforcement
+                       surface small for a 10-slot book.
       close_time_ms — int | None   Unix-ms closeTime from the Manifold API.
       days_to_close — float | None Days from now until closeTime (negative if
                                    already past close).

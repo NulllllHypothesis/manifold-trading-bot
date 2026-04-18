@@ -61,13 +61,13 @@ def _new_trader_counters() -> dict:
 
 
 # V2 Phase 2.1: slot caps by position_class.
-# Favors short-term and high-resolvability markets because they produce
-# learning data faster. Total = 5 + 3 + 1 + 1 = 10 (matches MAX_POSITIONS).
+# Three buckets for a 10-slot book. Favors short-term markets because they
+# produce learning data faster. Total = 5 + 3 + 2 = 10 (matches MAX_POSITIONS).
 _POSITION_CLASS_CAPS = {
-    'short':         5,   # any short-term market
-    'medium':        3,   # any medium-term market
-    'long_reliable': 1,   # long-term + high resolvability (scheduled event)
-    'long_risky':    1,   # long-term + medium/low resolvability, or unknown term
+    'short':             5,  # any short-term market (≤7 days)
+    'medium':            3,  # any medium-term market (8-30 days)
+    'long_or_uncertain': 2,  # long-term or unknown-term — tightest cap because
+                             # capital sits longest and abandonment risk is highest
 }
 
 
@@ -75,12 +75,20 @@ def _count_open_in_class(positions: dict, target_class: str) -> int:
     """
     Count OPEN positions whose position_class matches target_class.
 
-    Prefers the persisted position_class field (written by place_paper_bet).
-    Falls back to on-the-fly classification for legacy positions that predate
-    V2 Phase 2.1 — those get classified from stored close_time_ms + question +
-    category. If all of those are missing, classify_position returns term=unknown
-    and the position lands in 'long_risky' (safest bucket for something we
-    can't reason about).
+    Three cases:
+    1. Position has persisted position_class → count it (fast path).
+    2. Position is legacy but has enough metadata (close_time_ms or question or
+       category) to re-classify → classify on the fly and count.
+    3. Position is truly metadata-poor (no position_class, no close_time_ms,
+       no question, no category) → **not counted against any class cap**.
+       Rationale: if we can't classify, it would be dishonest to silently
+       dump it into one arbitrary bucket and let it eat that bucket's cap.
+       Such positions still count against MAX_POSITIONS (the global total cap),
+       so the bot can never exceed the book size — it just won't let a few
+       legacy mystery positions prevent new trades in any specific class.
+
+    This is only relevant during the V2 transition; once legacy positions
+    resolve or are backfilled, case 3 goes to zero.
     """
     # Local import: strategies doesn't import from automation, so this avoids
     # any circular import risk at module load time.
@@ -93,7 +101,13 @@ def _count_open_in_class(positions: dict, target_class: str) -> int:
                 continue
             pclass = pos.get('position_class')
             if not pclass:
-                # Legacy position — classify from what's available
+                # Check if we have enough metadata to classify honestly
+                has_close_time = pos.get('close_time_ms') is not None
+                has_question   = bool(pos.get('question'))
+                has_category   = bool(pos.get('category'))
+                if not (has_close_time or has_question or has_category):
+                    # Truly metadata-poor legacy position — skip class accounting
+                    continue
                 synthetic = {
                     'question':          pos.get('question', ''),
                     'category':          pos.get('category'),

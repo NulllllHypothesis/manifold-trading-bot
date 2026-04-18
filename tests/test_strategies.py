@@ -1281,20 +1281,28 @@ class TestPositionClassification(unittest.TestCase):
         result = classify_position(self._market(close_days_away=14, category='politics'))
         self.assertEqual(result['position_class'], 'medium')
 
-    def test_position_class_long_reliable_for_long_plus_high_resolvability(self):
-        from manifold_bot.strategies import classify_position
-        result = classify_position(self._market(close_days_away=60, category='sports'))
-        self.assertEqual(result['position_class'], 'long_reliable')
+    def test_position_class_long_or_uncertain_for_long_term_any_resolvability(self):
+        """3-bucket model: long-term with ANY resolvability maps to long_or_uncertain.
 
-    def test_position_class_long_risky_for_long_plus_lower_resolvability(self):
+        resolvability is still persisted as a soft label (for dashboard and
+        ranking) but doesn't drive a separate hard cap. A single class keeps
+        the enforcement layer simple for a 10-slot book.
+        """
         from manifold_bot.strategies import classify_position
-        result = classify_position(self._market(close_days_away=60, category='other'))
-        self.assertEqual(result['position_class'], 'long_risky')
+        # long + high resolvability (sports)
+        result_high = classify_position(self._market(close_days_away=60, category='sports'))
+        self.assertEqual(result_high['position_class'], 'long_or_uncertain')
+        self.assertEqual(result_high['resolvability'], 'high')
 
-    def test_unknown_term_maps_to_long_risky_class(self):
+        # long + low resolvability (other)
+        result_low = classify_position(self._market(close_days_away=60, category='other'))
+        self.assertEqual(result_low['position_class'], 'long_or_uncertain')
+        self.assertEqual(result_low['resolvability'], 'low')
+
+    def test_unknown_term_maps_to_long_or_uncertain_class(self):
         from manifold_bot.strategies import classify_position
         result = classify_position(self._market(close_days_away=None, category='other'))
-        self.assertEqual(result['position_class'], 'long_risky')
+        self.assertEqual(result['position_class'], 'long_or_uncertain')
 
     def test_days_to_close_is_populated(self):
         from manifold_bot.strategies import classify_position
@@ -1384,22 +1392,52 @@ class TestPositionClassCap(unittest.TestCase):
         if reason is not None:
             self.assertNotEqual(reason, 'position_class_full')
 
-    def test_long_reliable_class_cap_is_one(self):
-        """long_reliable has only 1 slot — second one blocked."""
+    def test_long_or_uncertain_class_cap_is_two(self):
+        """long_or_uncertain has only 2 slots — third one blocked."""
         positions = {
-            'mkt_long1': [self._open_pos(market_id='mkt_long1', position_class='long_reliable',
+            'mkt_long1': [self._open_pos(market_id='mkt_long1',
+                                         position_class='long_or_uncertain',
                                          category='economics')],
+            'mkt_long2': [self._open_pos(market_id='mkt_long2',
+                                         position_class='long_or_uncertain',
+                                         category='other')],
         }
         trader = self._make_trader_with_positions(positions)
         reason = trader._trade_rejection_reason(
             'mkt_new',
-            self._rec(position_class='long_reliable', question='Will the Fed hike in 2027?',
+            self._rec(position_class='long_or_uncertain',
+                      question='Will the Fed hike in 2027?',
                       category='economics'),
         )
         self.assertEqual(reason, 'position_class_full')
 
-    def test_legacy_position_without_position_class_still_counted(self):
-        """Old positions without position_class field get classified on the fly."""
+    def test_metadata_poor_legacy_position_is_skipped_not_dumped_into_long_class(self):
+        """
+        Legacy positions with NO position_class AND NO close_time_ms AND
+        NO question AND NO category are counted toward MAX_POSITIONS only,
+        NOT toward any position_class cap. This is the honest choice —
+        dumping unclassifiable positions into long_or_uncertain would eat
+        that class's cap during the V2 transition and block new trades
+        unfairly.
+        """
+        from automation.auto_trader import _count_open_in_class
+        truly_legacy_pos = {
+            'market_id': 'legacy_mkt',
+            'status': 'OPEN',
+            'outcome': 'YES',
+            'amount': 5,
+            'probability': 0.5,
+            # NO position_class, NO close_time_ms, NO question, NO category
+        }
+        positions = {'legacy_mkt': [truly_legacy_pos]}
+        # Should not count in any of the three classes
+        self.assertEqual(_count_open_in_class(positions, 'short'), 0)
+        self.assertEqual(_count_open_in_class(positions, 'medium'), 0)
+        self.assertEqual(_count_open_in_class(positions, 'long_or_uncertain'), 0)
+
+    def test_legacy_position_with_question_still_classified(self):
+        """Old positions without position_class field get classified on the fly
+        when they have ENOUGH metadata (question / category / close_time_ms)."""
         from manifold_bot.strategies import classify_position
         # Build a legacy position that should classify as 'short' (sports market)
         import time
