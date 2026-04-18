@@ -1411,6 +1411,119 @@ class TestPositionClassCap(unittest.TestCase):
         )
         self.assertEqual(reason, 'position_class_full')
 
+    def test_obsolete_long_reliable_class_normalizes_to_long_or_uncertain(self):
+        """
+        Regression: intermediate revisions of feature/v2-ai-smarter persisted
+        position_class='long_reliable' and 'long_risky' (4-bucket model).
+        After collapse to 3 buckets, those values must normalize to
+        'long_or_uncertain' on read — otherwise they become orphans that
+        count toward no cap and let the long_or_uncertain bucket overfill.
+        """
+        from automation.auto_trader import _count_open_in_class
+        import time
+        future = int((time.time() + 60 * 86400) * 1000)
+
+        positions = {
+            # Old 4-bucket persistence shape — still possible to encounter
+            'mkt_lr': [{
+                'market_id': 'mkt_lr',
+                'status': 'OPEN',
+                'outcome': 'YES',
+                'amount': 5,
+                'probability': 0.5,
+                'category': 'sports',
+                'question': 'Will a long-horizon reliable event happen?',
+                'position_class': 'long_reliable',  # obsolete value
+                'close_time_ms': future,
+            }],
+            'mkt_lrisky': [{
+                'market_id': 'mkt_lrisky',
+                'status': 'OPEN',
+                'outcome': 'YES',
+                'amount': 5,
+                'probability': 0.5,
+                'category': 'other',
+                'question': 'Will a long-horizon risky thing happen?',
+                'position_class': 'long_risky',  # obsolete value
+                'close_time_ms': future,
+            }],
+        }
+
+        # Both should normalize to long_or_uncertain
+        self.assertEqual(_count_open_in_class(positions, 'long_or_uncertain'), 2,
+                         "obsolete long_reliable/long_risky must normalize to long_or_uncertain")
+        # They should NOT count in short or medium
+        self.assertEqual(_count_open_in_class(positions, 'short'), 0)
+        self.assertEqual(_count_open_in_class(positions, 'medium'), 0)
+
+    def test_even_older_long_high_and_long_mid_low_also_normalize(self):
+        """Earliest-iteration values (pre-rename) should also migrate."""
+        from automation.auto_trader import _count_open_in_class
+        positions = {
+            'mkt_lh': [{
+                'market_id': 'mkt_lh', 'status': 'OPEN', 'outcome': 'YES',
+                'amount': 5, 'probability': 0.5,
+                'position_class': 'long_high',  # earliest obsolete value
+            }],
+            'mkt_lml': [{
+                'market_id': 'mkt_lml', 'status': 'OPEN', 'outcome': 'YES',
+                'amount': 5, 'probability': 0.5,
+                'position_class': 'long_mid_low',  # earliest obsolete value
+            }],
+        }
+        self.assertEqual(_count_open_in_class(positions, 'long_or_uncertain'), 2)
+
+    def test_obsolete_class_triggers_position_class_full_at_cap(self):
+        """End-to-end: two positions with obsolete classes should fill the
+        long_or_uncertain cap (which is 2) and block a third new trade."""
+        from unittest.mock import patch, MagicMock
+        from automation.auto_trader import AutoTrader
+        import time
+
+        with patch('automation.auto_trader.PaperTrader') as MockTrader:
+            real_trader = MagicMock()
+            real_trader.positions = {
+                'mkt_a': [{
+                    'market_id': 'mkt_a', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'category': 'sports',
+                    'question': 'long reliable thing',
+                    'position_class': 'long_reliable',
+                    'close_time_ms': int((time.time() + 60 * 86400) * 1000),
+                }],
+                'mkt_b': [{
+                    'market_id': 'mkt_b', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'category': 'other',
+                    'question': 'long risky thing',
+                    'position_class': 'long_risky',
+                    'close_time_ms': int((time.time() + 60 * 86400) * 1000),
+                }],
+            }
+            real_trader.balance = 1000.0
+            MockTrader.return_value = real_trader
+            at = AutoTrader()
+
+        rec = {
+            'market_id': 'mkt_new',
+            'question': 'A fresh long-term market',
+            'recommendation': 'YES',
+            'confidence': 0.80,
+            'probability': 0.50,
+            'liquidity': 500,
+            'category': 'sports',
+            'strategies': ['probability_direction'],
+            'term': 'long',
+            'resolvability': 'high',
+            'position_class': 'long_or_uncertain',
+        }
+        reason = at._trade_rejection_reason('mkt_new', rec)
+        self.assertEqual(
+            reason, 'position_class_full',
+            "obsolete long_reliable + long_risky positions must normalize and "
+            "together fill the long_or_uncertain cap of 2"
+        )
+
     def test_metadata_poor_legacy_position_is_skipped_not_dumped_into_long_class(self):
         """
         Legacy positions with NO position_class AND NO close_time_ms AND

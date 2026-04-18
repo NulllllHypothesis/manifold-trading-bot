@@ -71,24 +71,51 @@ _POSITION_CLASS_CAPS = {
 }
 
 
+# Intermediate revisions of feature/v2-ai-smarter persisted position_class
+# values from an earlier 4-bucket design. Map those to the current 3-bucket
+# model on read so old-format positions don't become orphans that consume
+# no cap. Once all such positions resolve, this map can be removed.
+_OBSOLETE_POSITION_CLASS_MIGRATIONS = {
+    'long_reliable': 'long_or_uncertain',  # merged: long + high resolvability
+    'long_risky':    'long_or_uncertain',  # merged: long + medium/low resolvability
+    'long_high':     'long_or_uncertain',  # even earlier name (pre-rename)
+    'long_mid_low':  'long_or_uncertain',  # even earlier name (pre-rename)
+}
+
+
+def _normalize_position_class(pclass: Optional[str]) -> Optional[str]:
+    """
+    Map obsolete position_class values from intermediate branch revisions to
+    the current 3-class model. Unknown or None values pass through unchanged.
+    """
+    if not pclass:
+        return pclass
+    return _OBSOLETE_POSITION_CLASS_MIGRATIONS.get(pclass, pclass)
+
+
 def _count_open_in_class(positions: dict, target_class: str) -> int:
     """
     Count OPEN positions whose position_class matches target_class.
 
-    Three cases:
-    1. Position has persisted position_class → count it (fast path).
-    2. Position is legacy but has enough metadata (close_time_ms or question or
-       category) to re-classify → classify on the fly and count.
-    3. Position is truly metadata-poor (no position_class, no close_time_ms,
+    Four cases, in order:
+    1. Position has persisted position_class matching a known current class
+       → count it (fast path).
+    2. Position has an OBSOLETE persisted class (long_reliable, long_risky,
+       long_high, long_mid_low from intermediate branch revisions) → normalize
+       to the current 3-class model, then count.
+    3. Position is legacy with no position_class but has enough metadata
+       (close_time_ms or question or category) to re-classify → classify
+       on the fly and count.
+    4. Position is truly metadata-poor (no position_class, no close_time_ms,
        no question, no category) → **not counted against any class cap**.
        Rationale: if we can't classify, it would be dishonest to silently
-       dump it into one arbitrary bucket and let it eat that bucket's cap.
-       Such positions still count against MAX_POSITIONS (the global total cap),
-       so the bot can never exceed the book size — it just won't let a few
-       legacy mystery positions prevent new trades in any specific class.
+       dump it into one arbitrary bucket. Such positions still count against
+       MAX_POSITIONS (the global total cap), so the bot never exceeds book
+       size — it just won't let legacy mystery positions prevent new trades
+       in any specific class.
 
-    This is only relevant during the V2 transition; once legacy positions
-    resolve or are backfilled, case 3 goes to zero.
+    Cases 2 and 4 are only relevant during V2 transition. Once legacy
+    positions resolve or are backfilled, both paths go to zero.
     """
     # Local import: strategies doesn't import from automation, so this avoids
     # any circular import risk at module load time.
@@ -99,9 +126,9 @@ def _count_open_in_class(positions: dict, target_class: str) -> int:
         for pos in pos_list:
             if pos.get('status') != 'OPEN':
                 continue
-            pclass = pos.get('position_class')
+            pclass = _normalize_position_class(pos.get('position_class'))
             if not pclass:
-                # Check if we have enough metadata to classify honestly
+                # No persisted class — check if we can classify from metadata
                 has_close_time = pos.get('close_time_ms') is not None
                 has_question   = bool(pos.get('question'))
                 has_category   = bool(pos.get('category'))
