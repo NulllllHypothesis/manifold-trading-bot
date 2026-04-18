@@ -287,11 +287,23 @@ class AutoTrader:
             print(f"  AI vetoed this market (ai_status=skip) — skipping regardless of confidence")
             return "ai_veto"
         if ai_status is None:
-            # Legacy record (pre-ai_status). Apply old logic but only if ai_recommendation
-            # is explicitly 'SKIP' — don't veto on ai_returned_skip alone, because that
-            # flag was incorrectly set for AI failures in the old producer.
+            # Legacy record (pre-ai_status). In the old producer, BOTH "AI no_result"
+            # and "real AI SKIP" produced identical output shape:
+            #   ai_recommendation='SKIP', ai_returned_skip=True, ai_confidence=0.0,
+            #   ai_reasoning='', ai_source=None
+            # They are literally indistinguishable in stored market_research.json.
+            #
+            # We can't safely tell them apart, so we default to the SAFE choice:
+            # veto any legacy SKIP record. This means a small transition cost —
+            # the first hourly research run after this PR lands will rewrite
+            # market_research.json with ai_status fields, and subsequent trader
+            # runs will correctly distinguish no_result from skip.
+            #
+            # For the ~1 hour before that first new research run completes, the
+            # trader continues to veto legacy SKIP records. Better to miss a
+            # trade than to trade on a market the AI genuinely rejected.
             if recommendation.get('ai_recommendation') == 'SKIP':
-                print(f"  AI vetoed this market (legacy SKIP record) — skipping")
+                print(f"  AI vetoed this market (legacy SKIP record — pre-ai_status) — skipping")
                 return "ai_veto"
 
         # Check confidence threshold
@@ -518,7 +530,6 @@ class AutoTrader:
         #      AI failures meant calibration got zero data.
         ai_prob = recommendation.get('ai_estimated_probability')
         p_estimate = ai_prob
-        p_estimate_source = 'ai' if ai_prob is not None else None
 
         if p_estimate is None:
             p_estimate = _stat_derived_probability(
@@ -526,8 +537,6 @@ class AutoTrader:
                 recommendation_direction=recommendation.get('recommendation'),
                 current_prob=current_prob,
             )
-            if p_estimate is not None:
-                p_estimate_source = 'stat'
 
         if p_estimate is not None:
             if outcome == 'YES':

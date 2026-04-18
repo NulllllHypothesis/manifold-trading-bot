@@ -217,6 +217,7 @@ def _save_ai_analysis_cache(cache: dict) -> None:
         with open(_AI_ANALYSIS_CACHE_PATH, 'w') as f:
             json.dump(cache, f)
     except Exception:
+        # Silent on write errors to avoid breaking the research run
         pass
 
 
@@ -925,25 +926,31 @@ class MarketResearcher:
                         _record_ai_timeout(missing_ai, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
                 except TimeoutError as e:
-                    print(f"  Warning: AI analysis timed out ({e}), continuing without AI scores")
-                    # Restore pre-AI confidence scores to prevent partially-blended
-                    # confidences from being written to schema_version=1 output.
+                    # Fresh AI batch timed out. Cache hits are independent of this batch —
+                    # they were looked up from disk BEFORE the batch call — so they must
+                    # NOT be discarded. Only fresh candidates timed out; only they should
+                    # be recorded in cooldown.
+                    print(f"  Warning: AI fresh analysis timed out ({e}); preserving {len(cache_hit_results)} cache hit(s)")
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
-                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    fresh_ids_only = [m.get('id') for m in fresh_candidates if m.get('id')]
+                    if fresh_ids_only:
+                        _record_ai_timeout(fresh_ids_only, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
-                    ai_results = {}
+                    counters["ai_no_result"] += len(fresh_ids_only)
+                    ai_results = dict(cache_hit_results)  # preserve cache hits
                 except Exception as e:
-                    print(f"  Warning: AI analysis failed ({e}), continuing without AI scores")
-                    # Restore pre-AI confidence scores to prevent partially-blended
-                    # confidences from being written to schema_version=1 output.
+                    print(f"  Warning: AI fresh analysis failed ({e}); preserving {len(cache_hit_results)} cache hit(s)")
                     for rec in recommendations:
                         if rec['market_id'] in pre_ai_confidence:
                             rec['confidence'] = pre_ai_confidence[rec['market_id']]
-                    _record_ai_timeout(list(top_candidate_ids), ai_timeout_cooldown)
+                    fresh_ids_only = [m.get('id') for m in fresh_candidates if m.get('id')]
+                    if fresh_ids_only:
+                        _record_ai_timeout(fresh_ids_only, ai_timeout_cooldown)
                     _save_ai_timeout_cooldown(ai_timeout_cooldown)
-                    ai_results = {}
+                    counters["ai_no_result"] += len(fresh_ids_only)
+                    ai_results = dict(cache_hit_results)  # preserve cache hits
 
                 for rec in recommendations:
                     ai = ai_results.get(rec['market_id'])
