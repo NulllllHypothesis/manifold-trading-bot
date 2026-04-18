@@ -1421,5 +1421,165 @@ class TestSlotBucketCap(unittest.TestCase):
         self.assertEqual(n, 1)
 
 
+class TestSlotBucketPersistenceRegression(unittest.TestCase):
+    """
+    V2 Phase 2.1 regression tests — real persisted position shape.
+
+    Earlier bucket-cap tests used hand-built fixtures with slot_bucket
+    pre-populated, or legacy fixtures with close_time_ms. That missed a
+    real bug: `place_paper_bet()` wasn't persisting slot_bucket at all,
+    so positions on disk had no classification. The on-the-fly fallback
+    in _count_open_in_bucket() then classified every one of them as
+    unknown→long_mid_low, silently breaking the bucket-cap policy.
+
+    These tests go through the actual place_paper_bet() path so a future
+    regression where bucket metadata stops being persisted fails loudly.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _fresh_trader(self):
+        """Fresh PaperTrader with empty state file in a temp dir.
+
+        PaperTrader picks its state_file in __init__ from a module-level path,
+        so we redirect to a tmp file before construction and wipe in-memory
+        state after construction.
+        """
+        import os
+        from manifold_bot.paper_trader import PaperTrader
+        state_path = os.path.join(self.tmpdir, 'state.json')
+        trader = PaperTrader(initial_balance=1000.0)
+        trader.state_file = state_path
+        trader.balance = 1000.0
+        trader.positions = {}
+        trader.trade_history = []
+        return trader
+
+    def test_place_paper_bet_persists_slot_bucket(self):
+        """place_paper_bet must write slot_bucket to the position record."""
+        trader = self._fresh_trader()
+        import time as _time
+        future_close = int((_time.time() + 3 * 86400) * 1000)
+
+        ok = trader.place_paper_bet(
+            market_id='mkt_persist_short',
+            outcome='YES',
+            amount=5.0,
+            probability=0.5,
+            category='sports',
+            question='Will the NBA finals game 1 go to overtime?',
+            horizon='short',
+            reliability='high',
+            slot_bucket='short',
+            close_time_ms=future_close,
+        )
+        self.assertTrue(ok)
+        positions = trader.positions['mkt_persist_short']
+        self.assertEqual(len(positions), 1)
+        pos = positions[0]
+        # These fields MUST be persisted, else slot caps break silently
+        self.assertEqual(pos['slot_bucket'], 'short')
+        self.assertEqual(pos['horizon'], 'short')
+        self.assertEqual(pos['reliability'], 'high')
+        self.assertEqual(pos['close_time_ms'], future_close)
+
+    def test_count_open_in_bucket_reads_persisted_field(self):
+        """_count_open_in_bucket should use the stored slot_bucket, not re-classify."""
+        trader = self._fresh_trader()
+        import time as _time
+        future = int((_time.time() + 2 * 86400) * 1000)
+
+        # Place a real 'short' trade through place_paper_bet
+        trader.place_paper_bet(
+            market_id='mkt_s',
+            outcome='YES',
+            amount=5.0,
+            probability=0.5,
+            category='sports',
+            question='Short-horizon sports market',
+            horizon='short',
+            reliability='high',
+            slot_bucket='short',
+            close_time_ms=future,
+        )
+
+        from automation.auto_trader import _count_open_in_bucket
+        short_count = _count_open_in_bucket(trader.positions, 'short')
+        long_mid_low_count = _count_open_in_bucket(trader.positions, 'long_mid_low')
+
+        self.assertEqual(short_count, 1, "persisted slot_bucket='short' must count in 'short'")
+        self.assertEqual(long_mid_low_count, 0,
+                         "persisted short position must NOT count as long_mid_low")
+
+    def test_real_executed_short_positions_enforce_short_cap(self):
+        """
+        End-to-end regression: five executed short-horizon trades should block a
+        sixth short-bucket recommendation via slot_bucket_full, not None.
+        """
+        from unittest.mock import patch, MagicMock
+        from automation.auto_trader import AutoTrader, _SLOT_BUCKET_CAPS
+        import time as _time
+
+        # Spin up AutoTrader with a real PaperTrader writing to temp state
+        import os
+        state_file = os.path.join(self.tmpdir, 'state.json')
+        with patch.dict(os.environ, {}, clear=False):
+            with patch('automation.auto_trader.PaperTrader') as MockTrader:
+                real_trader = MagicMock()
+                real_trader.positions = {}
+                real_trader.balance = 1000.0
+                MockTrader.return_value = real_trader
+                at = AutoTrader()
+
+        # Populate five short positions through the REAL persistence shape
+        # (same dict layout place_paper_bet would write).
+        future = int((_time.time() + 3 * 86400) * 1000)
+        for i in range(_SLOT_BUCKET_CAPS['short']):
+            at.trader.positions[f'mkt_s{i}'] = [{
+                'trade_id': i,
+                'market_id': f'mkt_s{i}',
+                'status': 'OPEN',
+                'outcome': 'YES',
+                'amount': 5.0,
+                'probability': 0.5,
+                'category': 'sports',
+                'question': f'Short market {i}',
+                'horizon': 'short',
+                'reliability': 'high',
+                'slot_bucket': 'short',
+                'close_time_ms': future,
+            }]
+
+        # New short recommendation must be rejected with slot_bucket_full
+        rec = {
+            'market_id': 'mkt_new',
+            'question': 'Another short-horizon sports match tomorrow',
+            'recommendation': 'YES',
+            'confidence': 0.80,
+            'probability': 0.50,
+            'liquidity': 500,
+            'category': 'sports',
+            'strategies': ['probability_direction'],
+            'horizon': 'short',
+            'reliability': 'high',
+            'slot_bucket': 'short',
+            'close_time_ms': future,
+        }
+        reason = at._trade_rejection_reason('mkt_new', rec)
+        self.assertEqual(
+            reason,
+            'slot_bucket_full',
+            f"Expected slot_bucket_full but got {reason!r} — bucket cap is not firing "
+            "on real persisted short positions. Bucket metadata may not be flowing "
+            "from place_paper_bet() to the saved position record.",
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

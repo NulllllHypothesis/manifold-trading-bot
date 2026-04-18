@@ -622,6 +622,14 @@ class AutoTrader:
             strategies=recommendation.get('strategies', []),
             category=recommendation.get('category'),
             question=recommendation.get('question'),
+            # V2 Phase 2.1 — persist classification on the position record so
+            # _count_open_in_bucket() reads the exact bucket the trader approved.
+            # Without this, the on-the-fly classify_position() fallback sees no
+            # close_time_ms and misclassifies every position as long_mid_low.
+            horizon=recommendation.get('horizon'),
+            reliability=recommendation.get('reliability'),
+            slot_bucket=recommendation.get('slot_bucket'),
+            close_time_ms=recommendation.get('close_time_ms'),
         )
 
         if success:
