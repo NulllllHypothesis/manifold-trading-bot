@@ -309,7 +309,9 @@ class TestRepriceAllPositions(unittest.TestCase):
         self.assertEqual(by_market['mkt_A'][3], 1)  # api_error=1
         self.assertEqual(by_market['mkt_B'][3], 0)
 
-    def test_api_returns_none_counts_as_failure(self):
+    def test_api_returns_none_counts_as_failure_and_records_api_error_row(self):
+        # Reviewer finding: None response must also leave an api_error=1
+        # snapshot row so dashboards can see which markets are failing.
         self._write_state(_make_state({
             'mkt_A': [_make_position(market_id='mkt_A', entry_prob=0.5)],
         }))
@@ -317,7 +319,17 @@ class TestRepriceAllPositions(unittest.TestCase):
         self.assertEqual(priced, 0)
         self.assertEqual(failed, 1)
 
-    def test_api_returns_market_without_probability_counts_as_failure(self):
+        snaps = self._snapshots()
+        self.assertEqual(len(snaps), 1)
+        mid, prob, pnl, res, err = snaps[0]
+        self.assertEqual(mid, 'mkt_A')
+        self.assertEqual(err, 1)
+        self.assertIsNone(prob)
+        self.assertIsNone(pnl)
+
+    def test_api_returns_market_without_probability_records_api_error_row(self):
+        # Reviewer finding: missing `probability` is also a tolerated failure
+        # mode and must write an api_error=1 row, same as a thrown exception.
         self._write_state(_make_state({
             'mkt_A': [_make_position(market_id='mkt_A', entry_prob=0.5)],
         }))
@@ -326,6 +338,39 @@ class TestRepriceAllPositions(unittest.TestCase):
         )
         self.assertEqual(priced, 0)
         self.assertEqual(failed, 1)
+
+        snaps = self._snapshots()
+        self.assertEqual(len(snaps), 1)
+        mid, prob, pnl, res, err = snaps[0]
+        self.assertEqual(mid, 'mkt_A')
+        self.assertEqual(err, 1)
+
+    def test_verbose_does_not_crash_on_legacy_position_without_entry_probability(self):
+        # Reviewer finding: legacy positions may have `probability` but no
+        # `entry_probability`. Verbose log formatting must not TypeError.
+        legacy = _make_position(market_id='mkt_A', entry_prob=0.5)
+        legacy.pop('entry_probability', None)
+        self._write_state(_make_state({'mkt_A': [legacy]}))
+
+        priced, failed, _ = reprice_all_positions(
+            fetch_market=lambda _id: {'probability': 0.6, 'isResolved': False},
+            verbose=True,
+        )
+        self.assertEqual(priced, 1)
+        self.assertEqual(failed, 0)
+
+    def test_verbose_does_not_crash_when_entry_probability_is_none(self):
+        # Even more defensively: an explicit None shouldn't format-crash.
+        legacy = _make_position(market_id='mkt_A', entry_prob=0.5)
+        legacy['entry_probability'] = None
+        legacy['probability'] = None
+        self._write_state(_make_state({'mkt_A': [legacy]}))
+
+        priced, failed, _ = reprice_all_positions(
+            fetch_market=lambda _id: {'probability': 0.6, 'isResolved': False},
+            verbose=True,
+        )
+        self.assertEqual(priced, 1)
 
     def test_closed_positions_are_skipped(self):
         self._write_state(_make_state({

@@ -262,32 +262,39 @@ def reprice_all_positions(
     n_failed = 0
     n_resolved = 0
 
+    def _record_api_error(pos_dict: Dict, market_id: str, reason: str) -> None:
+        """Log an api_error=1 row so dashboards see chronic-failure markets.
+
+        Used for *every* tolerated fetch failure — exception, None response,
+        or response missing `probability` — so the error-visibility contract
+        is the same regardless of how the API misbehaved.
+        """
+        if verbose:
+            print(f"  [{market_id}] {reason}")
+        _insert_snapshot_row(conn, {
+            'trade_id': pos_dict.get('trade_id'),
+            'market_id': market_id,
+            'snapshot_at': now_iso,
+            'outcome': pos_dict.get('outcome'),
+            'amount': pos_dict.get('amount'),
+            'entry_probability': pos_dict.get('entry_probability') or pos_dict.get('probability'),
+            'api_error': True,
+        })
+
     try:
         for market_id, idx, pos in _iter_open_positions(state):
-            # Fetch current market state. Any exception → log + skip this
-            # position (don't abort the whole run).
+            # Fetch current market state. Any failure mode (exception,
+            # None response, missing probability) → log an api_error row
+            # and skip. Don't abort the whole run.
             try:
                 market = fetch_market(market_id)
             except Exception as e:
-                if verbose:
-                    print(f"  [{market_id}] fetch failed: {e}")
-                # Record the error in the snapshot table so dashboards can
-                # see which markets are failing and for how long
-                _insert_snapshot_row(conn, {
-                    'trade_id': pos.get('trade_id'),
-                    'market_id': market_id,
-                    'snapshot_at': now_iso,
-                    'outcome': pos.get('outcome'),
-                    'amount': pos.get('amount'),
-                    'entry_probability': pos.get('entry_probability') or pos.get('probability'),
-                    'api_error': True,
-                })
+                _record_api_error(pos, market_id, f"fetch failed: {e}")
                 n_failed += 1
                 continue
 
             if not market:
-                if verbose:
-                    print(f"  [{market_id}] API returned nothing")
+                _record_api_error(pos, market_id, "API returned nothing")
                 n_failed += 1
                 continue
 
@@ -296,8 +303,7 @@ def reprice_all_positions(
 
             # Some markets (rare) come back without a probability — treat as failure.
             if current_prob is None or not isinstance(current_prob, (int, float)):
-                if verbose:
-                    print(f"  [{market_id}] no probability in API response")
+                _record_api_error(pos, market_id, "no probability in API response")
                 n_failed += 1
                 continue
 
@@ -316,11 +322,20 @@ def reprice_all_positions(
                 n_resolved += 1
 
             if verbose:
+                # Use the resolved entry probability (incl. legacy `probability`
+                # fallback) — older positions may lack `entry_probability`
+                # entirely and formatting None with :.3f would TypeError.
+                entry_p = snapshot['entry_probability']
+                entry_str = f"{entry_p:.3f}" if isinstance(entry_p, (int, float)) else "?"
                 pnl_str = f"${snapshot['unrealised_pnl']:+.2f}"
+                days_str = (
+                    f"{snapshot['days_held']:.1f}"
+                    if snapshot['days_held'] is not None else "?"
+                )
                 resolved_tag = " [RESOLVED]" if is_resolved else ""
-                print(f"  [{market_id[:12]}] entry={pos.get('entry_probability'):.3f} "
+                print(f"  [{market_id[:12]}] entry={entry_str} "
                       f"→ now={current_prob:.3f}  pnl={pnl_str}  "
-                      f"days={snapshot['days_held']:.1f}{resolved_tag}")
+                      f"days={days_str}{resolved_tag}")
 
         conn.commit()
     finally:
