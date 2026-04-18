@@ -1411,6 +1411,118 @@ class TestPositionClassCap(unittest.TestCase):
         )
         self.assertEqual(reason, 'position_class_full')
 
+    def test_stale_recommendation_with_obsolete_position_class_value_still_capped(self):
+        """
+        Regression: stale market_research.json from intermediate branch
+        revisions can contain recommendations with position_class='long_reliable'.
+        The trader must normalize those to 'long_or_uncertain' BEFORE the cap
+        check, else the obsolete value matches no current class key and the
+        cap check silently skips.
+
+        Reviewer's exact repro: 2 persisted open positions in long_or_uncertain
+        (cap = 2, full) + a stale rec with position_class='long_reliable'
+        should get rejected with position_class_full, not None.
+        """
+        from unittest.mock import patch, MagicMock
+        from automation.auto_trader import AutoTrader
+        import time
+        future = int((time.time() + 60 * 86400) * 1000)
+
+        with patch('automation.auto_trader.PaperTrader') as MockTrader:
+            real_trader = MagicMock()
+            real_trader.positions = {
+                'mkt_a': [{
+                    'market_id': 'mkt_a', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'category': 'sports',
+                    'position_class': 'long_or_uncertain',
+                    'close_time_ms': future,
+                }],
+                'mkt_b': [{
+                    'market_id': 'mkt_b', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'category': 'other',
+                    'position_class': 'long_or_uncertain',
+                    'close_time_ms': future,
+                }],
+            }
+            real_trader.balance = 1000.0
+            MockTrader.return_value = real_trader
+            at = AutoTrader()
+
+        # Stale recommendation shape from intermediate branch (4-bucket era)
+        stale_rec = {
+            'market_id': 'mkt_stale',
+            'question': 'Long-term market from a stale research run',
+            'recommendation': 'YES',
+            'confidence': 0.80,
+            'probability': 0.50,
+            'liquidity': 500,
+            'category': 'sports',
+            'strategies': ['probability_direction'],
+            'position_class': 'long_reliable',  # obsolete 4-bucket value
+            'close_time_ms': future,
+        }
+        reason = at._trade_rejection_reason('mkt_stale', stale_rec)
+        self.assertEqual(
+            reason, 'position_class_full',
+            "obsolete position_class='long_reliable' on a recommendation must "
+            "normalize to long_or_uncertain before cap check, else the stale "
+            "rec bypasses the new 3-class policy"
+        )
+
+    def test_stale_recommendation_with_pre_rename_slot_bucket_field_still_capped(self):
+        """
+        Even-older regression: recommendations from the very earliest V2
+        commits used the field name `slot_bucket` (before rename to
+        `position_class`). Those stale records must also route through
+        the same cap logic.
+        """
+        from unittest.mock import patch, MagicMock
+        from automation.auto_trader import AutoTrader
+        import time
+        future = int((time.time() + 60 * 86400) * 1000)
+
+        with patch('automation.auto_trader.PaperTrader') as MockTrader:
+            real_trader = MagicMock()
+            real_trader.positions = {
+                'mkt_a': [{
+                    'market_id': 'mkt_a', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'position_class': 'long_or_uncertain',
+                    'close_time_ms': future,
+                }],
+                'mkt_b': [{
+                    'market_id': 'mkt_b', 'status': 'OPEN', 'outcome': 'YES',
+                    'amount': 5, 'probability': 0.5,
+                    'position_class': 'long_or_uncertain',
+                    'close_time_ms': future,
+                }],
+            }
+            real_trader.balance = 1000.0
+            MockTrader.return_value = real_trader
+            at = AutoTrader()
+
+        # Pre-rename recommendation shape — slot_bucket field, long_high value
+        ancient_rec = {
+            'market_id': 'mkt_ancient',
+            'question': 'Market from earliest V2 commit',
+            'recommendation': 'YES',
+            'confidence': 0.80,
+            'probability': 0.50,
+            'liquidity': 500,
+            'category': 'sports',
+            'strategies': ['probability_direction'],
+            'slot_bucket': 'long_high',  # pre-rename field AND obsolete value
+            'close_time_ms': future,
+        }
+        reason = at._trade_rejection_reason('mkt_ancient', ancient_rec)
+        self.assertEqual(
+            reason, 'position_class_full',
+            "recommendation with pre-rename slot_bucket='long_high' must "
+            "normalize all the way through to long_or_uncertain"
+        )
+
     def test_obsolete_long_reliable_class_normalizes_to_long_or_uncertain(self):
         """
         Regression: intermediate revisions of feature/v2-ai-smarter persisted

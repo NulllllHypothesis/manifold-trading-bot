@@ -93,6 +93,30 @@ def _normalize_position_class(pclass: Optional[str]) -> Optional[str]:
     return _OBSOLETE_POSITION_CLASS_MIGRATIONS.get(pclass, pclass)
 
 
+def _extract_normalized_position_class(record: dict) -> Optional[str]:
+    """
+    Read position_class from a recommendation or position record, normalizing
+    both the field NAME and the VALUE.
+
+    Two layers of obsolete shape exist:
+
+      (a) Pre-rename field name: earliest V2 commits persisted the field
+          as `slot_bucket`. The later rename to `position_class` kept the
+          values but moved the key.
+
+      (b) Obsolete values: both `slot_bucket` and early `position_class`
+          records can hold `long_high` / `long_mid_low` (pre-rename) or
+          `long_reliable` / `long_risky` (post-rename, pre-3-class-collapse).
+
+    This helper reads whichever field is present (prefers `position_class`
+    when both exist), then normalizes the value through the migration map.
+    Used by both `_trade_rejection_reason()` (on recommendations) and
+    `_count_open_in_class()` (on positions).
+    """
+    raw = record.get('position_class') or record.get('slot_bucket')
+    return _normalize_position_class(raw)
+
+
 def _count_open_in_class(positions: dict, target_class: str) -> int:
     """
     Count OPEN positions whose position_class matches target_class.
@@ -126,7 +150,8 @@ def _count_open_in_class(positions: dict, target_class: str) -> int:
         for pos in pos_list:
             if pos.get('status') != 'OPEN':
                 continue
-            pclass = _normalize_position_class(pos.get('position_class'))
+            # Handle both legacy field name (slot_bucket) and obsolete values
+            pclass = _extract_normalized_position_class(pos)
             if not pclass:
                 # No persisted class — check if we can classify from metadata
                 has_close_time = pos.get('close_time_ms') is not None
@@ -418,11 +443,15 @@ class AutoTrader:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
             return "max_positions"
 
-        # V2 Phase 2.1 — Check position_class cap (term × resolvability).
-        # Biases the book toward fast-resolving reliable markets so the learning
-        # loop gets fed faster. Long-term risky markets get at most 1 slot
-        # because they tie up capital longest with highest abandonment risk.
-        position_class = recommendation.get('position_class')
+        # V2 Phase 2.1 — Check position_class cap (3 buckets: short, medium,
+        # long_or_uncertain). Biases the book toward fast-resolving markets.
+        #
+        # _extract_normalized_position_class handles two legacy shapes:
+        # 1. Pre-rename field name 'slot_bucket' in stale market_research.json
+        # 2. Obsolete values (long_reliable / long_risky / long_high / long_mid_low)
+        # so stale recommendations from intermediate branch revisions can't
+        # bypass the cap by carrying values that match none of the current keys.
+        position_class = _extract_normalized_position_class(recommendation)
         if position_class and position_class in _POSITION_CLASS_CAPS:
             cap = _POSITION_CLASS_CAPS[position_class]
             open_in_class = _count_open_in_class(self.trader.positions, position_class)
