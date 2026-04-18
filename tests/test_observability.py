@@ -169,8 +169,8 @@ class TestTraderCountersShape(unittest.TestCase):
         """Every gate in _trade_rejection_reason() must have a counter slot."""
         expected = {
             "ai_veto", "low_confidence", "existing_open", "max_positions",
-            "category_cap", "liquidity", "kelly_no_edge", "size_too_small",
-            "market_unverifiable",
+            "category_cap", "slot_bucket_full", "liquidity", "kelly_no_edge",
+            "size_too_small", "market_unverifiable",
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():

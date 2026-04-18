@@ -1192,5 +1192,234 @@ class TestSwapCheckerLiquidityGate(unittest.TestCase):
         self.assertEqual(result["market_id"], "high_liq")
 
 
+class TestPositionClassification(unittest.TestCase):
+    """V2 Phase 2.1 — classify_position labels market by horizon × reliability."""
+
+    def _market(self, close_days_away=None, category='sports',
+                question='Will the game end in overtime?',
+                liquidity=500, bettors=10):
+        """Helper: build a market dict for classification tests."""
+        import time as _time
+        close_time_ms = None
+        if close_days_away is not None:
+            close_time_ms = int((_time.time() + close_days_away * 86400) * 1000)
+        return {
+            'question': question,
+            'category': category,
+            'closeTime': close_time_ms,
+            'totalLiquidity': liquidity,
+            'uniqueBettorCount': bettors,
+        }
+
+    def test_short_horizon_under_7_days(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=3))
+        self.assertEqual(result['horizon'], 'short')
+
+    def test_medium_horizon_8_to_30_days(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=14))
+        self.assertEqual(result['horizon'], 'medium')
+
+    def test_long_horizon_over_30_days(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=60))
+        self.assertEqual(result['horizon'], 'long')
+
+    def test_unknown_horizon_when_no_close_time(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=None))
+        self.assertEqual(result['horizon'], 'unknown')
+
+    def test_past_close_time_treated_as_short(self):
+        """Markets past closeTime are 'short' — awaiting creator resolution."""
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=-2))
+        self.assertEqual(result['horizon'], 'short')
+
+    def test_sports_category_is_high_reliability(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(category='sports'))
+        self.assertEqual(result['reliability'], 'high')
+
+    def test_other_category_is_low_reliability(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(category='other'))
+        self.assertEqual(result['reliability'], 'low')
+
+    def test_politics_category_is_medium_reliability(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(category='politics'))
+        self.assertEqual(result['reliability'], 'medium')
+
+    def test_ever_pattern_forces_low_reliability(self):
+        """'Will X ever happen' questions → low reliability regardless of category."""
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(
+            question='Will humans ever colonize Mars?',
+            category='science',  # would normally be medium
+        ))
+        self.assertEqual(result['reliability'], 'low')
+
+    def test_low_liquidity_demotes_reliability(self):
+        """Sports market with very low liquidity gets demoted from high to medium."""
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(
+            category='sports',
+            liquidity=50,
+            bettors=2,
+        ))
+        self.assertIn(result['reliability'], ('medium', 'low'))
+
+    def test_slot_bucket_short_for_short_horizon(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=3, category='sports'))
+        self.assertEqual(result['slot_bucket'], 'short')
+
+    def test_slot_bucket_medium_for_medium_horizon(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=14, category='politics'))
+        self.assertEqual(result['slot_bucket'], 'medium')
+
+    def test_slot_bucket_long_high_for_long_plus_high_reliability(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=60, category='sports'))
+        self.assertEqual(result['slot_bucket'], 'long_high')
+
+    def test_slot_bucket_long_mid_low_for_long_plus_lower_reliability(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=60, category='other'))
+        self.assertEqual(result['slot_bucket'], 'long_mid_low')
+
+    def test_unknown_horizon_maps_to_long_mid_low_bucket(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=None, category='other'))
+        self.assertEqual(result['slot_bucket'], 'long_mid_low')
+
+    def test_days_to_close_is_populated(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=5))
+        self.assertIsNotNone(result['days_to_close'])
+        self.assertAlmostEqual(result['days_to_close'], 5.0, places=1)
+
+    def test_days_to_close_is_none_when_no_close_time(self):
+        from manifold_bot.strategies import classify_position
+        result = classify_position(self._market(close_days_away=None))
+        self.assertIsNone(result['days_to_close'])
+
+
+class TestSlotBucketCap(unittest.TestCase):
+    """V2 Phase 2.1 — auto_trader.py enforces per-bucket slot caps."""
+
+    def _make_trader_with_positions(self, positions):
+        from unittest.mock import patch, MagicMock
+        from automation.auto_trader import AutoTrader
+        with patch("automation.auto_trader.PaperTrader") as MockTrader:
+            mock_instance = MagicMock()
+            mock_instance.positions = positions
+            mock_instance.balance = 1000.0
+            MockTrader.return_value = mock_instance
+            trader = AutoTrader()
+        return trader
+
+    def _rec(self, **overrides):
+        base = {
+            'market_id': 'mkt_test',
+            'question': 'Will the short-term match end tomorrow?',
+            'recommendation': 'YES',
+            'confidence': 0.75,
+            'probability': 0.50,
+            'liquidity': 500,
+            'category': 'sports',
+            'strategies': ['probability_direction'],
+            'horizon': 'short',
+            'reliability': 'high',
+            'slot_bucket': 'short',
+        }
+        base.update(overrides)
+        return base
+
+    def _open_pos(self, market_id='mkt_x', **fields):
+        """Build an open position with sane defaults + slot_bucket."""
+        base = {
+            'market_id': market_id,
+            'status': 'OPEN',
+            'question': 'some question',
+            'category': 'sports',
+            'amount': 5,
+            'probability': 0.5,
+            'outcome': 'YES',
+            'slot_bucket': 'short',
+        }
+        base.update(fields)
+        return base
+
+    def test_short_bucket_allows_up_to_cap(self):
+        """5 short-bucket open positions + short rec → blocked with slot_bucket_full."""
+        from automation.auto_trader import _SLOT_BUCKET_CAPS
+        short_cap = _SLOT_BUCKET_CAPS['short']
+        positions = {
+            f'mkt_{i}': [self._open_pos(market_id=f'mkt_{i}', slot_bucket='short', category='sports')]
+            for i in range(short_cap)
+        }
+        trader = self._make_trader_with_positions(positions)
+        reason = trader._trade_rejection_reason('mkt_new', self._rec(slot_bucket='short'))
+        self.assertEqual(reason, 'slot_bucket_full')
+
+    def test_different_buckets_have_independent_caps(self):
+        """5 short positions does NOT block a medium-bucket trade."""
+        positions = {
+            f'mkt_s{i}': [self._open_pos(market_id=f'mkt_s{i}', slot_bucket='short')]
+            for i in range(5)
+        }
+        trader = self._make_trader_with_positions(positions)
+        # Medium rec should pass (no medium positions yet)
+        reason = trader._trade_rejection_reason(
+            'mkt_new',
+            self._rec(slot_bucket='medium', question='Will politics market resolve in 2 weeks?',
+                      category='politics'),
+        )
+        # Note: max_positions check runs first. 5 < 10 so we're fine.
+        # Categories may still block — let's ensure it's not slot_bucket
+        if reason is not None:
+            self.assertNotEqual(reason, 'slot_bucket_full')
+
+    def test_long_high_bucket_cap_is_one(self):
+        """Long+high-reliability has only 1 slot — second one blocked."""
+        positions = {
+            'mkt_long1': [self._open_pos(market_id='mkt_long1', slot_bucket='long_high',
+                                         category='economics')],
+        }
+        trader = self._make_trader_with_positions(positions)
+        reason = trader._trade_rejection_reason(
+            'mkt_new',
+            self._rec(slot_bucket='long_high', question='Will the Fed hike in 2027?',
+                      category='economics'),
+        )
+        self.assertEqual(reason, 'slot_bucket_full')
+
+    def test_legacy_position_without_slot_bucket_still_counted(self):
+        """Old positions without slot_bucket field get classified on the fly."""
+        from manifold_bot.strategies import classify_position
+        # Build a legacy position that should classify as 'short' (sports market)
+        import time
+        legacy_pos = {
+            'market_id': 'legacy_mkt',
+            'status': 'OPEN',
+            'question': 'Will the NBA finals end today?',
+            'category': 'sports',
+            'amount': 5,
+            'probability': 0.5,
+            'outcome': 'YES',
+            'close_time_ms': int((time.time() + 2 * 86400) * 1000),
+            'liquidity': 500,
+            'unique_bettors': 10,
+            # NOTE: no slot_bucket field
+        }
+        from automation.auto_trader import _count_open_in_bucket
+        n = _count_open_in_bucket({'legacy_mkt': [legacy_pos]}, 'short')
+        self.assertEqual(n, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -48,6 +48,7 @@ def _new_trader_counters() -> dict:
             "existing_open":        0,
             "max_positions":        0,
             "category_cap":         0,
+            "slot_bucket_full":     0,      # V2 Phase 2.1: horizon/reliability bucket cap
             "liquidity":            0,
             "kelly_no_edge":        0,
             "size_too_small":       0,
@@ -57,6 +58,52 @@ def _new_trader_counters() -> dict:
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
         "trades_executed":          0,
     }
+
+
+# V2 Phase 2.1: slot caps by classification bucket.
+# Favors short-fuse and high-reliability markets (they produce learning data
+# faster). Total = 5 + 3 + 1 + 1 = 10 matches MAX_POSITIONS.
+#
+# The 'flex' slot is shared — any bucket can use it once when their own bucket
+# is full. Prevents edge cases where e.g. 4 excellent short-term opportunities
+# arrive when short bucket is already at 5.
+_SLOT_BUCKET_CAPS = {
+    'short':        5,
+    'medium':       3,
+    'long_high':    1,
+    'long_mid_low': 1,  # acts as the "flex" slot
+}
+
+
+def _count_open_in_bucket(positions: dict, target_bucket: str) -> int:
+    """Count open positions whose slot_bucket matches target_bucket.
+
+    Legacy positions without slot_bucket metadata are classified on the fly
+    from whatever fields are present; if classification fails (no closeTime,
+    no question), they're counted against 'long_mid_low' as the safest default.
+    """
+    # Local import to avoid circular — strategies imports nothing from automation
+    from manifold_bot.strategies import classify_position
+
+    n = 0
+    for pos_list in positions.values():
+        for pos in pos_list:
+            if pos.get('status') != 'OPEN':
+                continue
+            bucket = pos.get('slot_bucket')
+            if not bucket:
+                # Legacy position — classify from what we have
+                synthetic = {
+                    'question': pos.get('question', ''),
+                    'category': pos.get('category'),
+                    'closeTime': pos.get('close_time_ms'),
+                    'totalLiquidity': pos.get('liquidity', 0),
+                    'uniqueBettorCount': pos.get('unique_bettors', 0),
+                }
+                bucket = classify_position(synthetic)['slot_bucket']
+            if bucket == target_bucket:
+                n += 1
+    return n
 
 
 def _print_trader_counters(counters: dict) -> None:
@@ -328,6 +375,19 @@ class AutoTrader:
         if open_positions >= self.max_positions:
             print(f"  Max positions reached ({open_positions}/{self.max_positions})")
             return "max_positions"
+
+        # V2 Phase 2.1 — Check slot-bucket cap (horizon × reliability).
+        # This biases the book toward fast-resolving reliable markets so the
+        # learning loop gets fed faster. Long-horizon low-reliability markets
+        # get at most 1 slot because they tie up capital for the longest with
+        # the highest abandonment risk.
+        slot_bucket = recommendation.get('slot_bucket')
+        if slot_bucket and slot_bucket in _SLOT_BUCKET_CAPS:
+            cap = _SLOT_BUCKET_CAPS[slot_bucket]
+            open_in_bucket = _count_open_in_bucket(self.trader.positions, slot_bucket)
+            if open_in_bucket >= cap:
+                print(f"  Slot bucket full: {slot_bucket} has {open_in_bucket}/{cap} open positions")
+                return "slot_bucket_full"
 
         # Check category exposure cap — prevent over-concentration in one topic.
         # Category comes from the research recommendation; fall back to inference

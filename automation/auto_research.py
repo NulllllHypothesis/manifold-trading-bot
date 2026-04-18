@@ -17,7 +17,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market
+from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market, classify_position
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY, MAX_BET_AMOUNT
@@ -689,6 +689,9 @@ class MarketResearcher:
                     for p in self.trader.positions.get(market_id, [])
                 )
 
+                # V2 Phase 2.1: classify position horizon × reliability
+                classification = classify_position(market)
+
                 recommendation = {
                     'market_id': market_id,
                     'question': question,
@@ -699,6 +702,11 @@ class MarketResearcher:
                     'liquidity': liquidity,
                     'unique_bettors': market.get('uniqueBettorCount') or 0,
                     'last_bet_time_ms': market.get('lastBetTime'),
+                    'close_time_ms': classification['close_time_ms'],
+                    'days_to_close': classification['days_to_close'],
+                    'horizon': classification['horizon'],
+                    'reliability': classification['reliability'],
+                    'slot_bucket': classification['slot_bucket'],
                     'recommendation': overall_rec,
                     'confidence': round(confidence, 2),
                     'strategies': [s['strategy'] for s in active_signals] + (['thin_market'] if thin_market_fired else []),

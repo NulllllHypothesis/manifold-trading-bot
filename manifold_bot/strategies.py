@@ -288,6 +288,188 @@ def _infer_market_category(question: str) -> str:
     return 'other'
 
 
+# ── Position classification (V2 Phase 2.1) ──────────────────────────────────
+# Markets differ on TWO dimensions that change how they should be managed:
+#
+#   1. horizon     — when is the market expected to resolve?
+#   2. reliability — will it actually resolve, or will the creator abandon it?
+#
+# Short-fuse high-reliability markets (sports match tomorrow, scheduled election)
+# produce outcomes in days and feed the learning loop fast. Long-term low-reliability
+# markets (creator-dependent abstract questions) can sit unresolved for months.
+#
+# The slot allocation favors short and reliable, biasing the book toward fast,
+# trustworthy resolution — which is what the bot needs to actually learn.
+
+# Horizon thresholds in days
+_HORIZON_SHORT_DAYS = 7
+_HORIZON_MEDIUM_DAYS = 30
+# (>_HORIZON_MEDIUM_DAYS → long)
+
+# Reliability heuristics — category-based baseline. These are first-pass signals;
+# can be refined later with creator activity + resolution-rate data.
+_RELIABILITY_HIGH_CATEGORIES = frozenset({
+    'sports',       # external score data, scheduled resolution
+    'economics',    # scheduled releases (CPI, Fed announcements)
+})
+_RELIABILITY_MEDIUM_CATEGORIES = frozenset({
+    'politics',     # elections have deadlines, but creator still has to click resolve
+    'ai_tech',      # dated product launches are usually resolved
+    'entertainment',  # scheduled releases (movies, awards)
+    'gaming',       # scheduled releases
+    'science',      # scheduled missions, publication dates
+    'business',     # earnings dates, IPO dates
+    'crypto',       # price-dependent; creator dependent for non-price markets
+})
+# Anything in 'other' or not in the maps → low reliability
+
+# Question text patterns that suggest low reliability (abandonment risk).
+# Signals open-ended "when will X eventually happen" framing with no deadline.
+_LOW_RELIABILITY_QUESTION_PATTERNS = (
+    ' ever ',            # "Will humans ever colonize Mars?" / "Will X ever be legal?"
+    'ever happen',
+    'at some point',
+    'eventually',
+    ' by 2030',
+    ' by 2035',
+    ' by 2040',
+    ' by 2050',
+)
+
+
+def _classify_horizon(close_time_ms: Optional[int], now_ms: Optional[float] = None) -> str:
+    """
+    Classify market horizon from closeTime (unix ms).
+
+    Returns one of: 'short', 'medium', 'long', 'unknown'.
+
+    'unknown' covers markets with no closeTime (perpetual questions) or invalid
+    closeTime values. Treated like 'long' for slot policy purposes but kept
+    distinct for observability.
+    """
+    if not close_time_ms:
+        return 'unknown'
+    if not isinstance(close_time_ms, (int, float)):
+        return 'unknown'
+    now = now_ms if now_ms is not None else time.time() * 1000
+    days_to_close = (close_time_ms - now) / 86_400_000
+    if days_to_close <= 0:
+        # Already past closeTime — likely awaiting resolution. Treat as 'short'
+        # because nothing is going to make this longer; it just needs the
+        # creator to click resolve.
+        return 'short'
+    if days_to_close <= _HORIZON_SHORT_DAYS:
+        return 'short'
+    if days_to_close <= _HORIZON_MEDIUM_DAYS:
+        return 'medium'
+    return 'long'
+
+
+def _classify_reliability(market: Dict) -> str:
+    """
+    Classify market resolution reliability as 'high', 'medium', or 'low'.
+
+    Heuristics (first-pass, refinable later):
+    - Category-based: sports/economics → high, most others → medium, other/unknown → low
+    - Question text: 'will X ever happen' / 'by 2050' patterns → low
+    - Liquidity as community-attention proxy: very low liquidity → lean lower
+    - Bettor count: very few bettors → lean lower
+    """
+    question = market.get('question', '') or ''
+    category = market.get('category') or _infer_market_category(question)
+    q_lower = question.lower()
+
+    # Explicit low-reliability question patterns
+    if any(pat in q_lower for pat in _LOW_RELIABILITY_QUESTION_PATTERNS):
+        return 'low'
+
+    # Category-based baseline
+    if category in _RELIABILITY_HIGH_CATEGORIES:
+        baseline = 'high'
+    elif category in _RELIABILITY_MEDIUM_CATEGORIES:
+        baseline = 'medium'
+    else:
+        baseline = 'low'
+
+    # Demote based on community-attention signals
+    liquidity = market.get('totalLiquidity', 0) or market.get('liquidity', 0) or 0
+    bettors = market.get('uniqueBettorCount', 0) or 0
+
+    if baseline == 'high' and (liquidity < 300 or bettors < 5):
+        baseline = 'medium'
+    if baseline == 'medium' and (liquidity < 200 or bettors < 3):
+        baseline = 'low'
+
+    return baseline
+
+
+def _slot_bucket(horizon: str, reliability: str) -> str:
+    """
+    Map (horizon, reliability) to a slot-accounting bucket.
+
+    Buckets and default caps (enforced in auto_trader.py):
+      short            — 5 slots
+      medium           — 3 slots
+      long_high        — 1 slot (long-term but reliable resolution source)
+      long_mid_low     — 0-1 slot (long + risk) — use flex slot if available
+      unknown          — 0-1 slot (treat like long_mid_low)
+      flex             — 1 slot for overflow, any horizon/reliability
+
+    Total default: 5 + 3 + 1 + 0-1 + 1 = 10.
+    """
+    if horizon == 'short':
+        return 'short'
+    if horizon == 'medium':
+        return 'medium'
+    if horizon == 'long' and reliability == 'high':
+        return 'long_high'
+    # long+medium, long+low, unknown — all handled by the same restrictive bucket
+    return 'long_mid_low'
+
+
+def classify_position(market: Dict, now_ms: Optional[float] = None) -> Dict:
+    """
+    Classify a market into horizon × reliability × slot_bucket.
+
+    Returns:
+        {
+            'horizon':     'short' | 'medium' | 'long' | 'unknown',
+            'reliability': 'high' | 'medium' | 'low',
+            'slot_bucket': 'short' | 'medium' | 'long_high' | 'long_mid_low',
+            'close_time_ms': int | None,
+            'days_to_close': float | None,
+        }
+
+    Used by:
+    - auto_research.py to tag every recommendation with horizon/reliability
+    - auto_trader.py to apply per-bucket slot caps
+    - dashboard Portfolio page to show slot usage per bucket
+
+    Does NOT make trading decisions on its own — just labels the market.
+    The trader and research pipeline decide what to do with the labels.
+    """
+    close_time_ms = market.get('closeTime')
+    if close_time_ms and not isinstance(close_time_ms, (int, float)):
+        close_time_ms = None
+
+    now = now_ms if now_ms is not None else time.time() * 1000
+    days_to_close: Optional[float] = None
+    if close_time_ms:
+        days_to_close = (close_time_ms - now) / 86_400_000
+
+    horizon = _classify_horizon(close_time_ms, now_ms=now)
+    reliability = _classify_reliability(market)
+    bucket = _slot_bucket(horizon, reliability)
+
+    return {
+        'horizon':     horizon,
+        'reliability': reliability,
+        'slot_bucket': bucket,
+        'close_time_ms': int(close_time_ms) if close_time_ms else None,
+        'days_to_close': round(days_to_close, 2) if days_to_close is not None else None,
+    }
+
+
 class TradingStrategies:
     """Collection of trading strategies."""
 
