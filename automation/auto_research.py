@@ -69,6 +69,7 @@ def _new_research_counters() -> dict:
         # AI flow
         "ai_eligible":     0,   # recs with confidence above _STAT_BOOST_FLOOR
         "ai_cooled_down":  0,   # filtered out by AI-timeout cooldown
+        "ai_skipped_held": 0,   # skipped: already hold an open position in this market
         "ai_analyzed":     0,   # actually sent to the AI
         "ai_agree":        0,
         "ai_disagree":     0,
@@ -123,6 +124,7 @@ def _print_research_counters(counters: dict) -> None:
     print(f"    AI flow:")
     print(f"      eligible     {counters['ai_eligible']:>4}"
           f"    cooled-down  {counters['ai_cooled_down']:>4}"
+          f"    held-skip   {counters.get('ai_skipped_held', 0):>4}"
           f"    analyzed    {counters['ai_analyzed']:>4}")
     print(f"      agree        {counters['ai_agree']:>4}"
           f"    disagree     {counters['ai_disagree']:>4}"
@@ -829,6 +831,25 @@ class MarketResearcher:
                 print(f"  AI cooldown: skipping {n_cooled} market(s) with >= {_AI_TIMEOUT_MAX_FAILS} recent timeouts")
                 above_floor = [r for r in above_floor if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
                 below_floor  = [r for r in below_floor  if not _is_in_ai_cooldown(r['market_id'], ai_timeout_cooldown)]
+
+            # Skip AI for markets where we already have an open position — we can't
+            # trade them again anyway (auto_trader.py rejects with existing_open).
+            # Burning an AI slot on a held market means another market that COULD
+            # be traded never gets analyzed. This is a direct waste-of-AI fix.
+            #
+            # Approved (held) vs Declined:
+            # - Approved: existing_position=True (we already own it). Filter here.
+            # - Declined (stat rejection): below_floor already drops these; no need.
+            # - Declined (AI skip): Phase 1.3 AI cache remembers for 24h; no need.
+            n_held = sum(
+                1 for r in (above_floor + below_floor)
+                if r.get('existing_position')
+            )
+            counters["ai_skipped_held"] = n_held
+            if n_held:
+                print(f"  AI filter: skipping {n_held} market(s) we already hold")
+                above_floor = [r for r in above_floor if not r.get('existing_position')]
+                below_floor = [r for r in below_floor if not r.get('existing_position')]
 
             recent_top = (above_floor + below_floor)[:_AI_CANDIDATE_COUNT]
             top_candidate_ids = {r['market_id'] for r in recent_top}

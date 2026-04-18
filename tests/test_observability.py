@@ -50,7 +50,7 @@ class TestResearchCountersShape(unittest.TestCase):
             "skipped_resolved", "skipped_low_liquidity", "skipped_stale", "skipped_noise",
             "raw_fires", "dedup_winners",
             "thin_market_confirmations", "no_active_signals", "tied_votes_dropped",
-            "ai_eligible", "ai_cooled_down", "ai_analyzed",
+            "ai_eligible", "ai_cooled_down", "ai_skipped_held", "ai_analyzed",
             "ai_agree", "ai_disagree", "ai_skip", "ai_no_result",
             "final_recommendations", "final_by_strategy_mix", "final_by_category",
         }
