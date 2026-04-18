@@ -641,5 +641,51 @@ class TestAnalyzeMarketsZeroCandidatePath(unittest.TestCase):
             os.unlink(tmp.name)
 
 
+class TestStatDerivedProbability(unittest.TestCase):
+    """
+    Stat-derived probability fallback for estimated_ev.
+
+    Used when AI doesn't provide ai_estimated_probability — ensures EV is
+    computed on every trade, not just AI-analyzed ones. Otherwise the EV
+    calibration feedback loop has no data to work with.
+    """
+
+    def test_yes_direction_maps_confidence_to_p_yes(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.70, recommendation_direction='YES', current_prob=0.50)
+        self.assertEqual(p, 0.70)
+
+    def test_no_direction_maps_confidence_to_one_minus_p(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.70, recommendation_direction='NO', current_prob=0.50)
+        self.assertAlmostEqual(p, 0.30, places=6)  # 1 - 0.70
+
+    def test_extreme_confidence_clamped(self):
+        from automation.auto_trader import _stat_derived_probability
+        # confidence > 0.99 would produce p > 0.99 and then 1-p = 0 for NO
+        # — but confidence is always < 1 so we clamp internally
+        p = _stat_derived_probability(confidence=0.999, recommendation_direction='YES', current_prob=0.5)
+        self.assertLessEqual(p, 0.99)
+        self.assertGreater(p, 0.95)
+
+    def test_low_confidence_still_produces_estimate(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.55, recommendation_direction='YES', current_prob=0.50)
+        self.assertEqual(p, 0.55)
+
+    def test_invalid_confidence_returns_none(self):
+        from automation.auto_trader import _stat_derived_probability
+        self.assertIsNone(_stat_derived_probability(confidence=0.0, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=1.0, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=None, recommendation_direction='YES', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence="0.65", recommendation_direction='YES', current_prob=0.5))
+
+    def test_invalid_direction_returns_none(self):
+        from automation.auto_trader import _stat_derived_probability
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='SKIP', current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction=None, current_prob=0.5))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='', current_prob=0.5))
+
+
 if __name__ == "__main__":
     unittest.main()

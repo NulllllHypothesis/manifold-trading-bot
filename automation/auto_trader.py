@@ -96,6 +96,48 @@ def _load_weights_file(root: str) -> tuple[dict, dict, int, int]:
         return {}, {}, 0, 10
 
 
+def _stat_derived_probability(
+    confidence: float,
+    recommendation_direction: str | None,
+    current_prob: float,
+) -> float | None:
+    """
+    Stat-derived probability estimate used when AI doesn't provide one.
+
+    The bot's confidence represents how strongly it believes the direction is
+    correct, NOT the probability of the YES outcome. We map it to a probability
+    using the recommendation direction:
+
+        direction='YES' → our estimate of P(YES) = confidence
+                          (we think YES is `confidence`-likely to happen)
+        direction='NO'  → our estimate of P(YES) = 1 - confidence
+                          (we think YES is only (1-confidence)-likely to happen)
+
+    We intentionally DON'T apply calibration bias adjustments here — that would
+    double-count against adjustments already baked into the strategies. The
+    estimate is a deliberately simple read of what the bot's confidence means.
+
+    This gets us off the "estimated_ev is always null" floor. It's not as good
+    as a real probability estimate from an LLM, but it's better than nothing —
+    and importantly it lets the EV calibration feedback loop actually collect
+    data (weekly_ev_report.py needs a value to regress against).
+
+    Guards:
+    - confidence must be in (0, 1) to produce meaningful estimate
+    - direction must be YES or NO (other values → None, no estimate)
+    - Result is clamped to (0.01, 0.99) to avoid zero-edge-zero-payout cases
+    - current_prob is accepted but not used (could be used for bias-aware
+      variants in a future iteration)
+    """
+    if not isinstance(confidence, (int, float)) or not 0 < confidence < 1:
+        return None
+    if recommendation_direction not in ('YES', 'NO'):
+        return None
+    del current_prob  # reserved for future bias-aware extension
+    p_yes = float(confidence) if recommendation_direction == 'YES' else 1.0 - float(confidence)
+    return max(0.01, min(0.99, p_yes))
+
+
 def _load_category_accuracy_file(root: str) -> dict:
     """Load category_accuracy.json. Returns {category: {accuracy, sample_count}} or {}."""
     path = os.path.join(root, "data", "category_accuracy.json")
@@ -464,22 +506,39 @@ class AutoTrader:
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
         # Compute estimated EV before placing the bet — it is deterministic given
-        # current_prob, ai_estimated_probability, outcome, and amount.
+        # current_prob, ai_estimated_probability (or stat fallback), outcome, and amount.
         # Passing it into place_paper_bet ensures the position record in
         # paper_trading_state.json has a non-null ev, so resolve_market() writes
-        # it correctly to bet_outcomes for calibration. (Previously estimated_ev=None
-        # was passed in, leaving all calibration rows null.)
+        # it correctly to bet_outcomes for calibration.
+        #
+        # Probability estimate priority:
+        #   1. AI estimate (ai_estimated_probability) if present
+        #   2. Stat-derived fallback: map confidence to probability using the bot's
+        #      recommendation direction. This ensures EV is NEVER null — previously
+        #      AI failures meant calibration got zero data.
         ai_prob = recommendation.get('ai_estimated_probability')
-        if ai_prob is not None:
+        p_estimate = ai_prob
+        p_estimate_source = 'ai' if ai_prob is not None else None
+
+        if p_estimate is None:
+            p_estimate = _stat_derived_probability(
+                confidence=confidence,
+                recommendation_direction=recommendation.get('recommendation'),
+                current_prob=current_prob,
+            )
+            if p_estimate is not None:
+                p_estimate_source = 'stat'
+
+        if p_estimate is not None:
             if outcome == 'YES':
                 payout_if_win = amount / current_prob if current_prob > 0 else 0
-                win_prob = float(ai_prob)
+                win_prob = float(p_estimate)
             else:  # NO
                 payout_if_win = amount / (1 - current_prob) if current_prob < 1 else 0
-                win_prob = 1.0 - float(ai_prob)
+                win_prob = 1.0 - float(p_estimate)
             estimated_ev = win_prob * payout_if_win - amount
         else:
-            estimated_ev = None  # no AI estimate; calibration will mark this row as null
+            estimated_ev = None  # truly unknown — don't fake a value
 
         # Place paper trade — estimated_ev now flows into the position record so
         # resolve_market() → _write_bet_outcome() can store it in bet_outcomes.
