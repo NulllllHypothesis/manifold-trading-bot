@@ -50,9 +50,9 @@ V2 cuts all three loops. It also adds two new capabilities the dashboard has bee
 
 ## Phase 1 — Unblock the Pipeline (Week 1) — **✅ SHIPPED (PR #12)**
 
-**Status**: All three core fixes merged into `feature/v2-ai-smarter`, along with a Phase 1 extension (skip AI on held markets) and all of Phase 2.1. 558 tests pass (was 513, +45 net). Phase 1.4 (legacy backfill) deferred to Phase 2 batch since it depends on stale detection infrastructure.
+**Status**: All three core fixes merged into `feature/v2-ai-smarter`, along with a Phase 1 extension (skip AI on held markets) and all of Phase 2.1 including 6 rounds of reviewer-driven fixes (persistence, rename, 3-class collapse, obsolete-value migration on positions, obsolete-value migration on recommendations). **563 tests pass** (was 513, +50 net). Phase 1.4 (legacy backfill) deferred to Phase 2 batch since it depends on stale detection infrastructure.
 
-All V2 work stays on **one branch, one PR** (`feature/v2-ai-smarter` → PR #12) per user preference.
+All V2 work stays on **one branch, one PR** (`feature/v2-ai-smarter` → PR #12) per user preference. Currently at commit `875f88f`.
 
 The pipeline is built correctly. Specific bugs and wrong defaults are blocking it. Fix those first.
 
@@ -206,7 +206,18 @@ Three labels on every recommendation and position. Only one drives hard caps; th
 - Creator `lastActive` API lookup — first-pass uses category + question heuristics only; can be added later
 - Active creator-resolution-rate tracking — same
 
-**Shipped in**: commits `b213e23` (initial) → `08782b6` (persistence fix) → `e44b910` (rename) → `0bb4a4e` (3-class simplification). All on `feature/v2-ai-smarter`.
+**Shipped in** (on `feature/v2-ai-smarter`, all in PR #12):
+
+| Commit | What it did |
+|--------|-------------|
+| `b213e23` | Initial classification + slot caps |
+| `08782b6` | Persistence fix — plumb position_class through place_paper_bet |
+| `e44b910` | Rename: horizon → term, reliability → resolvability, slot_bucket → position_class |
+| `0bb4a4e` | 3-class simplification (merged long_reliable + long_risky → long_or_uncertain) + honest metadata-poor handling |
+| `9e704be` | Normalize obsolete values on position read |
+| `875f88f` | Normalize obsolete values + legacy field name on recommendation read too |
+
+Current at `875f88f`. 563 tests pass. 6 reviewer rounds, all findings resolved.
 
 ---
 
