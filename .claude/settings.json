@@ -25,7 +25,10 @@
       "Bash(sed -n '80,85p' src/app/performance/page.tsx)",
       "Bash(sed -n '164,168p' src/lib/data/portfolio.ts)",
       "Bash(ls -la /Users/amirghari/Desktop/Hackathon/workspace/scripts/*.py)",
-      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=5 hackathon-server 'cat ~/.openclaw/cron/jobs.json 2>/dev/null | python3 -c \":*)"
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=5 hackathon-server 'cat ~/.openclaw/cron/jobs.json 2>/dev/null | python3 -c \":*)",
+      "Bash(python3 -m pytest tests/ -v --tb=short)",
+      "Bash(python3 -m unittest discover tests/ -v)",
+      "Bash(python3 -m unittest discover tests/)"
     ]
   }
 }

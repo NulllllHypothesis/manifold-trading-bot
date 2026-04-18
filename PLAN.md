@@ -1,4 +1,9 @@
-# Manifold Trading Bot — Project Plan
+# Manifold Trading Bot — Project Plan (V1)
+
+> **V2 is active.** This document (V1) is the archive of work completed through April 2026: core trading engine, automation, calibration, dashboard. For the forward roadmap (active portfolio management, learning unlock, multi-source data, real-time dashboard), see [PLAN_V2.md](PLAN_V2.md).
+
+---
+
 
 ## Quick Start for Devs
 
