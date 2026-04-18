@@ -729,6 +729,23 @@ class TestAiAnalysisCache(unittest.TestCase):
     instead of re-analyzing the same top-3 every hour.
     """
 
+    def _market(self, market_id: str, prob: float,
+                question: str = "Will GPT-5 be released this year?") -> dict:
+        """Small realistic market fixture that clears the normal research filters."""
+        import time
+        now_ms = time.time() * 1000
+        return {
+            "id": market_id,
+            "question": question,
+            "probability": prob,
+            "volume24Hours": 50.0,
+            "uniqueBettorCount": 10,
+            "totalLiquidity": 500,
+            "isResolved": False,
+            "lastBetTime": now_ms - 3_600_000,
+            "closeTime": now_ms + 7 * 86_400_000,
+        }
+
     def test_valid_cache_entry_when_state_unchanged(self):
         from automation.auto_research import _is_cache_valid
         entry = {
@@ -824,33 +841,67 @@ class TestAiAnalysisCache(unittest.TestCase):
             os.unlink(tmp_path)
 
     def test_cache_hits_survive_fresh_batch_exception(self):
-        """Regression test: when batch_analyze raises an exception (e.g.
-        TimeoutError from a single fresh candidate), the exception handler
-        must NOT discard cache hits that were looked up BEFORE the batch
-        call. Cache hits are independent of the batch — they should survive.
-
-        This also ensures only fresh candidates get recorded in the AI
-        cooldown file on failure, not cache-hit markets.
         """
-        # Simulate the merge logic from the exception path:
-        #   ai_results = dict(cache_hit_results)  # restore cache hits
-        cache_hit_results = {'cached_mkt_1': {'recommendation': 'SKIP'},
-                             'cached_mkt_2': {'recommendation': 'YES'}}
-        fresh_candidates = [{'id': 'fresh_mkt_1'}, {'id': 'fresh_mkt_2'}]
+        End-to-end regression test for the mixed cache/fresh failure path.
 
-        # Simulated exception path
-        ai_results_after_exception = dict(cache_hit_results)
-        fresh_ids_only = [m.get('id') for m in fresh_candidates if m.get('id')]
+        If one fresh AI batch raises TimeoutError, cached AI results must still
+        be applied to their markets, and only the fresh candidate IDs should be
+        recorded in cooldown.
+        """
+        from automation.auto_research import MarketResearcher
 
-        # Cache hits must be preserved
-        self.assertEqual(len(ai_results_after_exception), 2)
-        self.assertIn('cached_mkt_1', ai_results_after_exception)
-        self.assertIn('cached_mkt_2', ai_results_after_exception)
+        markets = [
+            self._market("mkt_cached", 0.80),
+            self._market("mkt_fresh_1", 0.82),
+            self._market("mkt_fresh_2", 0.85),
+        ]
+        cached_entry = {
+            "result": {"recommendation": "SKIP"},
+            "analyzed_at": 1234567890.0,
+            "market_state_at_analysis": {"probability": 0.80, "volume24h": 50.0},
+        }
 
-        # Only fresh IDs should be candidates for cooldown recording
-        self.assertEqual(set(fresh_ids_only), {'fresh_mkt_1', 'fresh_mkt_2'})
-        self.assertNotIn('cached_mkt_1', fresh_ids_only)
-        self.assertNotIn('cached_mkt_2', fresh_ids_only)
+        with patch("automation.auto_research.PaperTrader") as MockTrader, \
+             patch("automation.auto_research.api_client") as mock_api, \
+             patch("automation.auto_research._write_market_snapshots"), \
+             patch("automation.auto_research._load_strategy_weights", return_value=({}, {})), \
+             patch("automation.auto_research.NEWS_API_KEY", None), \
+             patch("automation.auto_research._load_ai_timeout_cooldown", return_value={}), \
+             patch("automation.auto_research._save_ai_timeout_cooldown"), \
+             patch("automation.auto_research._record_ai_timeout") as mock_record_timeout, \
+             patch("automation.auto_research._load_ai_analysis_cache", return_value={"mkt_cached": cached_entry}), \
+             patch("automation.auto_research.batch_analyze", side_effect=TimeoutError("boom")):
+
+            mock_api.get_markets.return_value = markets
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            MockTrader.return_value = mock_instance
+
+            researcher = MarketResearcher()
+            recs = researcher.analyze_markets(limit=10)
+
+        self.assertGreaterEqual(len(recs), 3, "Expected recommendations for all three test markets")
+
+        by_market = {rec["market_id"]: rec for rec in recs}
+        cached = by_market["mkt_cached"]
+        fresh_1 = by_market["mkt_fresh_1"]
+        fresh_2 = by_market["mkt_fresh_2"]
+
+        # Cached AI decision survives the fresh-batch timeout.
+        self.assertTrue(cached["ai_was_candidate"])
+        self.assertEqual(cached["ai_status"], "skip")
+        self.assertEqual(cached["ai_recommendation"], "SKIP")
+        self.assertTrue(cached["ai_returned_skip"])
+
+        # Fresh candidates fall back to explicit no_result.
+        self.assertEqual(fresh_1["ai_status"], "no_result")
+        self.assertEqual(fresh_2["ai_status"], "no_result")
+
+        # Cooldown should only be recorded for the fresh IDs, never the cache hit.
+        mock_record_timeout.assert_called_once()
+        timed_out_ids = mock_record_timeout.call_args.args[0]
+        self.assertEqual(set(timed_out_ids), {"mkt_fresh_1", "mkt_fresh_2"})
+        self.assertNotIn("mkt_cached", timed_out_ids)
 
 
 if __name__ == "__main__":

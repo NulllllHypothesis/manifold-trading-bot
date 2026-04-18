@@ -48,11 +48,13 @@ V2 cuts all three loops. It also adds two new capabilities the dashboard has bee
 
 ---
 
-## Phase 1 — Unblock the Pipeline (Week 1)
+## Phase 1 — Unblock the Pipeline (Week 1) — **✅ SHIPPED 2026-04-18 (PR #12)**
+
+**Status**: All three core fixes merged into `feature/v2-ai-smarter`. 534 tests pass (was 513, +21). Phase 1.4 (legacy backfill) deferred to Phase 2 batch since it depends on stale detection infrastructure.
 
 The pipeline is built correctly. Specific bugs and wrong defaults are blocking it. Fix those first.
 
-### 1.1 — Separate AI states (`ai_status` field)
+### 1.1 — Separate AI states (`ai_status` field) ✅
 
 **Problem**: When AI times out, `auto_research.py` writes `ai_recommendation = 'SKIP'` and `ai_returned_skip = True`. The trader then vetoes identically to a real SKIP. AI failure becomes AI rejection.
 
@@ -74,7 +76,7 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-### 1.2 — Stat-derived probability fallback for EV
+### 1.2 — Stat-derived probability fallback for EV ✅
 
 **Problem**: `estimated_ev = P(win) × payout - stake` requires a probability estimate. Currently only AI provides one. AI rarely produces one (0% of current research), so `estimated_ev` is null on every trade record. The entire EV calibration loop is dark.
 
@@ -94,7 +96,7 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-### 1.3 — Analyze-once AI cache
+### 1.3 — Analyze-once AI cache ✅
 
 **Problem**: The same top-3 markets are re-picked every hour. They all fail AI. After 4 hours, they hit the cooldown. But by then 10+ other markets are also cycling into the failed set. Result: 7-10 out of 10-11 eligible markets are cooled down at any given time.
 
