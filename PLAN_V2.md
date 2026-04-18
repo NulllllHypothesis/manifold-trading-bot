@@ -221,17 +221,24 @@ Current at `875f88f`. 563 tests pass. 6 reviewer rounds, all findings resolved.
 
 ---
 
-### 2.2 — Active repricing using current market probability
+### 2.2 — Active repricing using current market probability (measure-only)
+
+**Scope for this phase is strictly observation.** We collect real mark-to-market data hourly; we do **not** act on it. Close decisions live in § 2.3, stranded detection in § 2.4, and the live-P&L dashboard is a follow-on to § 2.5. Splitting measure from act keeps the diff auditable and lets us verify the AMM math against weeks of snapshots before any close decision depends on it.
 
 **Problem**: The bot places a bet and forgets it. We never check if the market has moved against us. A $5 YES bet at 65% probability might be worth $1.50 now — we have no way to know.
 
-**Fix**: Hourly repricing loop.
+**Fix**: Hourly repricing loop — measure only.
 
-**Every cycle (hourly):**
+**Every cycle (hourly, :05 UTC, before resolve_positions.py at :10):**
 1. For each OPEN position, fetch current probability from Manifold API (`/v0/market/{marketId}`)
 2. Compute unrealised P&L using the AMM pricing formula
-3. Store snapshot: `{ market_id, current_probability, unrealised_pnl, snapshot_at }`
-4. Apply close-decision policy (§ 2.3)
+3. Append a snapshot row to `calibration.db:position_snapshots`
+4. Update the live state file in place: `current_probability`, `current_unrealised_pnl`, `last_repriced_at`, `is_resolved_on_api`
+
+**Out of scope for 2.2** (deliberately deferred):
+- No close/swap decisions driven by unrealised P&L — that's § 2.3.
+- No STRANDED/ABANDONED handling — that's § 2.4.
+- No dashboard panel consuming the new fields — follows § 2.5.
 
 **Unrealised P&L formula** (for YES position):
 ```
@@ -241,12 +248,12 @@ unrealised_pnl = current_value - amount
 (For NO: swap the probabilities.)
 
 **Changes:**
-- New script: `scripts/reprice_positions.py` (hourly cron)
-- New table in `calibration.db`: `position_snapshots` (one row per position per hour)
-- `paper_trading_state.json` positions gain `last_repriced_at` and `current_unrealised_pnl` fields
-- Dashboard Portfolio page shows live unrealised P&L per position
+- New script: `scripts/reprice_positions.py` (hourly cron, :05)
+- New table in `calibration.db`: `position_snapshots` (one row per position per hour; `api_error=1` rows for tolerated fetch failures so dashboards see chronic failures)
+- `paper_trading_state.json` positions gain `current_probability`, `current_unrealised_pnl`, `last_repriced_at`, `is_resolved_on_api` fields
+- Crontab generator (`automation/setup_cron_jobs.py`) + README updated with the :05 entry
 
-**Impact**: We actually know what our positions are worth right now. Dashboard shows real numbers instead of entry values. Enables § 2.3.
+**Impact**: We actually know what our positions are worth right now — recorded, not just computed. Enables § 2.3 (close/swap policy) and § 2.4 (STRANDED detection) to run on real data instead of guesses.
 
 **Estimated effort**: 2 days.
 
