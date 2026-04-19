@@ -181,16 +181,21 @@ def backfill_leg(
     if not trade_records:
         return written
 
-    # Phase 2a: market-level fallback fields from auto_trades — any record
-    # will do because these don't vary per entry.
-    market_level_source = trade_records[0]
+    # Phase 2a: market-level fallback fields from auto_trades. These fields
+    # (question) don't vary per entry, so any record can supply them —
+    # but older records may predate the field being added to the log
+    # (e.g. `question` was added later in repo history). Pick the first
+    # record whose value for this field is actually present, rather than
+    # locking in trade_records[0] and missing a later record's value.
     for field in _TRADE_MARKET_LEVEL_FIELDS:
-        val = market_level_source.get(field)
-        if _is_missing(val):
+        if not _is_missing(leg.get(field)):
             continue
-        if _is_missing(leg.get(field)):
-            leg[field] = val
-            written[field] = val
+        for rec in trade_records:
+            val = rec.get(field)
+            if not _is_missing(val):
+                leg[field] = val
+                written[field] = val
+                break
 
     # Phase 2b: leg-level fields — match by timestamp so each leg gets its
     # own trade record. If we can't find a confident match for this leg,

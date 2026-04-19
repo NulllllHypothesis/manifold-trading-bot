@@ -386,6 +386,32 @@ class TestRunBackfill(unittest.TestCase):
         self.assertNotIn('estimated_ev', leg)
         self.assertNotIn('confidence', leg)
 
+    def test_market_level_question_found_on_later_record(self):
+        # Reviewer fix (Low): if the oldest auto_trades record for a market
+        # predates the `question` field being added to the log, we must
+        # still recover `question` from a later record that has it.
+        # Previously we only looked at trade_records[0] (oldest).
+        mar_1 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        apr_1 = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        leg_ts = apr_1
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', timestamp=_iso(leg_ts))
+        ]})
+        self._write_trades([
+            # Old record with no question field (historical shape)
+            {'market_id': 'mkt_A', 'timestamp': _iso(mar_1),
+             'strategies': ['old'], 'estimated_ev': 0.10},
+            # Newer record with question field
+            {'market_id': 'mkt_A', 'timestamp': _iso(apr_1),
+             'strategies': ['new'], 'estimated_ev': 0.50,
+             'question': 'Will X happen?'},
+        ])
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        leg = self._read_state()['positions']['mkt_A'][0]
+        self.assertEqual(leg.get('question'), 'Will X happen?')
+
     def test_trade_id_match_beats_timestamp_match(self):
         # If auto_trades happens to carry trade_id (future format), a
         # direct trade_id match wins over a timestamp-closest match.
