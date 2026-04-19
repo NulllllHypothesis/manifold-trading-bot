@@ -10,6 +10,7 @@ An automated trading system for [Manifold Markets](https://manifold.markets) —
 | Position repricing | `scripts/reprice_positions.py` | Every hour at :05 UTC |
 | Position resolution | `scripts/resolve_positions.py` | Every hour at :10 UTC |
 | Trade execution | `automation/auto_trader.py` | Every hour at :20 UTC |
+| Position evaluator | `scripts/evaluate_positions.py` | Every hour at :30 UTC |
 | Daily report | `automation/daily_summary.py` | Daily at 19:00 UTC |
 | Calibration harvest | `scripts/harvest_resolved.py` + `analyze_calibration.py` | Sundays 02:00 UTC |
 | EV accuracy report | `scripts/weekly_ev_report.py` | Mondays 07:00 UTC |
@@ -122,6 +123,9 @@ The system runs autonomously on a Linux server. All scheduling uses the OS-level
 
 # Auto trading — hourly :20
 20 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py
+
+# Position evaluator — hourly :30 (Phase 2.3, propose-only)
+30 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/evaluate_positions.py
 
 # Daily summary — 19:00 UTC
 0 19 * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/daily_summary.py

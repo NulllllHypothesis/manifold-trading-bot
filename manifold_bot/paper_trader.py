@@ -91,7 +91,12 @@ def _init_bet_outcomes_db() -> None:
     conn.close()
 
 
-def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -> None:
+def _write_bet_outcome(
+    trade: Dict,
+    market_resolution: str,
+    actual_pnl: float,
+    era: str = "post_ev_fix",
+) -> None:
     """
     Append one resolved-trade record to bet_outcomes.
 
@@ -105,8 +110,11 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
       < 0 means AI underestimated (we made more than predicted)
       NULL when there was no AI estimate (confidence-scaled fallback)
 
-    era: 'post_ev_fix' for all new inserts (EV pipeline is deployed).
-         Existing pre-fix rows are backfilled to 'pre_ev_fix' in _init_bet_outcomes_db().
+    era: defaults to 'post_ev_fix' (EV pipeline deployed); callers that close
+         a position before market resolution (early close / swap close) pass
+         era='early_close' so the weekly EV audit can segment close-at-AMM
+         outcomes from true-resolution outcomes. Existing pre-fix rows are
+         backfilled to 'pre_ev_fix' in _init_bet_outcomes_db().
     """
     try:
         estimated_ev   = trade.get("estimated_ev")
@@ -133,7 +141,7 @@ def _write_bet_outcome(trade: Dict, market_resolution: str, actual_pnl: float) -
             market_resolution,
             actual_pnl,
             ev_error,
-            "post_ev_fix",
+            era,
             datetime.now().isoformat(),
             trade.get("category"),
         ))
@@ -557,7 +565,12 @@ class PaperTrader:
             total_pnl += pnl
             any_closed = True
 
-            _write_bet_outcome(trade, market_resolution='CLOSED_EARLY', actual_pnl=round(pnl, 4))
+            _write_bet_outcome(
+                trade,
+                market_resolution='CLOSED_EARLY',
+                actual_pnl=round(pnl, 4),
+                era='early_close',
+            )
             print(f"Trade {trade['trade_id']}: CLOSED_EARLY {pnl:+.2f}")
 
         if not any_closed:

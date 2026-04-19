@@ -69,3 +69,32 @@ MIN_LIQUIDITY = 200
 # Set in .env: NEWS_API_KEY=<your-key>
 # When absent, news_fetcher.fetch_headlines() returns [] and news_strategy never fires.
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
+
+# ── Phase 2.3 — early close / swap decision model ──────────────────────────────
+#
+# position_score per open position, used by scripts/evaluate_positions.py:
+#
+#   position_score = current_unrealised_pnl
+#                    - days_held * DAILY_DECAY_COST
+#                    - (position_class == 'long_or_uncertain' ? LONG_HORIZON_PENALTY : 0)
+#
+# If the score drops below CLOSE_SCORE_THRESHOLD, the evaluator emits a CLOSE
+# proposal (human-approved via execute_close.py, same approval pattern as swaps).
+# Auto-execution is deliberately off — we collect data first, tune thresholds
+# against real outcomes, then consider turning on auto-close.
+#
+# Starting values are conservative. Tune after a week of evaluator runs against
+# the Phase 2.2 snapshot trail.
+#
+# DAILY_DECAY_COST: dollars of "time value" lost per day held. $0.05/day means
+# a $5 bet breaks even on decay alone in 100 days — slow enough not to punish
+# short-term positions, fast enough to eventually pressure stale ones.
+DAILY_DECAY_COST = 0.05
+# LONG_HORIZON_PENALTY: flat penalty on position_class == 'long_or_uncertain'.
+# These positions tie up a slot without a clear resolution path; the penalty
+# pushes the evaluator to prefer closing one if a better opportunity exists.
+LONG_HORIZON_PENALTY = 0.50
+# CLOSE_SCORE_THRESHOLD: a position with score strictly below this triggers a
+# CLOSE proposal. -0.50 means "we're already down 50¢ net of time cost" —
+# tolerant of small unrealised losses, aggressive on persistent ones.
+CLOSE_SCORE_THRESHOLD = -0.50
