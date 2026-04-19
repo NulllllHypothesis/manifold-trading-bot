@@ -48,6 +48,9 @@ from manifold_bot.config import (
     CLOSE_SCORE_THRESHOLD,
 )
 from automation.send_telegram import send_telegram_message
+# Single source of truth for the 4-bucket → 3-bucket migration map. Importing
+# rather than duplicating so a future change in one place propagates here.
+from automation.auto_trader import _normalize_position_class
 
 
 _STATE_PATH         = _ROOT / "manifold_bot" / "paper_trading_state.json"
@@ -440,15 +443,18 @@ def _derive_aggregate_position_class(
     if close_time_ms is not None:
         now_ms = _now_ms if _now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000
         days_to_close = (close_time_ms - now_ms) / 86_400_000
-        # Resolvability is market-intrinsic; take first non-null.
-        resolvability = next(
-            (leg.get('resolvability') for leg in legs if leg.get('resolvability')),
-            None,
-        )
-        return _position_class_from_term(days_to_close, resolvability)
+        return _position_class_from_term(days_to_close)
 
-    # Path 2: fallback — any long_or_uncertain wins
-    persisted = [leg.get('position_class') for leg in legs if leg.get('position_class')]
+    # Path 2: fallback — any long_or_uncertain wins, with obsolete-value
+    # normalization so legacy 4-bucket values (long_reliable / long_risky /
+    # long_high / long_mid_low) also map into long_or_uncertain. Without
+    # this step, pre-Phase-2.1 legs silently skip LONG_HORIZON_PENALTY
+    # because position_score only matches the exact 3-bucket name.
+    persisted = [
+        _normalize_position_class(leg.get('position_class'))
+        for leg in legs
+        if leg.get('position_class')
+    ]
     if not persisted:
         return None
     if 'long_or_uncertain' in persisted:
@@ -457,24 +463,30 @@ def _derive_aggregate_position_class(
         return 'medium'
     if 'short' in persisted:
         return 'short'
-    # All entries are legacy/obsolete values — return the first for
-    # deterministic behaviour (score will just not apply the penalty).
+    # All entries are unknown/legacy-unmapped values — return the first
+    # deterministically (score will just not apply the penalty).
     return sorted(set(persisted))[0]
 
 
-def _position_class_from_term(days_to_close: float, resolvability: Optional[str]) -> str:
-    """Map current days-to-close + resolvability to a position_class.
+def _position_class_from_term(days_to_close: float) -> str:
+    """Map current days-to-close to a 3-bucket position_class.
 
-    Matches the 3-bucket scheme from Phase 2.1:
-      - days ≤ 0 (already past close, awaiting resolution) → short
-      - days ≤ 7  → short
-      - days ≤ 30 → medium (unless low resolvability, then long_or_uncertain)
-      - days > 30 → long_or_uncertain
+    Matches Phase 2.1's _derive_position_class exactly — `resolvability`
+    is intentionally NOT used at this layer. Phase 2.1 collapsed from 4
+    buckets to 3 precisely to keep enforcement simple on a 10-slot book,
+    and to stop single misclassifications from costing a full slot. Adding
+    a resolvability demotion here would re-introduce that complexity and
+    diverge from the shipped slot-cap semantics in auto_trader._POSITION_CLASS_CAPS.
+
+      days ≤ 0  (already past close, awaiting resolution) → short
+      days ≤ 7                                              → short
+      days ≤ 30                                             → medium
+      days > 30                                             → long_or_uncertain
     """
     if days_to_close <= _SHORT_TERM_DAYS:
         return 'short'
     if days_to_close <= _MEDIUM_TERM_DAYS:
-        return 'long_or_uncertain' if resolvability == 'low' else 'medium'
+        return 'medium'
     return 'long_or_uncertain'
 
 

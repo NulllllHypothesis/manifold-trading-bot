@@ -924,6 +924,60 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
         # Score = -0.20 - 1*0.05 = -0.25 → HOLD (above -0.50 threshold)
         self.assertEqual(n, 0)
 
+    def test_medium_term_with_low_resolvability_stays_medium(self):
+        # Reviewer fix (Medium): Phase 2.1's 3-bucket model derives class
+        # from term ONLY — resolvability is a soft label and does NOT
+        # demote medium markets into long_or_uncertain. The earlier draft
+        # of _position_class_from_term applied a resolvability demotion,
+        # which diverged from the shipped slot-cap model.
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        ten_days_ms = int(now_ms + 10 * 86_400_000)
+        legs = [{
+            'trade_id': 1, 'market_id': 'mkt_med_low',
+            'outcome': 'YES', 'amount': 10.0,
+            'probability': 0.5, 'entry_probability': 0.5,
+            'status': 'OPEN',
+            'timestamp': (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(),
+            'current_unrealised_pnl': -0.10,
+            'current_probability': 0.49,
+            'last_repriced_at': datetime.now(timezone.utc).isoformat(),
+            'position_class': 'medium',
+            'resolvability': 'low',   # must NOT trigger long penalty
+            'close_time_ms': ten_days_ms,
+            'is_resolved_on_api': False,
+        }]
+        self._write_state({'mkt_med_low': legs})
+        h, c, n = run_evaluator(notify=self._notify)
+        # Correct score: -0.10 - 5*0.05 = -0.35 → HOLD (above -0.50)
+        # Buggy score   : -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
+        self.assertEqual(n, 0, "medium term + low resolvability must remain 'medium'")
+
+    def test_fallback_normalizes_obsolete_position_class_values(self):
+        # Reviewer fix (Low): the fallback reducer (no close_time_ms) must
+        # normalise legacy 4-bucket values through _normalize_position_class
+        # before comparing. Without normalisation, a legacy leg with
+        # position_class='long_reliable' (no close_time_ms) silently skips
+        # LONG_HORIZON_PENALTY because position_score only matches the
+        # exact 3-bucket name 'long_or_uncertain'.
+        for legacy in ['long_reliable', 'long_risky', 'long_high', 'long_mid_low']:
+            with self.subTest(legacy=legacy):
+                legs = [_pos(market_id=f'mkt_{legacy}', trade_id=1,
+                             unrealised=-0.10, days_ago=5,
+                             position_class=legacy)]
+                # Ensure no close_time_ms so the fallback path is exercised.
+                legs[0].pop('close_time_ms', None)
+                self._write_state({f'mkt_{legacy}': legs})
+                if self.pending_path.exists():
+                    self.pending_path.unlink()
+
+                h, c, n = run_evaluator(notify=self._notify)
+                # With normalisation → long_or_uncertain → score
+                #   -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
+                # Without normalisation → unknown class → score
+                #   -0.10 - 5*0.05 = -0.35 → HOLD (bug)
+                self.assertEqual(n, 1,
+                                 f"{legacy!r} must normalise to long_or_uncertain")
+
 
 if __name__ == '__main__':
     unittest.main()
