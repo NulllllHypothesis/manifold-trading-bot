@@ -797,5 +797,133 @@ class TestMarketLevelAggregation(unittest.TestCase):
         self.assertEqual(pending[0]['n_legs'], 1)
 
 
+# ── Reviewer fix 5 (Medium): deterministic position_class on mixed legs ──────
+
+class TestAggregatePositionClassDeterministic(unittest.TestCase):
+    """Per-leg position_class is a snapshot at entry time. A market with legs
+    opened at different times can legitimately carry mixed classes (one leg
+    opened 60d ago as long_or_uncertain, another opened this week as short).
+    Picking 'first truthy value' made LONG_HORIZON_PENALTY depend on JSON
+    leg ordering — reviewer reproduced this with two identical -$0.10 legs:
+    ['long_or_uncertain', 'short'] → CLOSE, ['short', 'long_or_uncertain']
+    → HOLD. Fix: derive aggregate class from shared close_time_ms when
+    available, otherwise use a conservative order-independent reducer."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.state_path = tmp / 'paper_trading_state.json'
+        self.pending_path = tmp / 'pending_closes.json'
+        self._patchers = [
+            patch.object(evaluate_positions, '_STATE_PATH', self.state_path),
+            patch.object(evaluate_positions, '_PENDING_CLOSES_PATH', self.pending_path),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.telegram_sent = []
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def _notify(self, msg):
+        self.telegram_sent.append(msg)
+
+    def _write_state(self, positions):
+        with open(self.state_path, 'w') as f:
+            json.dump({'balance': 100.0, 'positions': positions, 'trades': []}, f)
+
+    def _run(self, class_order):
+        """Reviewer's reproducer: identical -$0.10 legs, differing only in
+        persisted position_class. Returns (n_new_proposals, score_if_any).
+        """
+        legs = [
+            _pos(market_id='mkt_rep', trade_id=i + 1, amount=10.0,
+                 entry_prob=0.50, unrealised=-0.10, days_ago=1,
+                 current_prob=0.49, position_class=cls)
+            for i, cls in enumerate(class_order)
+        ]
+        self._write_state({'mkt_rep': legs})
+
+        # Isolate the per-run file state.
+        if self.pending_path.exists():
+            self.pending_path.unlink()
+
+        h, c, n = run_evaluator(notify=lambda m: None)
+        score = None
+        if self.pending_path.exists():
+            with open(self.pending_path) as f:
+                pending = json.load(f)
+            if pending:
+                score = pending[0]['position_score']
+        return n, score
+
+    def test_same_outcome_regardless_of_leg_order(self):
+        # Reviewer reproducer exactly: both orders must yield the same
+        # classification. The conservative fallback (any long_or_uncertain
+        # wins) applies the penalty in both cases.
+        n1, s1 = self._run(['long_or_uncertain', 'short'])
+        n2, s2 = self._run(['short', 'long_or_uncertain'])
+        self.assertEqual(n1, n2, "leg ordering must not flip the decision")
+        self.assertEqual(s1, s2, "score must be identical across orderings")
+
+    def test_close_time_ms_beats_persisted_class(self):
+        # A leg persisted as long_or_uncertain, but close_time_ms says the
+        # market is now 3 days from closing → aggregate class is 'short',
+        # no long_horizon_penalty applied.
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        three_days_ms = int(now_ms + 3 * 86_400_000)
+        legs = [{
+            'trade_id': 1, 'market_id': 'mkt_cts',
+            'outcome': 'YES', 'amount': 10.0,
+            'probability': 0.5, 'entry_probability': 0.5,
+            'status': 'OPEN',
+            'timestamp': (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(),
+            'current_unrealised_pnl': -0.10,
+            'current_probability': 0.49,
+            'last_repriced_at': datetime.now(timezone.utc).isoformat(),
+            'position_class': 'long_or_uncertain',  # stale persisted value
+            'resolvability': 'high',
+            'close_time_ms': three_days_ms,  # authoritative
+            'is_resolved_on_api': False,
+        }]
+        self._write_state({'mkt_cts': legs})
+        h, c, n = run_evaluator(notify=self._notify)
+        # Score without long penalty: -0.10 - 5*0.05 = -0.35  → HOLD
+        # Score with    long penalty: -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
+        # If close_time_ms beats persisted class, we should HOLD.
+        self.assertEqual(n, 0, "close_time_ms of 3d must override long_or_uncertain class")
+
+    def test_fallback_any_long_or_uncertain_wins_on_mixed_legs(self):
+        # No close_time_ms on any leg → fallback reducer. Mix of short +
+        # long_or_uncertain → aggregate is long_or_uncertain (conservative).
+        legs = [
+            _pos(market_id='mkt_fb', trade_id=1, unrealised=-0.10, days_ago=1,
+                 position_class='short'),
+            _pos(market_id='mkt_fb', trade_id=2, unrealised=-0.10, days_ago=1,
+                 position_class='long_or_uncertain'),
+        ]
+        self._write_state({'mkt_fb': legs})
+        h, c, n = run_evaluator(notify=self._notify)
+        # Score = -0.20 - 1*0.05 - 0.50 = -0.75 → CLOSE
+        self.assertEqual(n, 1)
+        with open(self.pending_path) as f:
+            pending = json.load(f)
+        self.assertAlmostEqual(pending[0]['position_score'], -0.75, places=2)
+
+    def test_all_legs_short_never_apply_long_penalty(self):
+        legs = [
+            _pos(market_id='mkt_short', trade_id=1, unrealised=-0.10,
+                 days_ago=1, position_class='short'),
+            _pos(market_id='mkt_short', trade_id=2, unrealised=-0.10,
+                 days_ago=1, position_class='short'),
+        ]
+        self._write_state({'mkt_short': legs})
+        h, c, n = run_evaluator(notify=self._notify)
+        # Score = -0.20 - 1*0.05 = -0.25 → HOLD (above -0.50 threshold)
+        self.assertEqual(n, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

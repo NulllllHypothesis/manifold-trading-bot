@@ -53,6 +53,13 @@ from automation.send_telegram import send_telegram_message
 _STATE_PATH         = _ROOT / "manifold_bot" / "paper_trading_state.json"
 _PENDING_CLOSES_PATH = _ROOT / "pending_closes.json"
 
+# Threshold boundaries for deriving CURRENT term from close_time_ms —
+# identical to the values used at entry time by Phase 2.1's _classify_term,
+# but applied at evaluator run-time so a market that was "long" at entry
+# is re-classified as "short" when closeTime is within a week.
+_SHORT_TERM_DAYS  = 7
+_MEDIUM_TERM_DAYS = 30
+
 # Match the 4h expiry used by position_swap_checker for consistency.
 CLOSE_EXPIRY_HOURS = 4
 
@@ -310,8 +317,12 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
     oldest_timestamp: Optional[datetime] = None
     any_resolved = False
     question = None
-    position_class = None
     current_probability = None
+
+    # Derive a deterministic, order-independent position_class from
+    # close_time_ms (preferred) or a conservative reducer on persisted
+    # per-leg values. See _derive_aggregate_position_class for rationale.
+    position_class = _derive_aggregate_position_class(legs)
 
     for leg in legs:
         # Sum pnl where present. Missing pnl on one leg poisons the
@@ -356,7 +367,6 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
         if leg.get('is_resolved_on_api'):
             any_resolved = True
         question = question or leg.get('question')
-        position_class = position_class or leg.get('position_class')
         if current_probability is None:
             current_probability = leg.get('current_probability')
 
@@ -386,6 +396,86 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
         # leg's age, not the weighted average).
         '_aggregate_days_held': (weighted_days / weighted_base) if weighted_base else None,
     }
+
+
+def _derive_aggregate_position_class(
+    legs: List[Dict],
+    *,
+    _now_ms: Optional[float] = None,
+) -> Optional[str]:
+    """Deterministic, order-independent position_class for a market aggregate.
+
+    Per-leg `position_class` is a snapshot of the market at entry time — a
+    leg opened 45 days ago as `long_or_uncertain` might be a short-term
+    position today because closeTime is now a week away. Picking "first
+    truthy value" from the legs list made the LONG_HORIZON_PENALTY depend
+    on JSON ordering (a market with legs `[long_or_uncertain, short]`
+    closed but `[short, long_or_uncertain]` held, despite identical pnl).
+
+    Strategy:
+    1. If ANY leg has a usable `close_time_ms`, derive the CURRENT term
+       from it (short ≤7d, medium ≤30d, else long). closeTime is
+       intrinsic to the market and doesn't change per-leg, so taking the
+       first non-null value gives the same answer regardless of leg order.
+       Combine with the first non-null `resolvability` (also intrinsic to
+       the market — never changes after creation).
+    2. Otherwise fall back to a conservative reducer on persisted
+       `position_class` values: if ANY leg says `long_or_uncertain`,
+       apply the penalty. Deterministic (doesn't depend on ordering),
+       conservative (applies penalty on mixed-class markets rather than
+       ignoring it), and correct when all legs agree.
+
+    Returns None only when no leg provides either close_time_ms or a
+    persisted position_class — callers should handle None by NOT applying
+    the long_horizon_penalty (no honest signal).
+    """
+    # Path 1: close_time_ms is the authoritative source
+    close_time_ms: Optional[float] = None
+    for leg in legs:
+        ct = leg.get('close_time_ms')
+        if isinstance(ct, (int, float)) and ct > 0:
+            close_time_ms = ct
+            break
+
+    if close_time_ms is not None:
+        now_ms = _now_ms if _now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000
+        days_to_close = (close_time_ms - now_ms) / 86_400_000
+        # Resolvability is market-intrinsic; take first non-null.
+        resolvability = next(
+            (leg.get('resolvability') for leg in legs if leg.get('resolvability')),
+            None,
+        )
+        return _position_class_from_term(days_to_close, resolvability)
+
+    # Path 2: fallback — any long_or_uncertain wins
+    persisted = [leg.get('position_class') for leg in legs if leg.get('position_class')]
+    if not persisted:
+        return None
+    if 'long_or_uncertain' in persisted:
+        return 'long_or_uncertain'
+    if 'medium' in persisted:
+        return 'medium'
+    if 'short' in persisted:
+        return 'short'
+    # All entries are legacy/obsolete values — return the first for
+    # deterministic behaviour (score will just not apply the penalty).
+    return sorted(set(persisted))[0]
+
+
+def _position_class_from_term(days_to_close: float, resolvability: Optional[str]) -> str:
+    """Map current days-to-close + resolvability to a position_class.
+
+    Matches the 3-bucket scheme from Phase 2.1:
+      - days ≤ 0 (already past close, awaiting resolution) → short
+      - days ≤ 7  → short
+      - days ≤ 30 → medium (unless low resolvability, then long_or_uncertain)
+      - days > 30 → long_or_uncertain
+    """
+    if days_to_close <= _SHORT_TERM_DAYS:
+        return 'short'
+    if days_to_close <= _MEDIUM_TERM_DAYS:
+        return 'long_or_uncertain' if resolvability == 'low' else 'medium'
+    return 'long_or_uncertain'
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
