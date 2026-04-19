@@ -259,7 +259,13 @@ unrealised_pnl = current_value - amount
 
 ---
 
-### 2.3 — Early close using real market prices (propose-only) — **IN REVIEW** (PR #15)
+### 2.3 — Early close using real market prices (propose-only) — **IN REVIEW** (PR #15, reviewer round 1 applied on `058af36`)
+
+**Reviewer round 1 fixes** (all green, 624 tests):
+
+- **High** — `execute_close.py` now refetches the market right before closing and raises `MarketResolvedError` if `isResolved=True`. Previously a market that resolved between the :30 proposal and human approval would be closed at current `probability`, mislabelling true resolutions as `CLOSED_EARLY` in `bet_outcomes` and realising wrong economics on MKT/CANCEL/NO.
+- **Medium** — `classify_position` now checks `last_repriced_at` freshness (`REPRICE_STALE_HOURS=2`) and emits reason `stale_reprice` when a Phase 2.2 fetch failure has left yesterday's price on state. Without this gate, a transient API outage could fire CLOSE proposals against day-old prices.
+- **Medium** — `run_evaluator` now dedupes intra-run on `market_id`. A market with multiple OPEN trades (legacy averaging-in) produced two proposals per run; `close_position_early` closes ALL open trades at once so the second Telegram CTA would've been a dead end.
 
 **Shipped in this phase** (propose-only, never auto-executes):
 - `position_score()` pure function: `unrealised_pnl − days_held × DAILY_DECAY_COST − (long_or_uncertain ? LONG_HORIZON_PENALTY : 0)`
