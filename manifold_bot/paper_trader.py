@@ -326,7 +326,11 @@ class PaperTrader:
         updated_trade_ids = []
 
         for trade in positions:
-            if trade['status'] != 'OPEN':
+            # Include STRANDED positions too — their market may have eventually
+            # resolved, so we reconcile to the real outcome (Phase 2.4). OPEN
+            # is the usual case; CLOSED_EARLY / WIN / LOSE / ABANDONED are
+            # terminal and must be skipped.
+            if trade['status'] not in ('OPEN', 'STRANDED'):
                 continue
 
             if trade['outcome'] == outcome:
@@ -411,7 +415,11 @@ class PaperTrader:
         updated_trade_ids = []
 
         for trade in positions:
-            if trade['status'] != 'OPEN':
+            # Include STRANDED positions too — their market may have eventually
+            # resolved, so we reconcile to the real outcome (Phase 2.4). OPEN
+            # is the usual case; CLOSED_EARLY / WIN / LOSE / ABANDONED are
+            # terminal and must be skipped.
+            if trade['status'] not in ('OPEN', 'STRANDED'):
                 continue
 
             amount = trade.get('amount', 0)
@@ -478,7 +486,11 @@ class PaperTrader:
         updated_trade_ids = []
 
         for trade in positions:
-            if trade['status'] != 'OPEN':
+            # Include STRANDED positions too — their market may have eventually
+            # resolved, so we reconcile to the real outcome (Phase 2.4). OPEN
+            # is the usual case; CLOSED_EARLY / WIN / LOSE / ABANDONED are
+            # terminal and must be skipped.
+            if trade['status'] not in ('OPEN', 'STRANDED'):
                 continue
 
             trade['status'] = 'CANCELLED'
@@ -520,6 +532,75 @@ class PaperTrader:
 
         self.save_state()
 
+    def mark_market_abandoned(self, market_id: str, reason: str = '') -> Optional[float]:
+        """
+        Phase 2.4 — terminal write-off for a market that never resolved.
+
+        Applied only when the market is 90+ days past its closeTime with no
+        resolution from the creator. Every OPEN or STRANDED leg in the market
+        is flipped to `status='ABANDONED'` with `profit = -amount` (full
+        loss), the balance is reduced by the sum of amounts, and a row is
+        written to bet_outcomes with era='write_off' so weekly EV accounting
+        treats these as real realised losses (not as unresolved pending).
+
+        Returns total loss booked (negative float), or None if the market
+        has no terminally-eligible positions.
+        """
+        if market_id not in self.positions:
+            print(f"No positions in market {market_id} to abandon")
+            return None
+
+        _init_bet_outcomes_db()
+        positions = self.positions[market_id]
+        total_loss = 0.0
+        any_abandoned = False
+        now_iso = datetime.now().isoformat()
+
+        for trade in positions:
+            # OPEN (detector never ran) and STRANDED (detector moved it
+            # earlier) are both eligible. Terminal statuses must be skipped.
+            if trade.get('status') not in ('OPEN', 'STRANDED'):
+                continue
+
+            amount = float(trade.get('amount') or 0)
+            loss = -amount  # full write-off
+            trade['status'] = 'ABANDONED'
+            trade['actual_outcome'] = 'ABANDONED'
+            trade['profit'] = round(loss, 4)
+            trade['abandoned_at'] = now_iso
+            if reason:
+                trade['abandoned_reason'] = reason
+            total_loss += loss
+            any_abandoned = True
+
+            _write_bet_outcome(
+                trade,
+                market_resolution='ABANDONED',
+                actual_pnl=round(loss, 4),
+                era='write_off',
+            )
+            print(f"Trade {trade.get('trade_id')}: ABANDONED -${amount:.2f}")
+
+        if not any_abandoned:
+            print(f"No open/stranded positions to abandon in {market_id}")
+            return None
+
+        # Sync trade_history records
+        abandoned_ids = {t['trade_id'] for t in positions if t.get('status') == 'ABANDONED'}
+        for th in self.trade_history:
+            if th.get('trade_id') in abandoned_ids:
+                for pos in positions:
+                    if pos.get('trade_id') == th.get('trade_id'):
+                        th['status'] = pos['status']
+                        th['profit'] = pos['profit']
+                        break
+
+        self.balance += total_loss  # total_loss is negative
+        print(f"Market {market_id} ABANDONED. Realised loss: ${total_loss:.2f}")
+        print(f"New balance: ${self.balance:.2f}")
+        self.save_state()
+        return round(total_loss, 4)
+
     def close_position_early(self, market_id: str, current_prob: float) -> Optional[float]:
         """
         Close an open position early at the current market probability.
@@ -544,6 +625,11 @@ class PaperTrader:
         any_closed = False
 
         for trade in positions:
+            # Only OPEN positions can be closed early at an AMM price.
+            # STRANDED markets are past closeTime with no live AMM — calling
+            # close_position_early on them would realise a fake sale value.
+            # They must wait for resolve_positions to reconcile against a
+            # real resolution (or be written off via execute_abandon.py).
             if trade['status'] != 'OPEN':
                 continue
 
@@ -603,8 +689,16 @@ class PaperTrader:
         """
         resolved_count = 0
         for market_id in list(self.positions.keys()):
-            open_positions = [p for p in self.positions[market_id] if p.get('status') == 'OPEN']
-            if not open_positions:
+            # Scan OPEN and STRANDED positions. STRANDED markets (Phase 2.4)
+            # are past closeTime + grace with no resolution yet; if the creator
+            # eventually resolves, this path reconciles them to WIN/LOSS using
+            # real P&L. Pure resolution — no AMM-mark write. ABANDONED is
+            # terminal and must be skipped.
+            live_positions = [
+                p for p in self.positions[market_id]
+                if p.get('status') in ('OPEN', 'STRANDED')
+            ]
+            if not live_positions:
                 continue
             try:
                 market = api_client.get_market(market_id)
