@@ -21,6 +21,7 @@ Usage:
 
 Logs (on server):
   /tmp/research.log        hourly market research
+  /tmp/reprice.log         hourly position repricing (Phase 2.2)
   /tmp/resolution.log      hourly position resolution
   /tmp/trader.log          hourly trading
   /tmp/daily_summary.log   daily summary
@@ -40,6 +41,11 @@ WORKSPACE={WORKSPACE}
 
 # Market research — hourly :00
 0 * * * * cd $WORKSPACE && git pull origin main -q && python3 automation/auto_research.py >> /tmp/research.log 2>&1
+
+# Position repricing — hourly :05 (Phase 2.2)
+# Runs BEFORE resolve_positions.py at :10 so resolving markets get a final
+# pre-resolution snapshot captured. Measure-only — no close decisions.
+5 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/reprice_positions.py >> /tmp/reprice.log 2>&1
 
 # Position resolution — hourly :10
 10 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py >> /tmp/resolution.log 2>&1
@@ -84,6 +90,7 @@ def main():
     print()
     print("SCHEDULE SUMMARY (all UTC):")
     print("  :00 hourly   — market research (swap check runs inside)")
+    print("  :05 hourly   — position repricing (measure-only)")
     print("  :10 hourly   — position resolution")
     print("  :20 hourly   — auto trading")
     print("  19:00 daily  — daily summary")

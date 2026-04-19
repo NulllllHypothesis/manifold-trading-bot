@@ -7,6 +7,7 @@ An automated trading system for [Manifold Markets](https://manifold.markets) —
 | Layer | Script | Schedule |
 |---|---|---|
 | Market research | `automation/auto_research.py` | Every hour at :00 UTC |
+| Position repricing | `scripts/reprice_positions.py` | Every hour at :05 UTC |
 | Position resolution | `scripts/resolve_positions.py` | Every hour at :10 UTC |
 | Trade execution | `automation/auto_trader.py` | Every hour at :20 UTC |
 | Daily report | `automation/daily_summary.py` | Daily at 19:00 UTC |
@@ -112,6 +113,9 @@ The system runs autonomously on a Linux server. All scheduling uses the OS-level
 ```
 # Market research — hourly :00
 0 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_research.py
+
+# Position repricing — hourly :05 (Phase 2.2, measure-only)
+5 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/reprice_positions.py
 
 # Position resolution — hourly :10
 10 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py
