@@ -56,6 +56,15 @@ _PENDING_CLOSES_PATH = _ROOT / "pending_closes.json"
 # Match the 4h expiry used by position_swap_checker for consistency.
 CLOSE_EXPIRY_HOURS = 4
 
+# A repricing snapshot older than this is stale. Phase 2.2 runs hourly at
+# :05, so any live position should be ≤1h stale in normal operation; 2h is
+# one missed cycle plus slack. If Phase 2.2 has missed multiple cycles we'd
+# rather HOLD with reason 'stale_reprice' than emit CLOSE proposals based on
+# prices that are a day old. Phase 2.2 leaves previous repricing fields on
+# state when a fetch fails, so last_repriced_at freshness is the only way
+# to tell "I have fresh data" from "I have stale data".
+REPRICE_STALE_HOURS = 2
+
 
 # ── Scoring ──────────────────────────────────────────────────────────────────
 
@@ -92,6 +101,8 @@ def position_score(
 def classify_position(
     position: Dict,
     threshold: float = CLOSE_SCORE_THRESHOLD,
+    stale_hours: float = REPRICE_STALE_HOURS,
+    _now=None,  # injectable for tests
 ) -> Tuple[str, Optional[float], str]:
     """
     Classify one position as HOLD / CLOSE given its current repricing state.
@@ -101,13 +112,17 @@ def classify_position(
       - score: the computed position_score, or None if insufficient data
       - reason: human-readable short string for the Telegram proposal
 
-    Decision rules:
-      1. No repricing data → HOLD with reason 'no_reprice' (Phase 2.2 hasn't
-         touched this position yet — wait one cycle).
-      2. is_resolved_on_api=True → HOLD with reason 'awaiting_resolve' —
+    Decision rules (evaluated in order):
+      1. is_resolved_on_api=True → HOLD with reason 'awaiting_resolve' —
          resolve_positions.py at :10 handles these; we don't interfere.
-      3. score < threshold → CLOSE with reason summarising why.
-      4. Otherwise HOLD.
+      2. No repricing data → HOLD with reason 'no_reprice' (Phase 2.2 hasn't
+         touched this position yet — wait one cycle).
+      3. last_repriced_at older than stale_hours → HOLD with reason
+         'stale_reprice'. Phase 2.2 preserves prior repricing fields on
+         fetch failure, so this is the only way to distinguish "fresh data
+         says close" from "stale data from a missed cycle says close".
+      4. score < threshold → CLOSE with reason summarising why.
+      5. Otherwise HOLD.
     """
     if position.get('is_resolved_on_api'):
         return ('HOLD', None, 'awaiting_resolve')
@@ -118,6 +133,9 @@ def classify_position(
 
     if unrealised is None or days_held is None:
         return ('HOLD', None, 'no_reprice')
+
+    if _is_reprice_stale(position.get('last_repriced_at'), stale_hours, _now=_now):
+        return ('HOLD', None, 'stale_reprice')
 
     score = position_score(unrealised, days_held, pclass)
     if score is None:
@@ -134,6 +152,30 @@ def _close_reason(unrealised_pnl: float, days_held: float, position_class: Optio
     if position_class == 'long_or_uncertain':
         parts.append("long_horizon_penalty")
     return ", ".join(parts)
+
+
+def _is_reprice_stale(
+    last_repriced_at: Optional[str],
+    stale_hours: float,
+    _now=None,
+) -> bool:
+    """True if the repricing snapshot is missing or older than stale_hours.
+
+    Missing is treated as stale: a position with no last_repriced_at marker
+    has never been priced at all, or we've lost the timestamp — either way
+    we shouldn't score it as if we have fresh data. Caller handles "missing
+    current_unrealised_pnl" separately upstream via the 'no_reprice' branch.
+    """
+    if not last_repriced_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(last_repriced_at.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return True  # unparseable → treat as stale, never scored as fresh
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    now = _now if _now is not None else datetime.now(timezone.utc)
+    return (now - ts) > timedelta(hours=stale_hours)
 
 
 def _days_held_from_position(position: Dict) -> Optional[float]:
@@ -302,6 +344,12 @@ def run_evaluator(
     n_hold = 0
     n_close = 0
 
+    # Track market_ids already proposed THIS RUN so a market with multiple
+    # OPEN trades doesn't generate duplicate proposals. close_position_early
+    # closes every OPEN trade for the market at once, so one proposal per
+    # market is sufficient — a second Telegram CTA would be confusing.
+    proposed_this_run: set = set()
+
     for market_id, pos in _iter_open_positions(state):
         action, score, reason = classify_position(pos)
 
@@ -318,9 +366,14 @@ def run_evaluator(
             if verbose:
                 print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposal already pending, skipping")
             continue
+        if market_id in proposed_this_run:
+            if verbose:
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — already proposed this run, skipping")
+            continue
 
         proposal = _build_proposal(next_id, market_id, pos, score, reason)
         new_proposals.append(proposal)
+        proposed_this_run.add(market_id)
         next_id += 1
         if verbose:
             print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{proposal['id']}")

@@ -31,7 +31,7 @@ from scripts.evaluate_positions import (
     CLOSE_EXPIRY_HOURS,
 )
 from scripts import execute_close as execute_close_mod
-from scripts.execute_close import execute_close, find_proposal
+from scripts.execute_close import execute_close, find_proposal, MarketResolvedError
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,7 +69,11 @@ def _pos(
         p['current_probability'] = current_prob
     if unrealised is not None:
         p['current_unrealised_pnl'] = unrealised
-    if last_repriced_at is not None:
+        # Default to a fresh repricing timestamp when the caller supplies an
+        # unrealised P&L — tests that exercise staleness pass an explicit
+        # last_repriced_at to override this.
+        p['last_repriced_at'] = last_repriced_at or datetime.now(timezone.utc).isoformat()
+    elif last_repriced_at is not None:
         p['last_repriced_at'] = last_repriced_at
     if question is not None:
         p['question'] = question
@@ -439,6 +443,207 @@ class TestEarlyCloseEraRecording(unittest.TestCase):
         era = conn.execute("SELECT era FROM bet_outcomes WHERE market_id='mkt_B'").fetchone()[0]
         conn.close()
         self.assertEqual(era, 'post_ev_fix')
+
+
+# ── Reviewer fix 1 (High): execute_close re-checks isResolved ────────────────
+
+class TestExecuteCloseResolvedMarketGuard(unittest.TestCase):
+    """High-severity fix: a market may resolve between proposal creation and
+    human approval. If we still call close_position_early on it, we both
+    mislabel the true resolution as CLOSED_EARLY in bet_outcomes (breaking
+    era segmentation) and realise the wrong economics for MKT / CANCEL /
+    NO resolutions. execute_close must bail out and let resolve_positions.py
+    handle the real resolution path."""
+
+    def _proposal(self):
+        return {
+            'id': 1,
+            'market_id': 'mkt_resolved',
+            'outcome': 'YES',
+            'amount': 10.0,
+            'entry_probability': 0.5,
+            'current_probability': 0.6,
+            'current_unrealised_pnl': 1.0,
+            'status': 'pending',
+            'proposed_at': datetime.now().isoformat(),
+        }
+
+    def test_resolved_yes_blocks_close(self):
+        class FakeTrader:
+            balance = 100.0
+            def close_position_early(self, *a, **kw):
+                raise AssertionError("close_position_early must not be called for a resolved market")
+
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'probability': 1.0, 'isResolved': True,
+                                        'resolution': 'YES'}):
+            with self.assertRaises(MarketResolvedError) as ctx:
+                execute_close(self._proposal(), FakeTrader(), notify=lambda m: None)
+        self.assertIn('mkt_resolved', str(ctx.exception))
+        self.assertIn("'YES'", str(ctx.exception))
+
+    def test_resolved_mkt_blocks_close(self):
+        # MKT resolution uses resolutionProbability, not the AMM probability;
+        # closing at current 'probability' would realise wrong economics.
+        class FakeTrader:
+            balance = 100.0
+            def close_position_early(self, *a, **kw):
+                raise AssertionError("close_position_early must not be called for a resolved market")
+
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'probability': 0.8, 'isResolved': True,
+                                        'resolution': 'MKT', 'resolutionProbability': 0.6}):
+            with self.assertRaises(MarketResolvedError):
+                execute_close(self._proposal(), FakeTrader(), notify=lambda m: None)
+
+    def test_resolved_cancel_blocks_close(self):
+        class FakeTrader:
+            balance = 100.0
+            def close_position_early(self, *a, **kw):
+                raise AssertionError("close_position_early must not be called for a resolved market")
+
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'probability': 0.5, 'isResolved': True,
+                                        'resolution': 'CANCEL'}):
+            with self.assertRaises(MarketResolvedError):
+                execute_close(self._proposal(), FakeTrader(), notify=lambda m: None)
+
+    def test_unresolved_market_still_closes_normally(self):
+        # Regression guard: the new guard must not block the happy path.
+        proposal = self._proposal()
+
+        class FakeTrader:
+            balance = 100.0
+            calls = []
+            def close_position_early(self, market_id, current_prob):
+                FakeTrader.calls.append((market_id, current_prob))
+                return 1.0
+
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'probability': 0.6, 'isResolved': False}):
+            ok = execute_close(proposal, FakeTrader(), notify=lambda m: None)
+        self.assertTrue(ok)
+        self.assertEqual(FakeTrader.calls, [('mkt_resolved', 0.6)])
+
+
+# ── Reviewer fix 2 (Medium): stale repricing → no score, no proposal ─────────
+
+class TestStaleRepriceClassification(unittest.TestCase):
+    """A position with stale last_repriced_at must be treated as no-fresh-data,
+    not scored against yesterday's price. Phase 2.2 leaves previous repricing
+    fields on state when a fetch fails, so staleness is the only signal that
+    separates 'fresh data says close' from 'stale data says close'."""
+
+    def test_stale_last_repriced_at_holds_with_stale_reprice_reason(self):
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        p = _pos(unrealised=-3.0, days_ago=5, last_repriced_at=old_ts)
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertIsNone(score)
+        self.assertEqual(reason, 'stale_reprice')
+
+    def test_missing_last_repriced_at_with_unrealised_still_treated_stale(self):
+        # Defensive: a position that somehow has current_unrealised_pnl but
+        # no last_repriced_at is in an inconsistent state — HOLD, don't CLOSE.
+        p = _pos(unrealised=-3.0, days_ago=5)
+        del p['last_repriced_at']
+        action, _, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertEqual(reason, 'stale_reprice')
+
+    def test_unparseable_last_repriced_at_treated_stale(self):
+        p = _pos(unrealised=-3.0, days_ago=5, last_repriced_at='not-a-date')
+        action, _, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertEqual(reason, 'stale_reprice')
+
+    def test_fresh_last_repriced_at_allows_close(self):
+        # Regression guard: within the staleness window a losing position
+        # must still CLOSE as before.
+        fresh_ts = datetime.now(timezone.utc).isoformat()
+        p = _pos(unrealised=-3.0, days_ago=5, last_repriced_at=fresh_ts)
+        action, _, _ = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+
+    def test_just_under_two_hours_is_still_fresh(self):
+        # Boundary: 1h59m should still be fresh under the default 2h window.
+        ts = (datetime.now(timezone.utc) - timedelta(hours=1, minutes=59)).isoformat()
+        p = _pos(unrealised=-3.0, days_ago=5, last_repriced_at=ts)
+        action, _, _ = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+
+
+# ── Reviewer fix 3 (Medium): intra-run dedup for multi-trade markets ─────────
+
+class TestIntraRunDedupe(unittest.TestCase):
+    """A single market can legitimately hold multiple OPEN trades (legacy
+    positions, sequential averaging-in, etc.). close_position_early closes
+    ALL open trades for that market in one call, so one proposal is enough.
+    Without intra-run dedup the operator would receive two Telegram CTAs
+    for the same market and the second approval would fail with 'nothing
+    to close'."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.state_path = tmp / 'paper_trading_state.json'
+        self.pending_path = tmp / 'pending_closes.json'
+        self._patchers = [
+            patch.object(evaluate_positions, '_STATE_PATH', self.state_path),
+            patch.object(evaluate_positions, '_PENDING_CLOSES_PATH', self.pending_path),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.telegram_sent = []
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def _notify(self, msg):
+        self.telegram_sent.append(msg)
+
+    def test_two_open_trades_same_market_produce_one_proposal(self):
+        state = {
+            'balance': 100.0,
+            'positions': {
+                'mkt_dup': [
+                    _pos(market_id='mkt_dup', trade_id=1, unrealised=-3.0, days_ago=5),
+                    _pos(market_id='mkt_dup', trade_id=2, unrealised=-3.0, days_ago=5,
+                         amount=5.0),
+                ]
+            },
+            'trades': [],
+        }
+        with open(self.state_path, 'w') as f:
+            json.dump(state, f)
+
+        h, c, n = run_evaluator(notify=self._notify)
+
+        self.assertEqual(n, 1, "only one proposal should be emitted for one market")
+        self.assertEqual(len(self.telegram_sent), 1)
+
+        with open(self.pending_path) as f:
+            pending = json.load(f)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['market_id'], 'mkt_dup')
+
+    def test_distinct_markets_still_get_distinct_proposals(self):
+        # Regression guard: dedup is per-market, not global.
+        state = {
+            'balance': 100.0,
+            'positions': {
+                'mkt_A': [_pos(market_id='mkt_A', trade_id=1, unrealised=-3.0, days_ago=5)],
+                'mkt_B': [_pos(market_id='mkt_B', trade_id=2, unrealised=-3.0, days_ago=5)],
+            },
+            'trades': [],
+        }
+        with open(self.state_path, 'w') as f:
+            json.dump(state, f)
+
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 2)
 
 
 if __name__ == '__main__':

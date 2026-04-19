@@ -93,29 +93,65 @@ def find_proposal(proposals: list, close_id: int) -> dict:
 
 # ── Execution ────────────────────────────────────────────────────────────────
 
-def _current_prob(market_id: str, fallback: float) -> float:
-    """Fetch live probability; fall back to the snapshot price if API fails.
-
-    The fallback keeps the approval flow usable even when the Manifold API
-    is briefly down — the operator already saw the snapshot price in the
-    Telegram proposal, so closing at that price is reasonable.
-    """
+def _fetch_market(market_id: str):
+    """Single-call API fetch; returns the raw market dict or None on failure."""
     try:
-        market = api_client.get_market(market_id)
+        return api_client.get_market(market_id)
+    except Exception as e:
+        print(f"  Warning: could not fetch market {market_id}: {e}")
+        return None
+
+
+def _current_prob_from_market(market, fallback: float) -> float:
+    """Extract probability from a fetched market dict, falling back to snapshot.
+
+    Split out from _fetch_market so callers can inspect other fields on the
+    same response (is_resolved, resolution) without double-fetching.
+    """
+    if market is not None:
         prob = market.get('probability')
         if prob is not None:
             return float(prob)
-    except Exception as e:
-        print(f"  Warning: could not fetch current prob for {market_id}: {e}")
     return float(fallback)
 
 
+class MarketResolvedError(RuntimeError):
+    """Raised when a proposal tries to close a market that already resolved.
+
+    High-severity safety check: between proposal creation (at :30) and human
+    approval, a market may genuinely resolve. If we close it ourselves at the
+    current probability we'd both (a) mislabel a real resolution as
+    CLOSED_EARLY in bet_outcomes, breaking era segmentation, and (b) realise
+    the wrong economics for MKT / CANCEL / NO resolutions (the 'probability'
+    field at resolution time doesn't reflect the true payout).
+
+    Correct behaviour: bail out and let resolve_positions.py at :10 handle
+    the finalization through resolve_market / resolve_market_mkt / cancel.
+    """
+
+
 def execute_close(proposal: dict, trader: PaperTrader, *, notify=send_telegram_message) -> bool:
-    """Close the position at current AMM price. Returns True on success."""
+    """Close the position at current AMM price. Returns True on success.
+
+    Refetches the market right before closing to check `isResolved`. If the
+    market resolved after the proposal was created, raises MarketResolvedError
+    — we must NOT simulate a manual close on a resolved market. The caller
+    (main()) converts that into a non-zero exit code and leaves the proposal
+    in 'pending' so the operator can dismiss it explicitly.
+    """
     market_id = proposal['market_id']
     snapshot_prob = proposal.get('current_probability', 0.5) or 0.5
 
-    current_prob = _current_prob(market_id, snapshot_prob)
+    market = _fetch_market(market_id)
+    if market is not None and market.get('isResolved'):
+        raise MarketResolvedError(
+            f"Market {market_id} has resolved "
+            f"(resolution={market.get('resolution')!r}) — "
+            "resolve_positions.py at :10 will finalize this. "
+            "Dismiss the close proposal instead of approving it."
+        )
+
+    current_prob = _current_prob_from_market(market, snapshot_prob)
     print(f"  Closing {market_id} at probability {current_prob:.3f}")
 
     pnl = trader.close_position_early(market_id, current_prob)
@@ -159,7 +195,14 @@ def main():
         return 0
 
     trader = PaperTrader()
-    ok = execute_close(proposal, trader)
+    try:
+        ok = execute_close(proposal, trader)
+    except MarketResolvedError as e:
+        # Leave proposal as 'pending' — operator should dismiss it explicitly
+        # once they understand why, or just wait for resolve_positions.py to
+        # finalize the market and the proposal to auto-expire.
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     if not ok:
         return 1
 
