@@ -180,10 +180,16 @@ def _is_reprice_stale(
 
 def _days_held_from_position(position: Dict) -> Optional[float]:
     """
-    Prefer the value computed by the last repricing run (it's recorded on
-    every snapshot), but fall back to deriving from `timestamp` so a position
-    that's been repriced but lost its days_held field still scores.
+    Prefer the amount-weighted aggregate days_held when a market aggregate
+    supplies it (`_aggregate_days_held`). Otherwise derive from `timestamp`.
     """
+    # Market aggregates precompute amount-weighted days — honour that
+    # instead of re-deriving from the oldest-leg timestamp, which would
+    # overstate the age of the capital in the market.
+    agg = position.get('_aggregate_days_held')
+    if agg is not None:
+        return float(agg)
+
     # Phase 2.2 snapshot stores days_held in the DB, not on the position record.
     # So we always derive it here from the `timestamp` field.
     entry_ts = position.get('timestamp')
@@ -226,7 +232,12 @@ def _save_pending_closes(proposals: List[Dict]) -> None:
 
 
 def _iter_open_positions(state: Dict):
-    """Yield (market_id, position) for every OPEN position in the state."""
+    """Yield (market_id, position) for every OPEN position in the state.
+
+    Kept for backwards compatibility with older call sites. The evaluator now
+    uses _iter_open_markets instead so it scores at market level — see the
+    docstring on _aggregate_market_legs for why.
+    """
     positions_by_market = state.get('positions', {}) or {}
     for market_id, trades in positions_by_market.items():
         if not isinstance(trades, list):
@@ -234,6 +245,159 @@ def _iter_open_positions(state: Dict):
         for pos in trades:
             if isinstance(pos, dict) and pos.get('status') == 'OPEN':
                 yield market_id, pos
+
+
+def _iter_open_markets(state: Dict):
+    """Yield (market_id, [open_legs]) for every market with ≥1 OPEN leg.
+
+    A single market can hold multiple OPEN trades (legacy averaging-in,
+    position swaps that re-added on the same side). Close execution happens
+    at market granularity — `PaperTrader.close_position_early` closes ALL
+    OPEN legs in the given market in one call — so close DECISIONS must
+    also be made at market granularity. Scoring legs individually then
+    deduping at proposal time is unsafe because a single losing leg in an
+    otherwise profitable market would still emit a proposal that, once
+    approved, liquidates the whole market including the winning legs.
+    """
+    positions_by_market = state.get('positions', {}) or {}
+    for market_id, trades in positions_by_market.items():
+        if not isinstance(trades, list):
+            continue
+        open_legs = [t for t in trades if isinstance(t, dict) and t.get('status') == 'OPEN']
+        if open_legs:
+            yield market_id, open_legs
+
+
+def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
+    """Collapse multiple OPEN legs into one market-level position dict.
+
+    Aggregation rules:
+      - current_unrealised_pnl  → sum across legs (what we'd realise if we
+                                   closed the whole market right now)
+      - amount                  → sum across legs (total capital at stake)
+      - days_held               → amount-weighted average (represents average
+                                   capital age; matches the decay model)
+      - entry_probability       → amount-weighted average (display only; the
+                                   proposal shows this so the operator can
+                                   compare entry vs current)
+      - current_probability     → first leg's value (identical across legs
+                                   for the same market)
+      - outcome                 → first leg's value if all match; 'MIXED'
+                                   otherwise (rare but possible: YES on one
+                                   leg, NO on another)
+      - position_class          → first leg's value (identical by definition)
+      - question                → first leg's value
+      - is_resolved_on_api      → True if ANY leg is flagged (conservative:
+                                   if even one leg saw a resolution, defer)
+      - last_repriced_at        → OLDEST timestamp across legs. If the
+                                   oldest leg's reprice is stale, we don't
+                                   trust the aggregate.
+      - timestamp               → OLDEST timestamp (used by the fallback
+                                   days_held calculator).
+
+    Single-leg markets pass through with equivalent values — the aggregate
+    of one leg equals that leg.
+    """
+    total_pnl = 0.0
+    total_amount = 0.0
+    any_pnl = False
+    any_amount = False
+    weighted_days = 0.0
+    weighted_entry = 0.0
+    weighted_base = 0.0  # denominator for weighted averages (sum of amounts with known values)
+    outcomes = set()
+    oldest_repriced: Optional[datetime] = None
+    oldest_timestamp: Optional[datetime] = None
+    any_resolved = False
+    question = None
+    position_class = None
+    current_probability = None
+
+    for leg in legs:
+        # Sum pnl where present. Missing pnl on one leg poisons the
+        # aggregate — we can't honestly score a market when any leg lacks
+        # fresh data. Caller handles the `no_reprice` branch via a
+        # separate check after aggregation.
+        pnl = leg.get('current_unrealised_pnl')
+        if pnl is not None:
+            total_pnl += float(pnl)
+            any_pnl = True
+
+        amount = leg.get('amount') or 0.0
+        if amount:
+            total_amount += float(amount)
+            any_amount = True
+
+        leg_days = _days_held_from_position(leg)
+        if leg_days is not None and amount:
+            weighted_days += leg_days * float(amount)
+            weighted_base += float(amount)
+
+        entry_p = leg.get('entry_probability') or leg.get('probability')
+        if entry_p is not None and amount:
+            weighted_entry += float(entry_p) * float(amount)
+
+        outcome = leg.get('outcome')
+        if outcome:
+            outcomes.add(outcome)
+
+        last_ts = _parse_iso(leg.get('last_repriced_at'))
+        if last_ts is not None:
+            oldest_repriced = last_ts if oldest_repriced is None else min(oldest_repriced, last_ts)
+        else:
+            # Any leg missing a reprice timestamp must force stale — use a
+            # sentinel far in the past so the staleness gate fires.
+            oldest_repriced = datetime.min.replace(tzinfo=timezone.utc)
+
+        open_ts = _parse_iso(leg.get('timestamp'))
+        if open_ts is not None:
+            oldest_timestamp = open_ts if oldest_timestamp is None else min(oldest_timestamp, open_ts)
+
+        if leg.get('is_resolved_on_api'):
+            any_resolved = True
+        question = question or leg.get('question')
+        position_class = position_class or leg.get('position_class')
+        if current_probability is None:
+            current_probability = leg.get('current_probability')
+
+    if not outcomes:
+        outcome = None
+    elif len(outcomes) == 1:
+        outcome = next(iter(outcomes))
+    else:
+        outcome = 'MIXED'
+
+    return {
+        'market_id': market_id,
+        'trade_id': None,  # aggregate — individual legs have their own ids
+        'n_legs': len(legs),
+        'outcome': outcome,
+        'amount': total_amount if any_amount else None,
+        'current_unrealised_pnl': total_pnl if any_pnl else None,
+        'entry_probability': (weighted_entry / weighted_base) if weighted_base else None,
+        'current_probability': current_probability,
+        'position_class': position_class,
+        'question': question,
+        'is_resolved_on_api': any_resolved,
+        'last_repriced_at': oldest_repriced.isoformat() if oldest_repriced else None,
+        'timestamp': oldest_timestamp.isoformat() if oldest_timestamp else None,
+        # Precomputed amount-weighted days_held so the scorer doesn't have
+        # to re-derive it from `timestamp` (which would give the oldest
+        # leg's age, not the weighted average).
+        '_aggregate_days_held': (weighted_days / weighted_base) if weighted_base else None,
+    }
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _existing_pending_ids(pending: List[Dict]) -> set:
@@ -280,6 +444,7 @@ def _build_proposal(close_id: int, market_id: str, pos: Dict, score: float, reas
         'id': close_id,
         'market_id': market_id,
         'trade_id': pos.get('trade_id'),
+        'n_legs': pos.get('n_legs', 1),
         'question': pos.get('question') or market_id,
         'outcome': pos.get('outcome'),
         'amount': pos.get('amount'),
@@ -301,11 +466,13 @@ def _format_telegram_message(proposal: Dict) -> str:
     pnl = proposal.get('current_unrealised_pnl') or 0
     score = proposal.get('position_score')
     score_str = f"{score:+.2f}" if isinstance(score, (int, float)) else "?"
+    n_legs = proposal.get('n_legs', 1)
+    legs_tag = f" ({n_legs} legs)" if n_legs and n_legs > 1 else ""
 
     return (
-        f"🔻 Close Proposal #{close_id}\n"
+        f"🔻 Close Proposal #{close_id}{legs_tag}\n"
         f"{proposal['outcome']} on \"{q}\"\n"
-        f"  Entered {entry:.0%}, now {now:.0%}, unrealised ${pnl:+.2f}\n"
+        f"  Avg entry {entry:.0%}, now {now:.0%}, unrealised ${pnl:+.2f}\n"
         f"  Score: {score_str}  ({proposal.get('reason', '')})\n"
         "\n"
         f"Reply \"approve close {close_id}\" to sell at current price.\n"
@@ -344,20 +511,20 @@ def run_evaluator(
     n_hold = 0
     n_close = 0
 
-    # Track market_ids already proposed THIS RUN so a market with multiple
-    # OPEN trades doesn't generate duplicate proposals. close_position_early
-    # closes every OPEN trade for the market at once, so one proposal per
-    # market is sufficient — a second Telegram CTA would be confusing.
-    proposed_this_run: set = set()
-
-    for market_id, pos in _iter_open_positions(state):
-        action, score, reason = classify_position(pos)
+    # Scoring/classification is now per-market, aggregating all OPEN legs
+    # in that market. close_position_early closes every leg in one call, so
+    # a losing leg in an otherwise-profitable market must NOT emit a close
+    # proposal — the aggregate pnl is what gets realised.
+    for market_id, legs in _iter_open_markets(state):
+        aggregate = _aggregate_market_legs(market_id, legs)
+        action, score, reason = classify_position(aggregate)
 
         if action == 'HOLD':
             n_hold += 1
             if verbose:
                 s = f"{score:+.2f}" if isinstance(score, (int, float)) else "?"
-                print(f"  [{market_id[:12]}] HOLD  score={s}  ({reason})")
+                legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
+                print(f"  [{market_id[:12]}] HOLD  score={s}  ({reason}){legs_tag}")
             continue
 
         # action == 'CLOSE'
@@ -366,17 +533,13 @@ def run_evaluator(
             if verbose:
                 print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposal already pending, skipping")
             continue
-        if market_id in proposed_this_run:
-            if verbose:
-                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — already proposed this run, skipping")
-            continue
 
-        proposal = _build_proposal(next_id, market_id, pos, score, reason)
+        proposal = _build_proposal(next_id, market_id, aggregate, score, reason)
         new_proposals.append(proposal)
-        proposed_this_run.add(market_id)
         next_id += 1
         if verbose:
-            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{proposal['id']}")
+            legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
+            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{proposal['id']}{legs_tag}")
 
     if new_proposals:
         pending.extend(new_proposals)

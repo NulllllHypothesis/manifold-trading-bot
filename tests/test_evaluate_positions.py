@@ -646,5 +646,156 @@ class TestIntraRunDedupe(unittest.TestCase):
         self.assertEqual(n, 2)
 
 
+# ── Reviewer fix 4 (Medium): score at market granularity, not per-leg ────────
+
+class TestMarketLevelAggregation(unittest.TestCase):
+    """close_position_early closes ALL OPEN legs in a market in one call.
+    A losing leg in an otherwise-profitable market must NOT emit a close
+    proposal — the market-level aggregate P&L is what would actually be
+    realised on approval. Previously the evaluator scored each leg
+    independently then deduped at proposal time, which meant a losing leg
+    in a net-positive market still fired a proposal."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.state_path = tmp / 'paper_trading_state.json'
+        self.pending_path = tmp / 'pending_closes.json'
+        self._patchers = [
+            patch.object(evaluate_positions, '_STATE_PATH', self.state_path),
+            patch.object(evaluate_positions, '_PENDING_CLOSES_PATH', self.pending_path),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.telegram_sent = []
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def _notify(self, msg):
+        self.telegram_sent.append(msg)
+
+    def _write_state(self, positions):
+        with open(self.state_path, 'w') as f:
+            json.dump({'balance': 100.0, 'positions': positions, 'trades': []}, f)
+
+    def test_net_profitable_market_with_one_losing_leg_does_not_propose(self):
+        # Reviewer reproducer: two YES legs on same market at current prob 0.30.
+        # Leg A entered at 0.50 → unrealised -4.0. Leg B entered at 0.10 →
+        # unrealised +20.0. Market aggregate is +16.0 — closing the whole
+        # market would realise a profit. No CLOSE proposal should fire.
+        self._write_state({
+            'mkt_mixed': [
+                _pos(market_id='mkt_mixed', trade_id=1, outcome='YES',
+                     amount=10.0, entry_prob=0.50,
+                     unrealised=-4.0, days_ago=5,
+                     current_prob=0.30),
+                _pos(market_id='mkt_mixed', trade_id=2, outcome='YES',
+                     amount=10.0, entry_prob=0.10,
+                     unrealised=20.0, days_ago=5,
+                     current_prob=0.30),
+            ],
+        })
+
+        h, c, n = run_evaluator(notify=self._notify)
+
+        self.assertEqual(n, 0, "net-profitable market must not emit a CLOSE proposal")
+        self.assertEqual(self.telegram_sent, [])
+
+    def test_aggregate_losing_market_proposes_with_summed_pnl(self):
+        # Inverse of the profitable case: one leg -6, one leg -4 → -$10
+        # aggregate. Score with 5-day decay = -10.25 → CLOSE. Proposal must
+        # carry the SUMMED pnl (-10), not an individual leg's pnl.
+        self._write_state({
+            'mkt_loser': [
+                _pos(market_id='mkt_loser', trade_id=1, amount=10.0,
+                     entry_prob=0.50, unrealised=-6.0, days_ago=5,
+                     current_prob=0.20),
+                _pos(market_id='mkt_loser', trade_id=2, amount=10.0,
+                     entry_prob=0.50, unrealised=-4.0, days_ago=5,
+                     current_prob=0.20),
+            ],
+        })
+
+        h, c, n = run_evaluator(notify=self._notify)
+
+        self.assertEqual(n, 1)
+        with open(self.pending_path) as f:
+            pending = json.load(f)
+        self.assertEqual(len(pending), 1)
+        self.assertAlmostEqual(pending[0]['current_unrealised_pnl'], -10.0, places=4)
+        # amount is summed across legs
+        self.assertAlmostEqual(pending[0]['amount'], 20.0, places=4)
+        self.assertEqual(pending[0]['n_legs'], 2)
+
+    def test_aggregate_uses_amount_weighted_days_held(self):
+        # Two legs, different ages. Amount-weighted average age:
+        # (10 * 10d + 30 * 2d) / 40 = (100 + 60) / 40 = 4d
+        # Aggregate pnl -$3 + -$3 = -$6. Score = -6 - 4*0.05 = -6.20.
+        # If we used oldest-leg age (10d) we'd over-penalise; weighted is
+        # the honest reflection of capital age in the market.
+        self._write_state({
+            'mkt_ages': [
+                _pos(market_id='mkt_ages', trade_id=1, amount=10.0,
+                     unrealised=-3.0, days_ago=10,
+                     current_prob=0.3),
+                _pos(market_id='mkt_ages', trade_id=2, amount=30.0,
+                     unrealised=-3.0, days_ago=2,
+                     current_prob=0.3),
+            ],
+        })
+
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 1)
+        with open(self.pending_path) as f:
+            pending = json.load(f)
+        # Score: -6 - 4*0.05 = -6.20 (short horizon, no penalty)
+        self.assertAlmostEqual(pending[0]['position_score'], -6.20, places=2)
+
+    def test_aggregate_stale_if_any_leg_stale(self):
+        # One fresh leg, one stale leg → market treated as stale_reprice.
+        fresh = datetime.now(timezone.utc).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        self._write_state({
+            'mkt_mix_stale': [
+                _pos(market_id='mkt_mix_stale', trade_id=1, unrealised=-3.0,
+                     days_ago=5, last_repriced_at=fresh),
+                _pos(market_id='mkt_mix_stale', trade_id=2, unrealised=-3.0,
+                     days_ago=5, last_repriced_at=stale),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 0)  # held with stale_reprice
+
+    def test_aggregate_hold_if_any_leg_resolved(self):
+        # If any leg sees the market as resolved, defer to resolve_positions
+        # rather than close the market ourselves.
+        self._write_state({
+            'mkt_any_resolved': [
+                _pos(market_id='mkt_any_resolved', trade_id=1, unrealised=-3.0,
+                     days_ago=5, is_resolved_on_api=False),
+                _pos(market_id='mkt_any_resolved', trade_id=2, unrealised=-3.0,
+                     days_ago=5, is_resolved_on_api=True),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 0)
+
+    def test_single_leg_markets_still_work_unchanged(self):
+        # Regression guard: the aggregate-of-one should equal that one leg.
+        self._write_state({
+            'mkt_single': [_pos(market_id='mkt_single', trade_id=1,
+                                unrealised=-3.0, days_ago=5)],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 1)
+        with open(self.pending_path) as f:
+            pending = json.load(f)
+        self.assertAlmostEqual(pending[0]['current_unrealised_pnl'], -3.0, places=4)
+        self.assertEqual(pending[0]['n_legs'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
