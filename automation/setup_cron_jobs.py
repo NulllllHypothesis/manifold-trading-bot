@@ -25,6 +25,7 @@ Logs (on server):
   /tmp/resolution.log      hourly position resolution
   /tmp/trader.log          hourly trading
   /tmp/evaluate.log        hourly position evaluator (Phase 2.3, propose-only)
+  /tmp/stale.log           daily stale detection (Phase 2.4, STRANDED/ABANDONED)
   /tmp/daily_summary.log   daily summary
   /tmp/harvest.log         Sunday ML pipeline (harvest/M2/M3/backtest)
   /tmp/ev_report.log       Monday EV report
@@ -60,6 +61,13 @@ WORKSPACE={WORKSPACE}
 # Runs AFTER :20 trade so newly-opened positions don't get scored before
 # they've been repriced once at :05 next hour.
 30 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/evaluate_positions.py >> /tmp/evaluate.log 2>&1
+
+# Stale position detection — daily 13:00 UTC (Phase 2.4)
+# Auto-flips past-close-and-grace positions to STRANDED (reversible,
+# no P&L impact). Propose-only for ABANDONED at 90d timeout (realises
+# full loss; operator approves via execute_abandon.py). Slow-moving
+# signal — no reason to run hourly.
+0 13 * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/detect_stale_positions.py >> /tmp/stale.log 2>&1
 
 # Daily summary — 19:00 UTC
 0 19 * * * cd $WORKSPACE && git pull origin main -q && python3 automation/daily_summary.py >> /tmp/daily_summary.log 2>&1
@@ -102,6 +110,7 @@ def main():
     print("  :10 hourly   — position resolution")
     print("  :20 hourly   — auto trading")
     print("  :30 hourly   — position evaluator (propose-only, human-approved closes)")
+    print("  13:00 daily  — stale detection (auto STRANDED, propose ABANDONED)")
     print("  19:00 daily  — daily summary")
     print("  Sun 02:00    — calibration harvest")
     print("  Sun 02:30    — M2 re-audit (quality gate)")

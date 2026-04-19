@@ -311,7 +311,25 @@ Safety guards:
 
 ---
 
-### 2.4 — Stale position detection + STRANDED state (honest accounting)
+### 2.4 — Stale position detection + STRANDED / ABANDONED state — **IN REVIEW** (PR #16)
+
+**Shipped in this phase**:
+
+- **STRANDED (auto)** — past `closeTime + 48h` grace, still unresolved → flip status to `STRANDED`, stamped with `stranded_at` + `stranded_reason`. No P&L recorded. Removed from slot accounting (all downstream filters read `status == 'OPEN'`). Reversible: `paper_trader.resolve_market*` now also picks up `STRANDED` legs so eventual resolutions reconcile to WIN/LOSS with real P&L.
+- **ABANDONED (propose-only)** — past `closeTime + 90d`, still unresolved → emit proposal to `pending_abandons.json`, Telegram CTA (`approve abandon N` / `dismiss abandon N`), 72h expiry. Approval via `scripts/execute_abandon.py` calls `PaperTrader.mark_market_abandoned`: every OPEN/STRANDED leg flips to `ABANDONED` with `profit = -amount`, balance reduced, one row per leg in `bet_outcomes` with `market_resolution='ABANDONED'` and `era='write_off'` so the weekly EV audit segments terminal write-offs from real resolutions.
+- **Resolved-market guard on approval** — `execute_abandon` refetches before writing the loss and raises `MarketResolvedError` if the market resolved after proposal creation. Same honest-accounting pattern as `execute_close` in Phase 2.3.
+- **Config**: `STALE_GRACE_HOURS=48`, `STALE_ABANDON_DAYS=90`, `ABANDON_EXPIRY_HOURS=72`.
+- **Cron**: daily at 13:00 UTC. Slow-moving signal — no reason to thrash hourly.
+
+**Deliberately deferred**:
+- **Auto ABANDONED** — propose-only first. Observe which legacy positions actually cross the 90d line, then flip to auto.
+- **Still-tradable "old + losing"** — already owned by Phase 2.3's hourly `evaluate_positions` via `position_score`. Not duplicated here.
+- **Creator-activity signal** (`lastActive > 30d`) — secondary, defer.
+- **Dashboard STRANDED / ABANDONED sections** — Phase 2.5.
+
+---
+
+**Original spec (for reference)**:
 
 **Problem**: Dead positions eat slots. But "closing them at fake $0" is lying to ourselves about our performance. We need two different outcomes depending on whether the market is still tradable.
 
@@ -767,9 +785,9 @@ This is the "if I could only do one thing at a time, what order?" list:
 4. ✅ **Skip AI on held markets** (Phase 1 extension) — SHIPPED
 5. ✅ **Position classification + 3-class caps** (Phase 2.1) — SHIPPED
 6. ✅ **Active repricing** (Phase 2.2) — SHIPPED (PR #14)
-7. **Early close evaluator + approval flow** (Phase 2.3, propose-only) — **IN REVIEW** (PR #15)
-8. **Swap checker migration to position_score** (Phase 2.3b) — merges ad-hoc swap heuristic with the new decision engine
-9. **STRANDED / ABANDONED state** (Phase 2.4) — honest stale handling
+7. ✅ **Early close evaluator + approval flow** (Phase 2.3, propose-only) — SHIPPED (PR #15)
+8. **Stale detection + STRANDED/ABANDONED** (Phase 2.4) — **IN REVIEW** (PR #16)
+9. **Swap checker migration to position_score** (Phase 2.3b) — merges ad-hoc swap heuristic with the new decision engine
 10. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
 11. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
 12. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning

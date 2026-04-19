@@ -98,3 +98,18 @@ LONG_HORIZON_PENALTY = 0.50
 # CLOSE proposal. -0.50 means "we're already down 50¢ net of time cost" —
 # tolerant of small unrealised losses, aggressive on persistent ones.
 CLOSE_SCORE_THRESHOLD = -0.50
+
+# ── Phase 2.4 — stale position detection (STRANDED / ABANDONED) ───────────────
+#
+# Timeline, measured from each market's closeTime:
+#
+#   now < closeTime                                → normal OPEN (Phase 2.3 scores it)
+#   closeTime ≤ now < closeTime + grace            → OPEN (creator often late 1-2d)
+#   closeTime + grace ≤ now < closeTime + timeout  → STRANDED (auto; reversible)
+#   now ≥ closeTime + timeout                      → ABANDONED (propose-only write-off)
+#
+# STRANDED is reversible: resolve_positions scans STRANDED too and converts
+# → WIN/LOSS with real P&L if the creator eventually resolves.
+# ABANDONED is terminal: profit = -amount booked, era='write_off' in bet_outcomes.
+STALE_GRACE_HOURS = 48       # creators regularly resolve 1-2 days late
+STALE_ABANDON_DAYS = 90      # 3 months past close with no resolution = dead
