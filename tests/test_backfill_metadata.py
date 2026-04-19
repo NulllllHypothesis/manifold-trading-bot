@@ -52,6 +52,10 @@ def _minimal_leg(**overrides):
     return base
 
 
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
 def _market(**overrides):
     base = {
         'question': 'Will X happen by Q2?',
@@ -117,21 +121,25 @@ class TestBackfillLeg(unittest.TestCase):
         self.assertEqual(leg['category'], 'crypto')
 
     def test_auto_trades_fills_strategies_and_ev(self):
-        leg = _minimal_leg()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        leg = _minimal_leg(timestamp=now_iso)
         trade_record = {
+            'market_id': 'mkt_A',
+            'timestamp': now_iso,   # exact match with leg
             'strategies': ['probability_bias'],
             'estimated_ev': 1.23,
             'confidence': 0.67,
         }
-        backfill_leg(leg, None, trade_record)
+        backfill_leg(leg, None, [trade_record])
         self.assertEqual(leg['strategies'], ['probability_bias'])
         self.assertEqual(leg['estimated_ev'], 1.23)
         self.assertEqual(leg['confidence'], 0.67)
 
     def test_auto_trades_fallback_question_when_market_missing(self):
         leg = _minimal_leg()
-        trade_record = {'question': 'From trades log'}
-        backfill_leg(leg, None, trade_record)
+        # question is market-level — any record supplies it regardless
+        # of timestamp, so this intentionally has no timestamp match.
+        backfill_leg(leg, None, [{'question': 'From trades log'}])
         self.assertEqual(leg['question'], 'From trades log')
 
     def test_market_question_beats_trade_question(self):
@@ -140,14 +148,13 @@ class TestBackfillLeg(unittest.TestCase):
         leg = _minimal_leg()
         backfill_leg(leg,
                      _market(question='API question'),
-                     {'question': 'Trade log question'})
+                     [{'question': 'Trade log question'}])
         self.assertEqual(leg['question'], 'API question')
 
     def test_nothing_written_when_both_sources_empty(self):
         leg = _minimal_leg()
         written = backfill_leg(leg, None, None)
         self.assertEqual(written, {})
-        # Minimal leg unchanged
         self.assertNotIn('question', leg)
         self.assertNotIn('close_time_ms', leg)
 
@@ -162,6 +169,26 @@ class TestBackfillLeg(unittest.TestCase):
         backfill_leg(leg, _market(closeTime=_ms_from_now(timedelta(days=60))), None)
         self.assertEqual(leg['term'], 'long')
         self.assertEqual(leg['position_class'], 'long_or_uncertain')
+
+    def test_leg_level_backfill_skipped_when_no_timestamp_match(self):
+        # Reviewer fix (Medium): if the leg's timestamp is far from every
+        # auto_trades record, we MUST NOT apply that record's strategies /
+        # estimated_ev / confidence — those are stamped at trade time.
+        # Only market-level fallbacks (question) are still applied.
+        leg_ts = datetime(2026, 4, 19, tzinfo=timezone.utc).isoformat()
+        rec_ts = datetime(2025, 1, 1, tzinfo=timezone.utc).isoformat()  # >1y off
+        leg = _minimal_leg(timestamp=leg_ts)
+        backfill_leg(leg, None, [{
+            'market_id': 'mkt_A', 'timestamp': rec_ts,
+            'strategies': ['WRONG'], 'estimated_ev': 99.0, 'confidence': 0.99,
+            'question': 'question is ok',
+        }])
+        # question is market-level → filled
+        self.assertEqual(leg.get('question'), 'question is ok')
+        # Leg-level fields must stay missing — no safe attribution
+        self.assertNotIn('strategies', leg)
+        self.assertNotIn('estimated_ev', leg)
+        self.assertNotIn('confidence', leg)
 
 
 # ── run_backfill integration ─────────────────────────────────────────────────
@@ -241,9 +268,12 @@ class TestRunBackfill(unittest.TestCase):
         self.assertEqual(th_entry['category'], 'economics')
 
     def test_api_failure_does_not_crash_and_still_uses_auto_trades(self):
-        self._write_state({'mkt_A': [_minimal_leg(market_id='mkt_A')]})
+        leg_ts = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc).isoformat()
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', timestamp=leg_ts)
+        ]})
         self._write_trades([{
-            'market_id': 'mkt_A', 'timestamp': '2026-03-01T00:00:00',
+            'market_id': 'mkt_A', 'timestamp': leg_ts,   # matches leg
             'strategies': ['volume_spike'], 'estimated_ev': 0.50,
             'question': 'Fallback question',
         }])
@@ -273,14 +303,21 @@ class TestRunBackfill(unittest.TestCase):
         self.assertEqual(second['fields_written'], 0,
                          "second run must write nothing — all fields already present")
 
-    def test_latest_auto_trades_record_wins_over_older(self):
-        # A market re-entered multiple times should use the LATEST record
-        # (most recent strategies list), not the original.
-        self._write_state({'mkt_A': [_minimal_leg(market_id='mkt_A')]})
+    def test_leg_matches_closest_timestamp_record(self):
+        # Reviewer fix: leg-level fields (strategies / EV / confidence) are
+        # stamped at trade time, so the correct record for a given leg is
+        # the one whose timestamp matches. Here a leg placed on 2026-04-01
+        # must match the 2026-04-01 record, not the 2026-03-01 one — even
+        # if both records exist for this market.
+        apr_1 = datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc)
+        mar_1 = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', timestamp=_iso(apr_1))
+        ]})
         self._write_trades([
-            {'market_id': 'mkt_A', 'timestamp': '2026-03-01T00:00:00',
+            {'market_id': 'mkt_A', 'timestamp': _iso(mar_1),
              'strategies': ['old_strat'], 'estimated_ev': 0.10},
-            {'market_id': 'mkt_A', 'timestamp': '2026-04-01T00:00:00',
+            {'market_id': 'mkt_A', 'timestamp': _iso(apr_1),
              'strategies': ['new_strat'], 'estimated_ev': 0.50},
         ])
 
@@ -289,6 +326,91 @@ class TestRunBackfill(unittest.TestCase):
         leg = self._read_state()['positions']['mkt_A'][0]
         self.assertEqual(leg['strategies'], ['new_strat'])
         self.assertEqual(leg['estimated_ev'], 0.50)
+
+    def test_multiple_legs_same_market_each_keep_own_attribution(self):
+        # Reviewer's exact reproducer: two OPEN legs on the same market,
+        # entered at different times. Before the fix, both legs received
+        # the NEWEST auto_trades record, silently overwriting the older
+        # leg's real strategies/EV. After the fix, each leg must match
+        # its own record by timestamp.
+        mar_1 = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+        apr_1 = datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc)
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', trade_id=1,
+                         timestamp=_iso(mar_1)),
+            _minimal_leg(market_id='mkt_A', trade_id=2,
+                         timestamp=_iso(apr_1)),
+        ]})
+        self._write_trades([
+            {'market_id': 'mkt_A', 'timestamp': _iso(mar_1),
+             'strategies': ['old_strat'], 'estimated_ev': 0.10,
+             'confidence': 0.60},
+            {'market_id': 'mkt_A', 'timestamp': _iso(apr_1),
+             'strategies': ['new_strat'], 'estimated_ev': 0.50,
+             'confidence': 0.80},
+        ])
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        legs = self._read_state()['positions']['mkt_A']
+        by_tid = {l['trade_id']: l for l in legs}
+        self.assertEqual(by_tid[1]['strategies'], ['old_strat'])
+        self.assertEqual(by_tid[1]['estimated_ev'], 0.10)
+        self.assertEqual(by_tid[1]['confidence'], 0.60)
+        self.assertEqual(by_tid[2]['strategies'], ['new_strat'])
+        self.assertEqual(by_tid[2]['estimated_ev'], 0.50)
+        self.assertEqual(by_tid[2]['confidence'], 0.80)
+
+    def test_leg_with_no_timestamp_match_keeps_leg_level_fields_empty(self):
+        # If the closest record is still far from the leg's timestamp
+        # (outside tolerance), we must NOT attribute — the leg stays
+        # missing strategies/EV rather than silently grabbing a stale one.
+        leg_ts = datetime(2026, 4, 19, tzinfo=timezone.utc)
+        ancient = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', timestamp=_iso(leg_ts))
+        ]})
+        self._write_trades([
+            {'market_id': 'mkt_A', 'timestamp': _iso(ancient),
+             'strategies': ['stale'], 'estimated_ev': 99.0,
+             'confidence': 0.99, 'question': 'market-level is fine'},
+        ])
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        leg = self._read_state()['positions']['mkt_A'][0]
+        # Market-level field still fills from the ancient record
+        self.assertEqual(leg.get('question'), 'market-level is fine')
+        # Leg-level fields skipped — no wrong attribution
+        self.assertNotIn('strategies', leg)
+        self.assertNotIn('estimated_ev', leg)
+        self.assertNotIn('confidence', leg)
+
+    def test_trade_id_match_beats_timestamp_match(self):
+        # If auto_trades happens to carry trade_id (future format), a
+        # direct trade_id match wins over a timestamp-closest match.
+        leg_ts = datetime(2026, 4, 19, tzinfo=timezone.utc)
+        other_ts = datetime(2026, 4, 19, 0, 0, 30, tzinfo=timezone.utc)
+        self._write_state({'mkt_A': [
+            _minimal_leg(market_id='mkt_A', trade_id=42,
+                         timestamp=_iso(leg_ts))
+        ]})
+        self._write_trades([
+            # Timestamp-closest, but WRONG trade
+            {'market_id': 'mkt_A', 'timestamp': _iso(other_ts),
+             'trade_id': 99,
+             'strategies': ['by_timestamp'], 'estimated_ev': 1.0},
+            # Exact trade_id match with slightly farther timestamp
+            {'market_id': 'mkt_A', 'timestamp': _iso(leg_ts),
+             'trade_id': 42,
+             'strategies': ['by_trade_id'], 'estimated_ev': 2.0},
+        ])
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        leg = self._read_state()['positions']['mkt_A'][0]
+        self.assertEqual(leg['strategies'], ['by_trade_id'])
+        self.assertEqual(leg['estimated_ev'], 2.0)
 
     def test_non_open_legs_not_enriched(self):
         # Terminal statuses (WIN/LOSE/CLOSED_EARLY/ABANDONED) are excluded

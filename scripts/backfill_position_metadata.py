@@ -38,7 +38,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -69,12 +69,15 @@ def _save_state_atomic(state: Dict) -> None:
     os.replace(tmp_path, _STATE_PATH)
 
 
-def _load_auto_trades_index() -> Dict[str, Dict]:
-    """Build a `market_id -> trade-record` index from auto_trades.json.
+def _load_auto_trades_index() -> Dict[str, List[Dict]]:
+    """Build a `market_id -> [trade-records]` index from auto_trades.json.
 
-    Multiple entries per market fall back to the LATEST one (we care about
-    what the bot last thought of this market, not the original entry — the
-    original entry's strategies might be outdated by re-entry).
+    Returns ALL records per market, sorted by timestamp ascending. A single
+    market can have multiple entries (averaging-in, re-entry after swap),
+    each with its own `strategies` / `estimated_ev` / `confidence`. The
+    caller must pick the per-leg match by timestamp — see
+    `_match_leg_to_trade_record`. Collapsing to "latest record" here would
+    silently rewrite older legs' attribution to the newest leg's values.
     """
     if not _AUTO_TRADES_PATH.exists():
         return {}
@@ -88,13 +91,16 @@ def _load_auto_trades_index() -> Dict[str, Dict]:
     if not isinstance(trades, list):
         return {}
 
-    # Sort by timestamp ascending so the last write wins → latest record.
-    trades_sorted = sorted(trades, key=lambda t: t.get('timestamp', ''))
-    index: Dict[str, Dict] = {}
-    for t in trades_sorted:
+    index: Dict[str, List[Dict]] = {}
+    for t in trades:
         mid = t.get('market_id')
-        if mid:
-            index[mid] = t
+        if not mid:
+            continue
+        index.setdefault(mid, []).append(t)
+
+    # Sort each market's records by timestamp ascending.
+    for mid in index:
+        index[mid].sort(key=lambda r: r.get('timestamp', ''))
     return index
 
 
@@ -105,16 +111,33 @@ _BACKFILL_FIELDS_FROM_MARKET = (
     'term', 'resolvability', 'position_class',
 )
 
-_BACKFILL_FIELDS_FROM_TRADES = (
-    'strategies', 'estimated_ev', 'confidence',
+# Fields from auto_trades.json that are INTRINSIC to the market (don't vary
+# by when/how we entered). Any record for the market can supply these.
+_TRADE_MARKET_LEVEL_FIELDS = (
     'question',  # fallback if API didn't return one
 )
+
+# Fields from auto_trades.json that are STAMPED at trade time and therefore
+# leg-specific. A market with two open legs has two distinct strategies /
+# estimated_ev / confidence values. These MUST be matched per-leg by
+# timestamp; using the latest record for every leg silently rewrites
+# older legs' attribution.
+_TRADE_LEG_LEVEL_FIELDS = (
+    'strategies', 'estimated_ev', 'confidence',
+)
+
+# Maximum time delta between a leg's `timestamp` and a candidate trade
+# record's `timestamp` for us to consider them the same event. 5 minutes
+# is generous — trades are normally logged within seconds of placement.
+# If nothing matches within this window we SKIP entry-level backfill for
+# that leg rather than attach a potentially wrong record.
+_TRADE_MATCH_TOLERANCE = timedelta(minutes=5)
 
 
 def backfill_leg(
     leg: Dict,
     market: Optional[Dict],
-    trade_record: Optional[Dict],
+    trade_records: Optional[List[Dict]],
     *,
     now_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -123,6 +146,16 @@ def backfill_leg(
     Never overwrites an existing non-empty value — the leg's current state
     is treated as ground truth. Only fills fields whose current value is
     None, empty string, empty list, or missing entirely.
+
+    `trade_records` is the full list of auto_trades records for this
+    market (not a single "latest" record). We split trade-sourced fields
+    into two groups:
+      - Market-level (question only): any record works.
+      - Leg-level (strategies, estimated_ev, confidence): stamped at trade
+        time, so we match by timestamp to the specific record that
+        corresponds to THIS leg. If no record lands within
+        _TRADE_MATCH_TOLERANCE of the leg's timestamp, we skip leg-level
+        backfill rather than attach a wrong record.
     """
     written: Dict[str, Any] = {}
 
@@ -139,23 +172,101 @@ def backfill_leg(
         }
         for field in _BACKFILL_FIELDS_FROM_MARKET:
             val = candidates.get(field)
-            if val is None or val == '' or val == []:
+            if _is_missing(val):
                 continue
             if _is_missing(leg.get(field)):
                 leg[field] = val
                 written[field] = val
 
-    # Phase 2: fall back to auto_trades.json for fields we still lack
-    if trade_record is not None:
-        for field in _BACKFILL_FIELDS_FROM_TRADES:
-            val = trade_record.get(field)
-            if val is None or val == '' or val == []:
+    if not trade_records:
+        return written
+
+    # Phase 2a: market-level fallback fields from auto_trades — any record
+    # will do because these don't vary per entry.
+    market_level_source = trade_records[0]
+    for field in _TRADE_MARKET_LEVEL_FIELDS:
+        val = market_level_source.get(field)
+        if _is_missing(val):
+            continue
+        if _is_missing(leg.get(field)):
+            leg[field] = val
+            written[field] = val
+
+    # Phase 2b: leg-level fields — match by timestamp so each leg gets its
+    # own trade record. If we can't find a confident match for this leg,
+    # skip entry-level backfill to avoid silently rewriting attribution.
+    matched = _match_leg_to_trade_record(leg, trade_records)
+    if matched is not None:
+        for field in _TRADE_LEG_LEVEL_FIELDS:
+            val = matched.get(field)
+            if _is_missing(val):
                 continue
             if _is_missing(leg.get(field)):
                 leg[field] = val
                 written[field] = val
 
     return written
+
+
+def _match_leg_to_trade_record(
+    leg: Dict,
+    trade_records: List[Dict],
+) -> Optional[Dict]:
+    """Find the auto_trades record that corresponds to THIS leg.
+
+    Priority:
+    1. If any record has a `trade_id` that matches the leg's `trade_id`,
+       use that one (most reliable; shipped auto_trades don't have
+       trade_id today but future-proofing costs nothing).
+    2. Otherwise, pick the record whose timestamp is closest to the leg's
+       timestamp AND within _TRADE_MATCH_TOLERANCE.
+    3. If no candidate is close enough, return None — the caller skips
+       leg-level backfill so the wrong record never bleeds in.
+
+    The tolerance window is what prevents the multi-leg attribution bug:
+    two legs on the same market placed hours or days apart will match
+    different records (or no record) instead of both grabbing the newest.
+    """
+    # Path 1: trade_id direct match
+    leg_tid = leg.get('trade_id')
+    if leg_tid is not None:
+        for rec in trade_records:
+            if rec.get('trade_id') == leg_tid:
+                return rec
+
+    # Path 2: closest-timestamp match within tolerance
+    leg_ts = _parse_iso(leg.get('timestamp'))
+    if leg_ts is None:
+        # No leg timestamp to match against — can't safely attribute.
+        return None
+
+    best: Optional[Dict] = None
+    best_delta: Optional[timedelta] = None
+    for rec in trade_records:
+        rec_ts = _parse_iso(rec.get('timestamp'))
+        if rec_ts is None:
+            continue
+        delta = abs(leg_ts - rec_ts)
+        if best_delta is None or delta < best_delta:
+            best = rec
+            best_delta = delta
+
+    if best_delta is not None and best_delta <= _TRADE_MATCH_TOLERANCE:
+        return best
+    return None
+
+
+def _parse_iso(value) -> Optional[datetime]:
+    """Tolerant ISO8601 parse. Returns None on any failure or missing value."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _is_missing(value) -> bool:
@@ -249,11 +360,13 @@ def run_backfill(
                 counts['api_failed'] += 1
 
         market = market_cache[market_id]
-        trade_rec = trade_index.get(market_id)
+        trade_recs = trade_index.get(market_id) or []
         before = {k: leg.get(k) for k in
-                  _BACKFILL_FIELDS_FROM_MARKET + _BACKFILL_FIELDS_FROM_TRADES}
+                  _BACKFILL_FIELDS_FROM_MARKET
+                  + _TRADE_MARKET_LEVEL_FIELDS
+                  + _TRADE_LEG_LEVEL_FIELDS}
 
-        written = backfill_leg(leg, market, trade_rec)
+        written = backfill_leg(leg, market, trade_recs)
         if written:
             counts['fields_written'] += len(written)
             written_by_trade_id[leg.get('trade_id')] = written
