@@ -24,6 +24,7 @@ Logs (on server):
   /tmp/reprice.log         hourly position repricing (Phase 2.2)
   /tmp/resolution.log      hourly position resolution
   /tmp/trader.log          hourly trading
+  /tmp/evaluate.log        hourly position evaluator (Phase 2.3, propose-only)
   /tmp/daily_summary.log   daily summary
   /tmp/harvest.log         Sunday ML pipeline (harvest/M2/M3/backtest)
   /tmp/ev_report.log       Monday EV report
@@ -52,6 +53,13 @@ WORKSPACE={WORKSPACE}
 
 # Auto trading — hourly :20
 20 * * * * cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py >> /tmp/trader.log 2>&1
+
+# Position evaluator — hourly :30 (Phase 2.3, propose-only)
+# Scores every OPEN position using Phase 2.2 repricing data and emits CLOSE
+# proposals to pending_closes.json for human approval. Never auto-executes.
+# Runs AFTER :20 trade so newly-opened positions don't get scored before
+# they've been repriced once at :05 next hour.
+30 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/evaluate_positions.py >> /tmp/evaluate.log 2>&1
 
 # Daily summary — 19:00 UTC
 0 19 * * * cd $WORKSPACE && git pull origin main -q && python3 automation/daily_summary.py >> /tmp/daily_summary.log 2>&1
@@ -93,6 +101,7 @@ def main():
     print("  :05 hourly   — position repricing (measure-only)")
     print("  :10 hourly   — position resolution")
     print("  :20 hourly   — auto trading")
+    print("  :30 hourly   — position evaluator (propose-only, human-approved closes)")
     print("  19:00 daily  — daily summary")
     print("  Sun 02:00    — calibration harvest")
     print("  Sun 02:30    — M2 re-audit (quality gate)")

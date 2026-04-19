@@ -259,43 +259,49 @@ unrealised_pnl = current_value - amount
 
 ---
 
-### 2.3 — Early close and swap using real market prices
+### 2.3 — Early close using real market prices (propose-only) — **IN REVIEW** (PR #15)
 
-**Problem**: `position_swap_checker.py` already proposes swaps when the book is full. But it uses ad-hoc "losing position" logic. Now that we have live unrealised P&L (§ 2.2), we can build proper close/swap decisions.
+**Shipped in this phase** (propose-only, never auto-executes):
+- `position_score()` pure function: `unrealised_pnl − days_held × DAILY_DECAY_COST − (long_or_uncertain ? LONG_HORIZON_PENALTY : 0)`
+- `scripts/evaluate_positions.py` — scores every OPEN position hourly at :30, classifies as HOLD or CLOSE, emits proposals to `pending_closes.json`, sends Telegram CTAs ("approve close N" / "dismiss close N")
+- `scripts/execute_close.py` — human-approved standalone close at current AMM price, free the slot
+- `PaperTrader.close_position_early` already closes at real AMM price; now records `bet_outcomes` with `era='early_close'` so the weekly EV audit can segment close-at-market outcomes from true-resolution outcomes
+- Config constants: `DAILY_DECAY_COST=0.05`, `LONG_HORIZON_PENALTY=0.50`, `CLOSE_SCORE_THRESHOLD=-0.50`
+
+**Deliberately deferred**:
+- **Auto-execution**: the evaluator proposes, a human approves. Thresholds are starting guesses; we tune against real data from the Phase 2.2 snapshot trail before letting the machine act.
+- **SWAP proposals via position_score**: `position_swap_checker.py` continues to handle swap proposals when the book is full. Migrating its internal logic to `position_score` is a 2.3b follow-on — doing it in this PR would conflate two already-working surfaces.
+- **Dashboard badges** (HOLD / CLOSE / SWAP per position): follow-on to § 2.5.
+- **STRANDED / ABANDONED state**: § 2.4.
+
+**Problem** (unchanged): `position_swap_checker.py` already proposes swaps when the book is full, but it uses ad-hoc "losing position" logic. Now that we have live unrealised P&L (§ 2.2), we have a proper close-decision score that doesn't need the book to be full to fire.
 
 **Close decision policy**:
 
-For each open position, compute `position_score`:
 ```
-position_score =
-    + current_unrealised_pnl              # current worth
-    - days_held × DAILY_DECAY_COST        # time value lost
-    - (is_long_horizon ? LONG_HORIZON_PENALTY : 0)
+position_score = current_unrealised_pnl
+               − days_held × DAILY_DECAY_COST
+               − (position_class == 'long_or_uncertain' ? LONG_HORIZON_PENALTY : 0)
+
+if score < CLOSE_SCORE_THRESHOLD (-0.50):  propose CLOSE (Telegram, human-approved)
+else:                                       HOLD
 ```
 
-Then for each position, consider three actions:
-- **Hold**: position_score is positive or market is short-term close to resolving
-- **Close early**: position_score is negative AND no better opportunity pending
-- **Swap**: position_score is negative AND a pending recommendation has higher expected EV
+Safety guards:
+- `is_resolved_on_api=True` → HOLD (resolve_positions.py at :10 handles finalization).
+- No repricing data yet → HOLD with reason `no_reprice` (next :05 will fill it in).
+- A market with a non-expired pending proposal → do not re-propose. Expired proposals auto-roll so stale pending entries don't block new ones.
 
-**Changes:**
-- Refactor `position_swap_checker.py` to use `position_score`
-- Split into two scripts:
-  - `scripts/evaluate_positions.py` — classify each position as hold/close/swap
-  - `scripts/execute_swap.py` — execute swap proposals (already exists)
-- New cron: position evaluation at :30 past the hour
-- Dashboard Portfolio page: action badge (HOLD / CLOSE / SWAP) per position
+**Close mechanics**:
+- `execute_close.py --id N` fetches live probability (falls back to snapshot price on API failure) and invokes `PaperTrader.close_position_early` which:
+  - Computes sale value via AMM (YES: `amount × current_prob/entry_prob`; NO: swap)
+  - Marks the trade `status='CLOSED_EARLY'`, records real P&L (can be negative)
+  - Writes `bet_outcomes` row with `market_resolution='CLOSED_EARLY'`, `era='early_close'`
+  - Adds realised P&L to balance, frees the slot
 
-**Close mechanics** (real close, not fake):
-- Fetch current market probability
-- Compute sale value using AMM
-- Mark position as `CLOSED` with `profit = current_value - amount` (could be negative)
-- Record in bet_outcomes with era `early_close`
-- Free the slot
+**Impact**: Bot can now honestly realise losses instead of holding forever. No fake P&L=0. The learning loop gets fed by `early_close` rows alongside `post_ev_fix` resolution rows. Operator stays in the loop on every close for the first tuning cycle.
 
-**Impact**: Bot actively manages the book. No more fake P&L=0 zeroing out. Real losses get realized, capital gets recycled, learning loop gets fed.
-
-**Estimated effort**: 3-4 days.
+**Estimated effort**: 3-4 days. **Actual: 1 day for propose-only scope**.
 
 ---
 
@@ -754,21 +760,22 @@ This is the "if I could only do one thing at a time, what order?" list:
 3. ✅ **Analyze-once AI cache** (Phase 1.3) — SHIPPED
 4. ✅ **Skip AI on held markets** (Phase 1 extension) — SHIPPED
 5. ✅ **Position classification + 3-class caps** (Phase 2.1) — SHIPPED
-6. **Active repricing** (Phase 2.2) — **IN REVIEW** (PR #14)
-7. **Early close + swap logic** (Phase 2.3) — enables real book turnover
-8. **STRANDED / ABANDONED state** (Phase 2.4) — honest stale handling
-9. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
-10. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
-11. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-12. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-13. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-14. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-15. **Polymarket integration** (Phase 4.1) — multiply training data
-16. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-17. **Dashboard API** (Phase 5.2) — real-time updates
-18. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-19. **Dashboard write surface** (Phase 5.3) — operator can act
-20. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+6. ✅ **Active repricing** (Phase 2.2) — SHIPPED (PR #14)
+7. **Early close evaluator + approval flow** (Phase 2.3, propose-only) — **IN REVIEW** (PR #15)
+8. **Swap checker migration to position_score** (Phase 2.3b) — merges ad-hoc swap heuristic with the new decision engine
+9. **STRANDED / ABANDONED state** (Phase 2.4) — honest stale handling
+10. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
+11. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
+12. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+13. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+14. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+15. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+16. **Polymarket integration** (Phase 4.1) — multiply training data
+17. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+18. **Dashboard API** (Phase 5.2) — real-time updates
+19. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+20. **Dashboard write surface** (Phase 5.3) — operator can act
+21. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.
