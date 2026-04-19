@@ -131,9 +131,16 @@ The pipeline is built correctly. Specific bugs and wrong defaults are blocking i
 
 ---
 
-### 1.4 — Legacy position metadata backfill
+### 1.4 — Legacy position metadata backfill — ✅ **SHIPPED (PR #17)**
 
-**Problem**: 8 of 10 open positions have no `category`, no `question`, no `strategies`. These positions pollute: category slot tracking, strategy weight computation, and daily summary reports.
+**Shipped**:
+- `scripts/backfill_position_metadata.py` — one-shot, `--apply` flag required to persist (dry-run by default). Prioritises Manifold API (authoritative for `question`/`category`/`close_time_ms`) over `auto_trades.json` (recovers `strategies`/`estimated_ev`/`confidence`).
+- Per-leg timestamp matching on entry-level fields so multi-leg markets keep their distinct attribution (reviewer-caught bug).
+- Market-level fields (`question` fallback) search all records, not just the oldest (reviewer-caught edge case).
+- 29 tests including the multi-leg + old-format-records regression cases.
+- **Blocked on sandbox apply**: sandbox host offline since ~09:00 UTC 2026-04-19. Dry-run pre-outage showed 46 fields would be written across 10 legs. Apply when host returns.
+
+**Original problem** (for reference): 9/9 open positions were missing `close_time_ms`/`term`/`resolvability`/`position_class`, which silently defeated Phase 2.1 slot-cap accounting. After apply, the book will show 9 `long_or_uncertain` + 1 `medium` — `long_or_uncertain=2` cap was 7 over.
 
 **Fix**: One-shot script to enrich legacy positions.
 
@@ -259,7 +266,7 @@ unrealised_pnl = current_value - amount
 
 ---
 
-### 2.3 — Early close using real market prices (propose-only) — **IN REVIEW** (PR #15, reviewer round 1 applied on `058af36`)
+### 2.3 — Early close using real market prices (propose-only) — ✅ **SHIPPED (PR #15)**, 4 reviewer rounds applied
 
 **Reviewer round 1 fixes** (all green, 624 tests):
 
@@ -311,7 +318,7 @@ Safety guards:
 
 ---
 
-### 2.4 — Stale position detection + STRANDED / ABANDONED state — **IN REVIEW** (PR #16)
+### 2.4 — Stale position detection + STRANDED / ABANDONED state — ✅ **SHIPPED (PR #16)**
 
 **Shipped in this phase**:
 
@@ -786,10 +793,10 @@ This is the "if I could only do one thing at a time, what order?" list:
 5. ✅ **Position classification + 3-class caps** (Phase 2.1) — SHIPPED
 6. ✅ **Active repricing** (Phase 2.2) — SHIPPED (PR #14)
 7. ✅ **Early close evaluator + approval flow** (Phase 2.3, propose-only) — SHIPPED (PR #15)
-8. **Stale detection + STRANDED/ABANDONED** (Phase 2.4) — **IN REVIEW** (PR #16)
-9. **Swap checker migration to position_score** (Phase 2.3b) — merges ad-hoc swap heuristic with the new decision engine
-10. **Legacy metadata backfill** (Phase 1.4) — enrich 8 metadata-poor positions
-11. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4
+8. ✅ **Stale detection + STRANDED/ABANDONED** (Phase 2.4) — SHIPPED (PR #16)
+9. ✅ **Legacy metadata backfill** (Phase 1.4) — SHIPPED (PR #17), sandbox apply pending host return
+10. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4 **← next**
+11. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
 12. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
 13. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
 14. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
