@@ -416,18 +416,24 @@ def is_thin_other_momentum_market(
 
     `signals` can be a list, tuple, or any iterable of strategy names.
 
-    Category inference: when the raw API payload omits `category`, we derive
-    it from the question text via `_infer_market_category` — matching what
-    auto_research does when building the recommendation record. Without
-    this step, the raw-market call site would treat missing-category as
-    'other' and falsely block legitimate public markets like "Will Congress
-    pass the budget this week?" whose API category field is null but whose
-    question clearly classifies as politics.
+    Category canonicalisation: `auto_research` UNCONDITIONALLY overwrites
+    whatever category the Manifold payload carried with
+    `_infer_market_category(question)` when it stamps the recommendation
+    (see auto_research.py's recommendation dict). We mirror that: raw
+    payload categories of `''`, `'unknown'`, OR `'other'` all trigger a
+    re-infer from the question. If inference returns a specific category
+    (politics/crypto/sports/etc.) the market passes through this gate even
+    if the raw payload said `other`. Without this, the filter would block
+    a legitimate politics market like "Will Congress pass the budget this
+    week?" whenever Manifold's API happens to tag it as 'other', even
+    though the rest of the pipeline treats it as politics.
     """
     category = (market.get('category') or '').strip().lower()
-    if category in ('', 'unknown'):
-        # Category not stamped in the payload — infer from question text,
-        # same path auto_research uses to build the recommendation.
+    if category in ('', 'unknown', 'other'):
+        # Match auto_research: re-infer from question so raw 'other' and
+        # missing-category are both canonicalised to whatever the keyword
+        # heuristic produces. If inference still returns 'other', the
+        # market remains in the blocked bucket.
         question = (market.get('question') or '').strip()
         if question:
             inferred = _infer_market_category(question)

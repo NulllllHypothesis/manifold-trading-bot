@@ -207,18 +207,9 @@ class TestIsThinOtherMomentumMarket(unittest.TestCase):
         )
 
     def test_missing_category_falls_back_to_question_inference(self):
-        # Reviewer fix (Medium): when the raw API payload omits `category`,
-        # the filter must infer from the question text — same path as
-        # auto_research uses when stamping the recommendation. Otherwise a
-        # legit public market like "Will Congress pass the budget this week?"
-        # (2 bettors, momentum-only) is blocked because its raw-API category
-        # is missing even though its inferred category is 'politics'.
-        #
-        # We test only the cases where the existing `_infer_market_category`
-        # keyword heuristic actually fires. Known inference gaps (Fed
-        # without "cut rates" keyword, MLB team names, etc.) fall through
-        # to 'other' and remain blocked — that's an upstream inference
-        # concern, not the filter's contract.
+        # Reviewer fix (Medium, round 1): when the raw API payload OMITS
+        # `category`, the filter infers from question text — same path
+        # auto_research uses when stamping the recommendation.
         for q in [
             "Will Congress pass the budget this week?",   # → politics
             "Will the president sign the executive order?",  # → politics
@@ -233,6 +224,47 @@ class TestIsThinOtherMomentumMarket(unittest.TestCase):
                     ),
                     f"unexpected block on inferred-category market: {q!r}",
                 )
+
+    def test_raw_other_category_also_reinfers_from_question(self):
+        # Reviewer fix (Medium, round 2): when the raw payload EXPLICITLY
+        # carries category='other', we still re-infer from question text.
+        # auto_research.py unconditionally overwrites the raw category via
+        # _infer_market_category when stamping the recommendation; the
+        # filter must match that canonicalisation or it will block legit
+        # public markets that Manifold happens to tag 'other'.
+        for q in [
+            "Will Congress pass the budget this week?",
+            "Will the president sign the executive order?",
+            "Will Bitcoin close above $100k by end of Q2?",
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_thin_other_momentum_market(
+                        market={
+                            'question': q,
+                            'category': 'other',   # raw API says 'other'
+                            'uniqueBettorCount': 2,
+                        },
+                        signals=['probability_direction'],
+                    ),
+                    f"raw 'other' must re-infer; failed on: {q!r}",
+                )
+
+    def test_raw_other_stays_blocked_when_inference_also_returns_other(self):
+        # Sanity: re-inference must not make the filter toothless. A raw
+        # 'other' category combined with an uncategorisable question
+        # (inference also returns 'other') remains blocked when the other
+        # vanity signals are present.
+        self.assertTrue(
+            is_thin_other_momentum_market(
+                market={
+                    'question': 'Will we get 5 likes on this dumb thing?',
+                    'category': 'other',
+                    'uniqueBettorCount': 2,
+                },
+                signals=['probability_direction'],
+            )
+        )
 
     def test_genuinely_uncategorisable_still_blocks(self):
         # Sanity: when the question can't be inferred into any known
