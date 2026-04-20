@@ -452,7 +452,24 @@ evaluate_stale(position):
 
 ---
 
-### 2.5 — Dashboard: Position Management page
+### 2.5 — Dashboard: Position Management page — ✅ **SHIPPED (PR #18)**
+
+**Shipped**: new `/positions` route in the Next.js dashboard consuming everything Phases 2.2–2.4 ship. Six sections — Live Book (click any row to expand its unrealised-P&L trajectory inline), Pending Close Proposals (2.3), Pending Abandon Proposals (2.4), Stranded Positions, Terminal history (ABANDONED + CLOSED_EARLY), and a stale-classification alert that fires on missing OR obsolete-4-bucket `position_class` values.
+
+**Trajectory chart UX evolved through review**: initial draft auto-picked "the most interesting market" (reviewer: arbitrary, not actionable) → removed → replaced with per-row click-to-expand. Server pre-loads all OPEN markets' snapshots in a single DB query (`readMarketTrajectoriesForMarkets`), so no fetch-on-click flicker. Expansion state keys per-leg so multi-leg markets toggle independently.
+
+**Other review-driven work on this branch**:
+- Market-level snapshot aggregation (`aggregateSnapshotsByRun`) — collapses per-leg rows by `snapshot_at` so a multi-leg market renders one honest line, not a zig-zag of overlapping points.
+- TS-side `normalizePositionClass` + `isObsoletePositionClass` mirroring the Python migration map — badges show the normalised class with an `OBSOLETE` pill when the on-disk value is legacy.
+- Backfill script (1.4, on the same branch) now also rewrites obsolete 4-bucket values on disk, so the stale-classification alert's remediation actually clears it.
+
+**Read-only** — approvals still flow via `execute_close.py` / `execute_abandon.py` on the sandbox. Browser write surface is Phase 5.3.
+
+**Stats**: 5 commits, all CI green, 696 Python tests pass.
+
+---
+
+**Original spec (for reference)**:
 
 **Purpose**: Show the operator the full lifecycle of every position.
 
@@ -795,7 +812,7 @@ This is the "if I could only do one thing at a time, what order?" list:
 7. ✅ **Early close evaluator + approval flow** (Phase 2.3, propose-only) — SHIPPED (PR #15)
 8. ✅ **Stale detection + STRANDED/ABANDONED** (Phase 2.4) — SHIPPED (PR #16)
 9. ✅ **Legacy metadata backfill** (Phase 1.4) — SHIPPED (PR #17), sandbox apply pending host return
-10. **Position Management dashboard page** (Phase 2.5) — operator visibility on 2.1-2.4 **← next**
+10. ✅ **Position Management dashboard page** (Phase 2.5) — SHIPPED (PR #18)
 11. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
 12. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
 13. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
