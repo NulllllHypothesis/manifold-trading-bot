@@ -17,7 +17,14 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
-from manifold_bot.strategies import TradingStrategies, _infer_market_category, _is_noise_market, classify_position
+from manifold_bot.strategies import (
+    TradingStrategies,
+    _infer_market_category,
+    _is_noise_market,
+    classify_position,
+    is_unverifiable_market,
+    is_thin_other_momentum_market,
+)
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.ai_analyzer import batch_analyze
 from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY, NEWS_API_KEY, MAX_BET_AMOUNT
@@ -49,6 +56,8 @@ def _new_research_counters() -> dict:
         "skipped_low_liquidity": 0,
         "skipped_stale":       0,
         "skipped_noise":       0,
+        "skipped_unverifiable":      0,   # "Will I...", "Will my...", etc.
+        "skipped_thin_other_momentum": 0, # category=other + only probability_direction + <3 bettors
         # Raw strategy fires (counted BEFORE family dedup / weight scaling)
         "raw_fires": {
             "probability_direction": 0,
@@ -112,6 +121,8 @@ def _print_research_counters(counters: dict) -> None:
     print(f"    Skipped (low liq)    : {counters['skipped_low_liquidity']}")
     print(f"    Skipped (stale)      : {counters['skipped_stale']}")
     print(f"    Skipped (noise)      : {counters['skipped_noise']}")
+    print(f"    Skipped (unverifiable): {counters['skipped_unverifiable']}")
+    print(f"    Skipped (thin other) : {counters['skipped_thin_other_momentum']}")
     print(f"    Raw strategy fires:")
     for strat, n in counters['raw_fires'].items():
         print(f"      {strat:<22} {n:>5}")
@@ -563,6 +574,15 @@ class MarketResearcher:
                     counters["skipped_noise"] += 1
                     continue
 
+                # Skip markets about the creator's private life / behavior /
+                # assets. The bot cannot independently verify these outcomes,
+                # so they're noise regardless of stat or AI confidence. Hard
+                # block at research layer — never sent to strategies, never
+                # sent to AI. See strategies.is_unverifiable_market.
+                if is_unverifiable_market(market):
+                    counters["skipped_unverifiable"] += 1
+                    continue
+
                 # ── Run all strategies ───────────────────────────────────────
                 #
                 # Signal families prevent correlated signals from stacking:
@@ -682,6 +702,15 @@ class MarketResearcher:
                 else:
                     counters["tied_votes_dropped"] += 1
                     continue  # tied — no clear edge
+
+                # Compound vanity-market gate: category=other + only
+                # probability_direction fired + <3 unique_bettors. Any one of
+                # these is tolerable; all three together is the profile that
+                # let CEIUnpQL26 through. See strategies.is_thin_other_momentum_market.
+                active_signal_names = [s['strategy'] for s in active_signals]
+                if is_thin_other_momentum_market(market, active_signal_names):
+                    counters["skipped_thin_other_momentum"] += 1
+                    continue
 
                 # Check if we already have an OPEN position (closed/resolved don't count)
                 existing_position = any(

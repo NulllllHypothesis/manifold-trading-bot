@@ -337,6 +337,95 @@ _LOW_RESOLVABILITY_PATTERNS = (
     ' by 2050',
 )
 
+# ── Hard unverifiable filter ────────────────────────────────────────────────
+#
+# Questions framed around the CREATOR's private behavior / assets / decisions.
+# Only the creator knows the outcome, so the market cannot be independently
+# verified — the bot should never touch these regardless of stat or AI
+# confidence. Distinct from "low resolvability" (which the trader treats as a
+# soft label): these are a HARD block at pre-filter.
+#
+# Checked as lowercased `startswith`. Using startswith instead of substring
+# keeps precision high (it won't fire on legitimate questions that happen to
+# quote "will I" inside a larger clause), at the cost of missing re-worded
+# variants. Compound gate below catches most of those.
+_UNVERIFIABLE_QUESTION_PREFIXES = (
+    'will i ',          # "Will I complete all my pressing tasks this week?"
+    'will my ',         # "Will my car survive another year?"
+    'do i ',
+    'can i ',
+    'am i ',
+    'should i ',
+    'could i ',
+    'have i ',
+    'did i ',
+    'does my ',
+)
+
+
+def is_unverifiable_market(market: Dict) -> bool:
+    """True if the market is about the creator's private life / behavior / asset.
+
+    Examples (all skipped):
+      - "Will I complete all my pressing tasks this week?"
+      - "Will my car last another year?"
+      - "Can I lose 10 pounds by June?"
+
+    Counter-examples (not skipped; these are publicly verifiable):
+      - "Will the Fed cut rates in May?"
+      - "Will Apple announce a new iPhone before September?"
+      - "Will Taylor Swift perform at the Super Bowl?"
+
+    The trade that motivated this filter was question:
+    `"Will I complete all my pressing tasks this week?"` — category `other`,
+    2 unique_bettors, AI hallucinated a reasoning chain connecting it to
+    pet-content trends. Hard block at the research layer is the fix.
+    """
+    question = (market.get('question') or '').strip().lower()
+    if not question:
+        return False
+    return any(question.startswith(p) for p in _UNVERIFIABLE_QUESTION_PREFIXES)
+
+
+def is_thin_other_momentum_market(
+    market: Dict,
+    signals,
+    *,
+    min_bettors: int = 3,
+) -> bool:
+    """True for the 'vanity market' profile that slipped through on CEIUnpQL26.
+
+    Compound signal — fires only when ALL of:
+      - category is 'other' / empty / unknown (i.e. doesn't fit any known tag)
+      - the only stat signal that fired is `probability_direction`
+        (momentum / follow-the-crowd)
+      - unique_bettors count is below `min_bettors` (default 3 — raise to 5
+        if false-positive rate looks fine after a week of observation)
+
+    The logic: if we have no category signal, no multi-strategy confirmation,
+    and effectively nobody is trading the market, we're betting on noise.
+    Any one of the three would be acceptable; all three together is the
+    vanity-market profile.
+
+    `signals` can be a list, tuple, or any iterable of strategy names.
+    Unknown/empty categories are treated as 'other' for this check.
+    """
+    category = (market.get('category') or '').strip().lower()
+    if category not in ('', 'other', 'unknown'):
+        return False
+
+    signal_list = list(signals or [])
+    # Strip 'ai_analysis' — that's a post-hoc tag added by the research
+    # pipeline, not a stat signal. What we care about is the stat-side story.
+    stat_signals = [s for s in signal_list if s != 'ai_analysis']
+    if stat_signals != ['probability_direction']:
+        return False
+
+    bettors = market.get('uniqueBettorCount')
+    if not isinstance(bettors, (int, float)):
+        return True  # treat missing as zero-bettor → thin
+    return bettors < min_bettors
+
 
 def _classify_term(close_time_ms: Optional[int], now_ms: Optional[float] = None) -> str:
     """

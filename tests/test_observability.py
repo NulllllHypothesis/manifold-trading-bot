@@ -48,6 +48,7 @@ class TestResearchCountersShape(unittest.TestCase):
         expected = {
             "timestamp", "markets_fetched",
             "skipped_resolved", "skipped_low_liquidity", "skipped_stale", "skipped_noise",
+            "skipped_unverifiable", "skipped_thin_other_momentum",
             "raw_fires", "dedup_winners",
             "thin_market_confirmations", "no_active_signals", "tied_votes_dropped",
             "ai_eligible", "ai_cooled_down", "ai_skipped_held", "ai_analyzed",
@@ -204,6 +205,11 @@ class TestTradeRejectionReason(unittest.TestCase):
             "probability": 0.50,
             "liquidity": 500,
             "category": "other",
+            # Phase 2-post-CEIUnpQL26: the trader's "vanity market" backstop
+            # gate checks unique_bettors on the recommendation. A normal
+            # market has plenty of bettors; this default reflects "healthy"
+            # so other gate tests don't trip the new filter by accident.
+            "unique_bettors": 20,
             "ai_recommendation": "YES",
             "ai_returned_skip": False,
             "strategies": ["probability_direction"],
