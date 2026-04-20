@@ -813,17 +813,18 @@ This is the "if I could only do one thing at a time, what order?" list:
 8. ✅ **Stale detection + STRANDED/ABANDONED** (Phase 2.4) — SHIPPED (PR #16)
 9. ✅ **Legacy metadata backfill** (Phase 1.4) — SHIPPED (PR #17), sandbox apply pending host return
 10. ✅ **Position Management dashboard page** (Phase 2.5) — SHIPPED (PR #18)
-11. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
-12. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-13. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-14. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-15. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-16. **Polymarket integration** (Phase 4.1) — multiply training data
-17. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-18. **Dashboard API** (Phase 5.2) — real-time updates
-19. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-20. **Dashboard write surface** (Phase 5.3) — operator can act
-21. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+11. ✅ **Unverifiable + vanity-market filter** (reactive fix, out-of-band) — SHIPPED (PR #19 + #20). Hard block on "Will I... / Will my..." + compound gate for `other` + momentum + thin-bettor markets. Triggered by the CEIUnpQL26 incident on 2026-04-20.
+12. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
+13. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+14. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+15. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+16. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+17. **Polymarket integration** (Phase 4.1) — multiply training data
+18. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+19. **Dashboard API** (Phase 5.2) — real-time updates
+20. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+21. **Dashboard write surface** (Phase 5.3) — operator can act
+22. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.
