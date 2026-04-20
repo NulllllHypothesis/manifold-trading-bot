@@ -145,14 +145,17 @@ export function LiveBookTable({
   /** market_id → already-aggregated snapshot array (per-run, oldest-first). */
   trajectories: Record<string, PositionSnapshot[]>
 }) {
-  // One selection at a time — second click on the same row collapses,
-  // click on a different row swaps. Same market_id can appear on multiple
-  // legs of the same row dataset but close_position_early closes them all
-  // together, so the trajectory key is the market_id.
-  const [expanded, setExpanded] = useState<string | null>(null)
+  // Expansion state keys by per-row identity (market_id + trade_id), NOT
+  // market_id alone. A market with multiple OPEN legs shows up as multiple
+  // rows; keying by market_id would expand every copy of that market at
+  // once whenever any one of them was clicked. The trajectory data is
+  // still market-level (it's the same chart regardless of which leg you
+  // click — close_position_early closes all legs together), but only ONE
+  // row reveals it at a time so the UX stays "click-to-inspect".
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null)
 
-  const toggle = (marketId: string) =>
-    setExpanded((prev) => (prev === marketId ? null : marketId))
+  const toggle = (rowKey: string) =>
+    setExpandedRowKey((prev) => (prev === rowKey ? null : rowKey))
 
   return (
     <Table>
@@ -181,17 +184,18 @@ export function LiveBookTable({
           rows.map((t) => {
             const entry = t.entry_probability ?? t.probability
             const age = daysSince(t.timestamp)
-            const isExpanded = expanded === t.market_id
+            const rowKey = `${t.market_id}-${t.trade_id}`
+            const isExpanded = expandedRowKey === rowKey
             const snapshots = trajectories[t.market_id] ?? []
             return (
               <RowFragment
-                key={`${t.market_id}-${t.trade_id}`}
+                key={rowKey}
                 row={t}
                 entry={entry ?? null}
                 age={age}
                 isExpanded={isExpanded}
                 snapshots={snapshots}
-                onToggle={() => toggle(t.market_id)}
+                onToggle={() => toggle(rowKey)}
               />
             )
           })
