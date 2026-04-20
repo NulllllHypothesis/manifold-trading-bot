@@ -142,17 +142,18 @@ export default async function PositionsPage() {
           </AlertTitle>
           <AlertDescription>
             These either lack <code className="text-xs">position_class</code>{" "}
-            entirely, or carry legacy values (
+            entirely, or carry legacy 4-bucket values (
             <code className="text-xs">long_reliable</code>,{" "}
             <code className="text-xs">long_risky</code>,{" "}
             <code className="text-xs">long_high</code>,{" "}
             <code className="text-xs">long_mid_low</code>) that the backend
-            normalises on read. The data is still handled correctly, but
-            rewriting on disk removes the migration dependency. Run{" "}
+            normalises on read. Trading logic is unaffected — the fix is
+            cosmetic. Run{" "}
             <code className="text-xs">
               scripts/backfill_position_metadata.py --apply
-            </code>
-            .
+            </code>{" "}
+            to backfill missing fields AND rewrite legacy values on disk so
+            this alert clears.
           </AlertDescription>
         </Alert>
       )}

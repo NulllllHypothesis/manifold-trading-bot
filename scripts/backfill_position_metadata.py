@@ -25,6 +25,18 @@ Data sources, in priority order:
 Existing values are always preserved — a field only gets written if it
 was missing or None. Rerunning the script is safe and idempotent.
 
+**One explicit exception to the "never overwrite" rule**: when a leg's
+persisted `position_class` is one of the obsolete 4-bucket values from
+intermediate Phase 2.1 revisions (`long_reliable`, `long_risky`,
+`long_high`, `long_mid_low`), it IS rewritten to the current 3-bucket
+value. The backend already normalises these at read time, so no trading
+logic depends on the on-disk value — but the dashboard can't distinguish
+"current and correct" from "obsolete but normalised at read" without
+also mirroring the migration map, and the operator-facing alert for
+obsolete values would otherwise never clear. Rewriting in place removes
+the confusion and leaves the on-disk shape matching what the backend
+actually uses.
+
 Usage:
     python3 scripts/backfill_position_metadata.py           # dry-run, prints diff
     python3 scripts/backfill_position_metadata.py --apply   # actually write
@@ -47,6 +59,11 @@ sys.path.insert(0, str(_ROOT))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.strategies import classify_position as _classify_market
+# Single source of truth for the 4-bucket → 3-bucket migration map.
+from automation.auto_trader import (
+    _normalize_position_class,
+    _OBSOLETE_POSITION_CLASS_MIGRATIONS,
+)
 
 
 _STATE_PATH       = _ROOT / "manifold_bot" / "paper_trading_state.json"
@@ -158,6 +175,19 @@ def backfill_leg(
         backfill rather than attach a wrong record.
     """
     written: Dict[str, Any] = {}
+
+    # Phase 0: normalise obsolete persisted position_class values. Explicit
+    # exception to the "never overwrite" rule — see module docstring. This
+    # only rewrites values that the backend already treats as aliases for
+    # their normalised form (long_reliable → long_or_uncertain etc.), so
+    # the on-disk shape converges to what the slot-cap enforcer actually
+    # uses and the dashboard's "obsolete value" alert can actually clear.
+    current_class = leg.get('position_class')
+    if current_class in _OBSOLETE_POSITION_CLASS_MIGRATIONS:
+        normalised = _normalize_position_class(current_class)
+        if normalised and normalised != current_class:
+            leg['position_class'] = normalised
+            written['position_class'] = normalised
 
     # Phase 1: derive everything from the Manifold market if we have one
     if market is not None:
@@ -306,15 +336,29 @@ def _sync_trade_history(state: Dict, written_by_trade_id: Dict) -> int:
     trade_history is the reporting-layer record; keeping it in sync means
     daily summaries and the dashboard see the same enrichment we just
     applied to the position record. Returns count of updated history rows.
+
+    Two rules:
+      1. Fill fields that were missing on the history row (normal backfill).
+      2. Rewrite `position_class` when the on-disk value is one of the
+         obsolete 4-bucket migration keys — matches the same explicit
+         exception applied in backfill_leg, so the history reporting layer
+         converges to the current 3-bucket shape.
     """
     n = 0
     for th in state.get('trade_history', []) or []:
         written = written_by_trade_id.get(th.get('trade_id'))
         if not written:
             continue
+        # Rule 1: plain missing-field fill.
         for field, value in written.items():
             if _is_missing(th.get(field)):
                 th[field] = value
+        # Rule 2: obsolete position_class rewrite (non-missing but stale).
+        hist_class = th.get('position_class')
+        if hist_class in _OBSOLETE_POSITION_CLASS_MIGRATIONS:
+            normalised = _normalize_position_class(hist_class)
+            if normalised and normalised != hist_class:
+                th['position_class'] = normalised
         n += 1
     return n
 

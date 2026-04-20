@@ -475,6 +475,95 @@ class TestRunBackfill(unittest.TestCase):
         run_backfill(fetch_market=fetch, apply_changes=True)
         self.assertEqual(call_count['n'], 1)
 
+    def test_obsolete_position_class_is_rewritten_on_disk(self):
+        # Reviewer fix: the dashboard alerts on obsolete 4-bucket values
+        # and points at this script as the remediation. Previously the
+        # "never overwrite" rule made that promise false — an on-disk
+        # `long_reliable` value stayed. The script now explicitly
+        # rewrites obsolete values to their normalised form (same
+        # mapping the backend uses at read time).
+        legs = [
+            _minimal_leg(market_id='mkt_A', trade_id=1, position_class='long_reliable'),
+            _minimal_leg(market_id='mkt_B', trade_id=2, position_class='long_risky'),
+            _minimal_leg(market_id='mkt_C', trade_id=3, position_class='long_high'),
+            _minimal_leg(market_id='mkt_D', trade_id=4, position_class='long_mid_low'),
+            # A fresh current-bucket leg must NOT be touched.
+            _minimal_leg(market_id='mkt_E', trade_id=5, position_class='medium'),
+        ]
+        self._write_state({
+            'mkt_A': [legs[0]], 'mkt_B': [legs[1]], 'mkt_C': [legs[2]],
+            'mkt_D': [legs[3]], 'mkt_E': [legs[4]],
+        })
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        state = self._read_state()
+        for mid in ('mkt_A', 'mkt_B', 'mkt_C', 'mkt_D'):
+            self.assertEqual(
+                state['positions'][mid][0]['position_class'],
+                'long_or_uncertain',
+                f"{mid} should have been normalised",
+            )
+        self.assertEqual(state['positions']['mkt_E'][0]['position_class'], 'medium')
+
+    def test_obsolete_class_rewrite_is_idempotent(self):
+        # After one apply, a second apply must be a no-op on that field.
+        legs = [_minimal_leg(market_id='mkt_A', trade_id=1, position_class='long_reliable')]
+        self._write_state({'mkt_A': legs})
+
+        first = run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+        self.assertGreater(first['fields_written'], 0)
+
+        # Re-read state and apply again
+        second = run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+        # Nothing should have been written on the second pass for this field.
+        self.assertEqual(
+            self._read_state()['positions']['mkt_A'][0]['position_class'],
+            'long_or_uncertain',
+        )
+
+    def test_obsolete_class_rewrite_mirrors_to_trade_history(self):
+        # trade_history is the reporting-layer record. If only the
+        # `positions` copy gets rewritten, daily summaries and
+        # historical views would still display obsolete labels.
+        legs = [_minimal_leg(market_id='mkt_A', trade_id=42, position_class='long_reliable')]
+        history = [{
+            'trade_id': 42, 'market_id': 'mkt_A', 'status': 'OPEN',
+            'position_class': 'long_reliable',  # same stale shape on the reporting row
+        }]
+        self._write_state({'mkt_A': legs}, trade_history=history)
+
+        run_backfill(fetch_market=lambda _id: None, apply_changes=True)
+
+        state = self._read_state()
+        self.assertEqual(
+            state['positions']['mkt_A'][0]['position_class'], 'long_or_uncertain',
+        )
+        self.assertEqual(
+            state['trade_history'][0]['position_class'], 'long_or_uncertain',
+        )
+
+    def test_current_class_preserved_even_if_api_would_reclassify(self):
+        # Phase 0 must NOT hijack the "never overwrite" rule for current-
+        # bucket values. A leg persisted as 'short' (current bucket) is
+        # still ground truth even if the API today would say 'medium'.
+        # Only obsolete 4-bucket values get rewritten.
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        ms_30d = int(now_ms + 30 * 86_400_000)
+        legs = [_minimal_leg(market_id='mkt_A', trade_id=1, position_class='short')]
+        self._write_state({'mkt_A': legs})
+
+        run_backfill(
+            fetch_market=lambda _id: _market(closeTime=ms_30d),  # → medium
+            apply_changes=True,
+        )
+
+        # 'short' preserved; not rewritten to 'medium'.
+        self.assertEqual(
+            self._read_state()['positions']['mkt_A'][0]['position_class'],
+            'short',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
