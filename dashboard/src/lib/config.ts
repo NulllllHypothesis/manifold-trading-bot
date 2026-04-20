@@ -31,6 +31,8 @@ export const DATA_PATHS = {
     path.join(WORKSPACE_ROOT, "manifold_bot/paper_trading_state.json"),
   autoTrades: () => path.join(WORKSPACE_ROOT, "auto_trades.json"),
   pendingSwaps: () => path.join(WORKSPACE_ROOT, "pending_swaps.json"),
+  pendingCloses: () => path.join(WORKSPACE_ROOT, "pending_closes.json"),
+  pendingAbandons: () => path.join(WORKSPACE_ROOT, "pending_abandons.json"),
   researchCounters: () =>
     path.join(WORKSPACE_ROOT, "data/research_counters.jsonl"),
   traderCounters: () =>
@@ -58,8 +60,11 @@ export const DATA_PATHS = {
 /** Cron schedule reference — kept in sync with CLAUDE.md. */
 export const CRON_JOBS = [
   { id: "research", schedule: "0 * * * *", description: "Hourly market research" },
+  { id: "reprice", schedule: "5 * * * *", description: "Hourly position repricing (Phase 2.2)" },
   { id: "resolution", schedule: "10 * * * *", description: "Position resolution" },
   { id: "trader", schedule: "20 * * * *", description: "Trade execution" },
+  { id: "evaluate", schedule: "30 * * * *", description: "Early-close evaluator (Phase 2.3)" },
+  { id: "stale-detection", schedule: "0 13 * * *", description: "Daily stale detection (Phase 2.4)" },
   { id: "daily-summary", schedule: "0 19 * * *", description: "Daily summary" },
   { id: "harvest", schedule: "0 2 * * 0", description: "Sunday calibration harvest" },
   { id: "m2-audit", schedule: "30 2 * * 0", description: "Sunday M2 re-audit" },

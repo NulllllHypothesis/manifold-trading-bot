@@ -28,6 +28,11 @@ export {
 export { readStrategyWeights } from "./strategy-weights"
 export { readCalibrationTable } from "./calibration"
 export { readPendingSwaps } from "./swaps"
+export {
+  readPendingCloses,
+  readPendingAbandons,
+  readPositionSnapshots,
+} from "./position-management"
 export { readDiagnostics } from "./diagnostics"
 export { readAutomationStatus } from "./automation"
 export { readAuditEvents } from "./audit"

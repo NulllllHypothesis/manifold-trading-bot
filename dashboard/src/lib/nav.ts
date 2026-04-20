@@ -68,6 +68,12 @@ export const NAV_SECTIONS: NavSection[] = [
         badgeKey: "pendingSwaps",
       },
       {
+        title: "Positions",
+        href: "/positions",
+        icon: HeartPulseIcon,
+        description: "Live book, close/abandon proposals, write-offs (Phase 2.5)",
+      },
+      {
         title: "Performance",
         href: "/performance",
         icon: TrendingUpIcon,

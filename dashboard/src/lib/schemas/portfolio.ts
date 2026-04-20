@@ -18,6 +18,28 @@ export const TradeSchema = z.object({
   category: z.string().optional(),
   strategies: z.array(z.string()).optional(),
   resolved_at: z.string().optional(),
+  // Phase 2.1 classification fields
+  entry_probability: z.number().nullable().optional(),
+  term: z.string().optional(),
+  resolvability: z.string().optional(),
+  position_class: z.string().optional(),
+  close_time_ms: z.number().nullable().optional(),
+  // Phase 2.2 repricing fields (in-place on each OPEN leg)
+  current_probability: z.number().nullable().optional(),
+  current_unrealised_pnl: z.number().nullable().optional(),
+  last_repriced_at: z.string().optional(),
+  is_resolved_on_api: z.boolean().optional(),
+  // Phase 2.3 early-close
+  actual_outcome: z.string().optional(),
+  // Phase 2.4 STRANDED/ABANDONED metadata (only present when flipped)
+  stranded_at: z.string().optional(),
+  stranded_reason: z.string().optional(),
+  abandoned_at: z.string().optional(),
+  abandoned_reason: z.string().optional(),
+  // Phase 1.4 backfilled fields
+  estimated_ev: z.number().nullable().optional(),
+  ai_confidence: z.number().nullable().optional(),
+  confidence: z.number().nullable().optional(),
 })
 export type Trade = z.infer<typeof TradeSchema>
 
