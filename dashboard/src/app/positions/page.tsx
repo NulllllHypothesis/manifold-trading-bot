@@ -21,7 +21,9 @@ import {
   readPaperState,
   readPendingCloses,
   readPendingAbandons,
-  readPositionSnapshots,
+  readMarketTrajectory,
+  isObsoletePositionClass,
+  normalizePositionClass,
 } from "@/lib/data"
 import type { Trade } from "@/lib/schemas/portfolio"
 import type {
@@ -63,18 +65,36 @@ function PositionClassBadge({ cls }: { cls: string | undefined }) {
       </Badge>
     )
   }
+  // Normalise obsolete 4-bucket values to the current 3-bucket model so the
+  // badge colour reflects what the backend actually enforces against, not
+  // the stale on-disk label. We also flag the row as OBSOLETE so the
+  // operator knows the on-disk value needs a rewrite — it's currently
+  // being normalised at read time on every slot check.
+  const normalised = normalizePositionClass(cls) ?? cls
+  const obsolete = isObsoletePositionClass(cls)
   const color =
-    cls === "short"
+    normalised === "short"
       ? "border-gain/40 text-gain"
-      : cls === "medium"
+      : normalised === "medium"
       ? "border-primary/50 text-primary"
-      : cls === "long_or_uncertain"
+      : normalised === "long_or_uncertain"
       ? "border-loss/40 text-loss"
       : "border-border text-muted-foreground"
   return (
-    <Badge variant="outline" className={cn("font-mono text-[10px]", color)}>
-      {cls.toUpperCase()}
-    </Badge>
+    <span className="flex flex-wrap items-center gap-1">
+      <Badge variant="outline" className={cn("font-mono text-[10px]", color)}>
+        {normalised.toUpperCase()}
+      </Badge>
+      {obsolete && (
+        <Badge
+          variant="outline"
+          className="border-loss/40 font-mono text-[9px] text-loss"
+          title={`Persisted as ${cls}; backend normalises to ${normalised}`}
+        >
+          OBSOLETE
+        </Badge>
+      )}
+    </span>
   )
 }
 
@@ -156,17 +176,26 @@ export default async function PositionsPage() {
   // Live Book rows. A market with an active proposal is flagged CLOSE.
   const closeProposedMarkets = new Set(activeCloses.map((p) => p.market_id))
 
-  // Load latest-200 snapshots for the market currently losing the most —
-  // cheap illustrative chart. If there's no losing position, fall back
-  // to the most-aged OPEN position.
+  // Load the latest market-aggregated trajectory (per-leg rows collapsed by
+  // snapshot_at and summed — see aggregateSnapshotsByRun). For a market
+  // with multiple OPEN legs this is the honest line; the raw per-leg rows
+  // would render as a zig-zag of overlapping points at each timestamp.
   const chartCandidate = pickChartCandidate(open)
   const snapshots = chartCandidate
-    ? readPositionSnapshots({ marketIds: [chartCandidate.market_id], limit: 200 })
+    ? readMarketTrajectory(chartCandidate.market_id, { limit: 500 })
     : []
 
   const strandedAmount = stranded.reduce((acc, t) => acc + (t.amount ?? 0), 0)
   const abandonedAmount = abandoned.reduce((acc, t) => acc + (t.amount ?? 0), 0)
-  const unclassifiedOpen = open.filter((t) => !t.position_class).length
+  // "Gap" = either truly missing class OR carrying an obsolete 4-bucket
+  // value (long_reliable / long_risky / long_high / long_mid_low). Both
+  // cases mean the persisted label doesn't match what the backend reads.
+  const gapCount = open.filter(
+    (t) => !t.position_class || isObsoletePositionClass(t.position_class),
+  ).length
+  const obsoleteCount = open.filter((t) =>
+    isObsoletePositionClass(t.position_class),
+  ).length
 
   return (
     <div className="space-y-6">
@@ -175,14 +204,27 @@ export default async function PositionsPage() {
         description="Phase 2.5 — live book with classification, plus pending close / abandon proposals and write-off history."
       />
 
-      {unclassifiedOpen > 0 && (
+      {gapCount > 0 && (
         <Alert variant="destructive">
           <AlertTriangleIcon className="h-4 w-4" />
-          <AlertTitle>{unclassifiedOpen} open position(s) missing classification</AlertTitle>
+          <AlertTitle>
+            {gapCount} open position(s) with stale classification
+            {obsoleteCount > 0 &&
+              ` (${obsoleteCount} carry obsolete 4-bucket values)`}
+          </AlertTitle>
           <AlertDescription>
-            Phase 2.1 slot caps can&apos;t enforce until these carry{" "}
-            <code className="text-xs">position_class</code>. Run{" "}
-            <code className="text-xs">scripts/backfill_position_metadata.py --apply</code>.
+            These either lack <code className="text-xs">position_class</code>{" "}
+            entirely, or carry legacy values (
+            <code className="text-xs">long_reliable</code>,{" "}
+            <code className="text-xs">long_risky</code>,{" "}
+            <code className="text-xs">long_high</code>,{" "}
+            <code className="text-xs">long_mid_low</code>) that the backend
+            normalises on read. The data is still handled correctly, but
+            rewriting on disk removes the migration dependency. Run{" "}
+            <code className="text-xs">
+              scripts/backfill_position_metadata.py --apply
+            </code>
+            .
           </AlertDescription>
         </Alert>
       )}
@@ -223,7 +265,7 @@ export default async function PositionsPage() {
                     return (
                       <TableRow key={`${t.market_id}-${t.trade_id}`}>
                         <TableCell
-                          className="max-w-[260px] truncate"
+                          className="max-w-65 truncate"
                           title={t.question ?? t.market_id}
                         >
                           {t.question ?? (
@@ -415,7 +457,7 @@ export default async function PositionsPage() {
                   stranded.map((t) => (
                     <TableRow key={`${t.market_id}-${t.trade_id}`}>
                       <TableCell
-                        className="max-w-[260px] truncate"
+                        className="max-w-65 truncate"
                         title={t.question ?? t.market_id}
                       >
                         {t.question ?? (
@@ -491,7 +533,7 @@ export default async function PositionsPage() {
                         </Badge>
                       </TableCell>
                       <TableCell
-                        className="max-w-[260px] truncate"
+                        className="max-w-65 truncate"
                         title={t.question ?? t.market_id}
                       >
                         {t.question ?? (
@@ -545,7 +587,7 @@ function ClosesRow({ proposal }: { proposal: PendingClose }) {
         <Mono>#{proposal.id}</Mono>
       </TableCell>
       <TableCell
-        className="max-w-[240px] truncate"
+        className="max-w-60 truncate"
         title={proposal.question ?? proposal.market_id}
       >
         {proposal.question ?? (
@@ -587,7 +629,7 @@ function AbandonsRow({ proposal }: { proposal: PendingAbandon }) {
         <Mono>#{proposal.id}</Mono>
       </TableCell>
       <TableCell
-        className="max-w-[240px] truncate"
+        className="max-w-60 truncate"
         title={proposal.question ?? proposal.market_id}
       >
         {proposal.question ?? (

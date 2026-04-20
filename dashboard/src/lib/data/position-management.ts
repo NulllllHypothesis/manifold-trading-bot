@@ -12,6 +12,40 @@ import {
 } from "@/lib/schemas/position-management"
 import { readJsonFile } from "./_io"
 
+/**
+ * Mirrors `automation/auto_trader.py:_OBSOLETE_POSITION_CLASS_MIGRATIONS`.
+ *
+ * Positions persisted during intermediate 4-bucket revisions of Phase 2.1
+ * still carry `long_reliable` / `long_risky` (old rename) or `long_high` /
+ * `long_mid_low` (even older rename) values. The backend normalises these
+ * at read-time so slot accounting stays honest; the dashboard must do the
+ * same or it will (a) paint raw legacy labels on the UI and (b) miss them
+ * in the "classification gap" alert while the bot silently treats them as
+ * long_or_uncertain. Keep this map in sync with the Python source; single
+ * source of truth is the `.py` file since that's where new obsolete values
+ * would be introduced first.
+ */
+const OBSOLETE_POSITION_CLASS_MIGRATIONS: Record<string, string> = {
+  long_reliable: "long_or_uncertain",
+  long_risky: "long_or_uncertain",
+  long_high: "long_or_uncertain",
+  long_mid_low: "long_or_uncertain",
+}
+
+export function normalizePositionClass(
+  pclass: string | null | undefined,
+): string | null | undefined {
+  if (!pclass) return pclass
+  return OBSOLETE_POSITION_CLASS_MIGRATIONS[pclass] ?? pclass
+}
+
+/** True if the value is one of the obsolete 4-bucket names. */
+export function isObsoletePositionClass(
+  pclass: string | null | undefined,
+): boolean {
+  return !!pclass && pclass in OBSOLETE_POSITION_CLASS_MIGRATIONS
+}
+
 /** Read pending_closes.json (Phase 2.3). Empty list if file doesn't exist yet. */
 export async function readPendingCloses(
   _botId: string = BOT_ID,
@@ -94,4 +128,80 @@ export function readPositionSnapshots(
   } finally {
     db.close()
   }
+}
+
+/**
+ * Aggregate per-leg snapshots into one row per (market_id, snapshot_at) run.
+ *
+ * Phase 2.2 writes one row per OPEN leg per repricing tick, so a market
+ * with two legs produces two rows at the same `snapshot_at`. The trader's
+ * close decision in Phase 2.3 sums across legs — if the chart plots
+ * per-leg rows, it renders a zig-zag that looks like market-level P&L is
+ * swinging when it's really two separate legs at the same instant.
+ *
+ * This aggregator matches the scoring semantics: sum `unrealised_pnl` per
+ * run, skip rows flagged `api_error=1` so they don't count as $0 samples.
+ */
+export function aggregateSnapshotsByRun(
+  snapshots: PositionSnapshot[],
+): PositionSnapshot[] {
+  const byRun = new Map<string, PositionSnapshot[]>()
+  for (const s of snapshots) {
+    if (s.api_error) continue
+    const existing = byRun.get(s.snapshot_at)
+    if (existing) existing.push(s)
+    else byRun.set(s.snapshot_at, [s])
+  }
+
+  const out: PositionSnapshot[] = []
+  for (const [runTs, legs] of byRun) {
+    const first = legs[0]
+    let pnlSum = 0
+    let pnlCount = 0
+    let amountSum = 0
+    let anyResolved = 0
+    for (const l of legs) {
+      if (typeof l.unrealised_pnl === "number") {
+        pnlSum += l.unrealised_pnl
+        pnlCount += 1
+      }
+      if (typeof l.amount === "number") amountSum += l.amount
+      if (l.is_resolved) anyResolved = 1
+    }
+    out.push({
+      id: first.id,
+      trade_id: null, // aggregate — individual leg ids discarded
+      market_id: first.market_id,
+      snapshot_at: runTs,
+      current_probability: first.current_probability ?? null,
+      entry_probability: null,
+      outcome: legs.length === 1 ? first.outcome ?? null : null,
+      amount: amountSum || null,
+      unrealised_pnl: pnlCount > 0 ? pnlSum : null,
+      days_held: first.days_held ?? null,
+      is_resolved: anyResolved,
+      api_error: 0,
+    })
+  }
+
+  // Chronological for line charts.
+  out.sort((a, b) => a.snapshot_at.localeCompare(b.snapshot_at))
+  return out
+}
+
+/**
+ * Convenience: read snapshots for one market and collapse to per-run rows
+ * suitable for plotting a single line. Callers that need the raw per-leg
+ * rows can still use `readPositionSnapshots` directly.
+ */
+export function readMarketTrajectory(
+  marketId: string,
+  options: { limit?: number } = {},
+  botId: string = BOT_ID,
+): PositionSnapshot[] {
+  const raw = readPositionSnapshots(
+    { marketIds: [marketId], limit: options.limit ?? 500 },
+    botId,
+  )
+  return aggregateSnapshotsByRun(raw)
 }

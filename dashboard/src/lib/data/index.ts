@@ -32,6 +32,10 @@ export {
   readPendingCloses,
   readPendingAbandons,
   readPositionSnapshots,
+  readMarketTrajectory,
+  aggregateSnapshotsByRun,
+  normalizePositionClass,
+  isObsoletePositionClass,
 } from "./position-management"
 export { readDiagnostics } from "./diagnostics"
 export { readAutomationStatus } from "./automation"
