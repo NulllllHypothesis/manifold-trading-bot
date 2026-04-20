@@ -205,3 +205,45 @@ export function readMarketTrajectory(
   )
   return aggregateSnapshotsByRun(raw)
 }
+
+/**
+ * Batch-load market-aggregated trajectories for multiple markets in a
+ * single DB read. Returns `{ [market_id]: PositionSnapshot[] }` (each
+ * value already grouped per-run by aggregateSnapshotsByRun).
+ *
+ * Used by the /positions page to pre-hydrate every OPEN market so the
+ * client-side row-expand shows the chart instantly, without a fetch
+ * round-trip per click.
+ *
+ * The SQL does one IN (...) + ORDER BY snapshot_at DESC per market,
+ * which better-sqlite3 handles cheaply — 10 markets × 200 points is a
+ * ~2k-row read well inside a few ms.
+ */
+export function readMarketTrajectoriesForMarkets(
+  marketIds: string[],
+  options: { perMarketLimit?: number } = {},
+  _botId: string = BOT_ID,
+): Record<string, PositionSnapshot[]> {
+  if (marketIds.length === 0) return {}
+
+  // Fetch with a generous overall limit so we don't truncate any market
+  // before aggregation. 200 points × N markets is a safe upper bound.
+  const perMarketLimit = options.perMarketLimit ?? 200
+  const raw = readPositionSnapshots({
+    marketIds,
+    limit: perMarketLimit * marketIds.length,
+  })
+
+  // Bucket by market_id, then aggregate each bucket independently.
+  const buckets = new Map<string, PositionSnapshot[]>()
+  for (const s of raw) {
+    const arr = buckets.get(s.market_id)
+    if (arr) arr.push(s)
+    else buckets.set(s.market_id, [s])
+  }
+  const out: Record<string, PositionSnapshot[]> = {}
+  for (const [mid, rows] of buckets) {
+    out[mid] = aggregateSnapshotsByRun(rows).slice(-perMarketLimit)
+  }
+  return out
+}

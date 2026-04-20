@@ -33,6 +33,7 @@ export {
   readPendingAbandons,
   readPositionSnapshots,
   readMarketTrajectory,
+  readMarketTrajectoriesForMarkets,
   aggregateSnapshotsByRun,
   normalizePositionClass,
   isObsoletePositionClass,

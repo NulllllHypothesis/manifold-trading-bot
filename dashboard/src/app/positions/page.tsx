@@ -13,18 +13,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   Mono,
   formatCurrency,
-  formatPercent,
   formatTimestamp,
 } from "@/components/format"
-import { PositionTrajectoryChart } from "@/components/position-trajectory-chart"
 import {
   readPaperState,
   readPendingCloses,
   readPendingAbandons,
-  readMarketTrajectory,
+  readMarketTrajectoriesForMarkets,
   isObsoletePositionClass,
   normalizePositionClass,
 } from "@/lib/data"
+import { LiveBookTable } from "@/components/live-book-table"
 import type { Trade } from "@/lib/schemas/portfolio"
 import type {
   PendingClose,
@@ -41,63 +40,6 @@ import {
 
 export const dynamic = "force-dynamic"
 
-// Phase 2.4 detector thresholds, kept in sync with manifold_bot/config.py.
-// Staleness pill uses Phase 2.3's REPRICE_STALE_HOURS (2h).
-const REPRICE_STALE_HOURS = 2
-
-function hoursSince(iso: string | null | undefined): number | null {
-  if (!iso) return null
-  const ms = Date.now() - Date.parse(iso)
-  if (Number.isNaN(ms)) return null
-  return Math.max(0, ms / 3_600_000)
-}
-
-function daysSince(iso: string | null | undefined): number | null {
-  const h = hoursSince(iso)
-  return h == null ? null : h / 24
-}
-
-function PositionClassBadge({ cls }: { cls: string | undefined }) {
-  if (!cls) {
-    return (
-      <Badge variant="outline" className="text-[10px] text-muted-foreground">
-        UNCLASSIFIED
-      </Badge>
-    )
-  }
-  // Normalise obsolete 4-bucket values to the current 3-bucket model so the
-  // badge colour reflects what the backend actually enforces against, not
-  // the stale on-disk label. We also flag the row as OBSOLETE so the
-  // operator knows the on-disk value needs a rewrite — it's currently
-  // being normalised at read time on every slot check.
-  const normalised = normalizePositionClass(cls) ?? cls
-  const obsolete = isObsoletePositionClass(cls)
-  const color =
-    normalised === "short"
-      ? "border-gain/40 text-gain"
-      : normalised === "medium"
-      ? "border-primary/50 text-primary"
-      : normalised === "long_or_uncertain"
-      ? "border-loss/40 text-loss"
-      : "border-border text-muted-foreground"
-  return (
-    <span className="flex flex-wrap items-center gap-1">
-      <Badge variant="outline" className={cn("font-mono text-[10px]", color)}>
-        {normalised.toUpperCase()}
-      </Badge>
-      {obsolete && (
-        <Badge
-          variant="outline"
-          className="border-loss/40 font-mono text-[9px] text-loss"
-          title={`Persisted as ${cls}; backend normalises to ${normalised}`}
-        >
-          OBSOLETE
-        </Badge>
-      )}
-    </span>
-  )
-}
-
 function OutcomeBadge({ outcome }: { outcome: string | undefined }) {
   if (!outcome) return <span className="text-muted-foreground">—</span>
   const isYes = outcome.toUpperCase() === "YES"
@@ -110,29 +52,6 @@ function OutcomeBadge({ outcome }: { outcome: string | undefined }) {
       )}
     >
       {outcome.toUpperCase()}
-    </Badge>
-  )
-}
-
-function RepriceFreshnessPill({ lastReprice }: { lastReprice: string | undefined }) {
-  const hrs = hoursSince(lastReprice)
-  if (hrs == null) {
-    return (
-      <Badge variant="outline" className="text-[10px] text-muted-foreground">
-        never repriced
-      </Badge>
-    )
-  }
-  const stale = hrs > REPRICE_STALE_HOURS
-  return (
-    <Badge
-      variant="outline"
-      className={cn(
-        "text-[10px] font-mono",
-        stale ? "border-loss/40 text-loss" : "border-gain/40 text-gain",
-      )}
-    >
-      {stale ? "STALE" : "FRESH"} ({hrs < 1 ? `${Math.round(hrs * 60)}m` : `${hrs.toFixed(1)}h`})
     </Badge>
   )
 }
@@ -176,14 +95,23 @@ export default async function PositionsPage() {
   // Live Book rows. A market with an active proposal is flagged CLOSE.
   const closeProposedMarkets = new Set(activeCloses.map((p) => p.market_id))
 
-  // Load the latest market-aggregated trajectory (per-leg rows collapsed by
-  // snapshot_at and summed — see aggregateSnapshotsByRun). For a market
-  // with multiple OPEN legs this is the honest line; the raw per-leg rows
-  // would render as a zig-zag of overlapping points at each timestamp.
-  const chartCandidate = pickChartCandidate(open)
-  const snapshots = chartCandidate
-    ? readMarketTrajectory(chartCandidate.market_id, { limit: 500 })
-    : []
+  // Pre-load each OPEN market's trajectory in one DB call. The client-side
+  // Live Book table uses these to render the P&L chart inline under the
+  // row the operator clicks. No fetch-on-click flicker, one query instead
+  // of N, and the chart component stays purely presentational.
+  const openMarketIds = Array.from(new Set(open.map((t) => t.market_id)))
+  const trajectories = readMarketTrajectoriesForMarkets(openMarketIds, {
+    perMarketLimit: 200,
+  })
+
+  // Enriched rows for the client table: pre-compute normalised class +
+  // active-close-proposal flag so the client component stays dumb.
+  const liveBookRows = open.map((t) => ({
+    ...t,
+    hasActiveCloseProposal: closeProposedMarkets.has(t.market_id),
+    normalisedPositionClass: normalizePositionClass(t.position_class) ?? undefined,
+    isObsoleteClass: isObsoletePositionClass(t.position_class),
+  }))
 
   const strandedAmount = stranded.reduce((acc, t) => acc + (t.amount ?? 0), 0)
   const abandonedAmount = abandoned.reduce((acc, t) => acc + (t.amount ?? 0), 0)
@@ -231,121 +159,20 @@ export default async function PositionsPage() {
 
       {/* ── Live Book ───────────────────────────────────────── */}
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-foreground">
-          Live Book — {open.length} open
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-foreground">
+            Live Book — {open.length} open
+          </h2>
+          <p className="text-[11px] text-muted-foreground">
+            Click a row to inspect its unrealised P&amp;L trajectory.
+          </p>
+        </div>
         <Card>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Market</TableHead>
-                  <TableHead>Side</TableHead>
-                  <TableHead>Class</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead className="text-right">Entry → Now</TableHead>
-                  <TableHead className="text-right">Unrealised</TableHead>
-                  <TableHead className="text-right">Age</TableHead>
-                  <TableHead>Reprice</TableHead>
-                  <TableHead>Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {open.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={9} className="text-muted-foreground">
-                      No open positions.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  open.map((t) => {
-                    const entry = t.entry_probability ?? t.probability
-                    const age = daysSince(t.timestamp)
-                    const isClose = closeProposedMarkets.has(t.market_id)
-                    return (
-                      <TableRow key={`${t.market_id}-${t.trade_id}`}>
-                        <TableCell
-                          className="max-w-65 truncate"
-                          title={t.question ?? t.market_id}
-                        >
-                          {t.question ?? (
-                            <Mono className="text-muted-foreground">
-                              {t.market_id.slice(0, 12)}
-                            </Mono>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <OutcomeBadge outcome={t.outcome} />
-                        </TableCell>
-                        <TableCell>
-                          <PositionClassBadge cls={t.position_class} />
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Mono>{formatCurrency(t.amount)}</Mono>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Mono className="text-muted-foreground">
-                            {entry != null ? formatPercent(entry) : "—"}
-                          </Mono>{" "}
-                          →{" "}
-                          <Mono>
-                            {t.current_probability != null
-                              ? formatPercent(t.current_probability)
-                              : "—"}
-                          </Mono>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <PnlCell value={t.current_unrealised_pnl} />
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Mono>{age != null ? `${age.toFixed(1)}d` : "—"}</Mono>
-                        </TableCell>
-                        <TableCell>
-                          <RepriceFreshnessPill lastReprice={t.last_repriced_at} />
-                        </TableCell>
-                        <TableCell>
-                          {isClose ? (
-                            <Badge
-                              variant="outline"
-                              className="border-loss/40 text-loss text-[10px]"
-                            >
-                              CLOSE
-                            </Badge>
-                          ) : (
-                            <Badge
-                              variant="outline"
-                              className="border-border text-muted-foreground text-[10px]"
-                            >
-                              HOLD
-                            </Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })
-                )}
-              </TableBody>
-            </Table>
+            <LiveBookTable rows={liveBookRows} trajectories={trajectories} />
           </CardContent>
         </Card>
       </section>
-
-      {/* ── P&L trajectory (one illustrative market) ───────── */}
-      {chartCandidate && (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-foreground">
-            Unrealised P&amp;L trajectory —{" "}
-            <span className="text-muted-foreground">
-              {chartCandidate.question ?? chartCandidate.market_id}
-            </span>
-          </h2>
-          <Card>
-            <CardContent className="pt-4">
-              <PositionTrajectoryChart snapshots={snapshots} />
-            </CardContent>
-          </Card>
-        </section>
-      )}
 
       {/* ── Pending CLOSE proposals (Phase 2.3) ────────────── */}
       <section className="space-y-3">
@@ -660,24 +487,3 @@ function AbandonsRow({ proposal }: { proposal: PendingAbandon }) {
   )
 }
 
-/**
- * Choose one market to chart: the OPEN position with the most-negative
- * unrealised P&L (most interesting signal). Falls back to the oldest
- * position if nothing is losing. Returns null when the book is empty.
- */
-function pickChartCandidate(open: Trade[]): Trade | null {
-  if (open.length === 0) return null
-  const losing = open
-    .filter((t) => typeof t.current_unrealised_pnl === "number")
-    .sort(
-      (a, b) =>
-        (a.current_unrealised_pnl ?? 0) - (b.current_unrealised_pnl ?? 0),
-    )
-  if (losing.length > 0 && (losing[0].current_unrealised_pnl ?? 0) < 0) {
-    return losing[0]
-  }
-  const aged = [...open].sort(
-    (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
-  )
-  return aged[0] ?? null
-}
