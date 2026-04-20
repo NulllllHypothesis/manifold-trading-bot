@@ -490,6 +490,26 @@ evaluate_stale(position):
 
 ---
 
+## Phase 3 Capital Epoch (2026-04-20)
+
+Explicit marker per Design Principle #4 ("balance reset is an experiment, not a fix — mark it as a new epoch, don't pretend it's continuous performance").
+
+**What happened**:
+- Before: balance $30.55, 7 OPEN positions, long_or_uncertain 5/2 cap (over by 3), capital at stake $70
+- Action: closed the 3 oldest long_or_uncertain legs at live AMM prices (realised **+$4.21** gains total across `EthPLt0LtO`, `czh6sgdE8h`, `USpnpA6Idq`), topped balance from $34.76 up to **$100.00**
+- After: balance $100, 4 OPEN positions, long_or_uncertain 2/2 (at cap, not over), capital at stake $25, total portfolio $125
+- State file carries `phase3_capital_epoch_started="2026-04-20"` + `phase3_capital_topup_from=34.76` for audit
+
+**Why**:
+- Give Phase 3's first learning cycle (Monday 2026-04-27) enough runway to actually generate data across multiple trades without hitting capital ruin partway through.
+- Free the short/medium slots so new trades this week can resolve inside the observation window.
+
+**How performance accounting treats this**:
+- P&L from 2026-04-20 onwards is the **Phase 3 epoch performance**. Do NOT compare directly to pre-epoch figures — different capital, different filter set, different book composition.
+- Weekly EV reports + strategy weight updates keep running on `bet_outcomes` as before; they don't care about balance (they care about per-trade EV accuracy).
+
+---
+
 ## Phase 3 — Learning Unlock (Week 3-4)
 
 The backtest pipeline exists. In this workspace it's not producing artifacts because of data coverage gaps. Fix the gaps, not the pipeline.
