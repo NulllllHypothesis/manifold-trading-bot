@@ -420,6 +420,34 @@ class AutoTrader:
                 print(f"  AI vetoed this market (legacy SKIP record — pre-ai_status) — skipping")
                 return "ai_veto"
 
+        # Defense in depth: reject markets the research layer should have
+        # filtered but didn't (e.g. stale recommendation file, or a recent
+        # producer change). Keys match is_unverifiable_market() +
+        # is_thin_other_momentum_market() in strategies.py.
+        #
+        # The research layer already runs these checks, so this backstop
+        # should rarely fire in normal operation — when it does, it's a
+        # signal the research output is ahead/behind the trader deployment.
+        from manifold_bot.strategies import (
+            is_unverifiable_market,
+            is_thin_other_momentum_market,
+        )
+        # Build a minimal market-like dict from the recommendation. The
+        # filters only need question/category/uniqueBettorCount, all of
+        # which the research layer stamps on every recommendation.
+        rec_as_market = {
+            'question':           recommendation.get('question') or '',
+            'category':           recommendation.get('category') or '',
+            'uniqueBettorCount':  recommendation.get('unique_bettors') or 0,
+        }
+        if is_unverifiable_market(rec_as_market):
+            print(f"  Market is unverifiable (personal/subjective) — skipping regardless of confidence")
+            return "market_unverifiable"
+        rec_signals = recommendation.get('strategies') or []
+        if is_thin_other_momentum_market(rec_as_market, rec_signals):
+            print(f"  Vanity market profile (other + momentum-only + <3 bettors) — skipping")
+            return "market_unverifiable"
+
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
             print(f"  Confidence too low: {recommendation['confidence']*100:.0f}% < {self.min_confidence*100:.0f}%")
