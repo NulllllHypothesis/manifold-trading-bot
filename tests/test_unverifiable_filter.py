@@ -113,6 +113,41 @@ class TestIsUnverifiableMarket(unittest.TestCase):
             is_unverifiable_market({'question': "   Will I finish by Friday?"})
         )
 
+    def test_punctuation_directly_after_pronoun_is_caught(self):
+        # Reviewer fix (Low): the old startswith('will i ') check required
+        # a trailing space, so these personal questions slipped through.
+        # The regex now uses \b, which matches punctuation transitions too.
+        for q in [
+            "Will I, as CEO, step down by June?",
+            "Should I, after all, quit my job?",
+            "Can I?",
+            "Should I?",
+            "Did I, in retrospect, make the right call?",
+            "Will my.",   # contrived but legal input
+        ]:
+            with self.subTest(q=q):
+                self.assertTrue(
+                    is_unverifiable_market({'question': q}),
+                    f"expected block on: {q!r}",
+                )
+
+    def test_word_boundary_prevents_false_positive(self):
+        # \b must prevent matches where the 'i' is the start of a longer
+        # word like "island" or "iceberg" — i.e. "Will island..." is a
+        # legitimate public question, not personal.
+        for q in [
+            "Will island nations lose coastline by 2050?",
+            "Will iceberg A-76 fully melt by 2030?",
+            "Will ice sheet coverage drop below 10M sqkm?",
+            "Do iguanas outlive cats on average?",
+            "Will myriad changes to the tax code pass?",  # "will myriad" ≠ "will my"
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_unverifiable_market({'question': q}),
+                    f"unexpected block on: {q!r}",
+                )
+
 
 # ── is_thin_other_momentum_market ────────────────────────────────────────────
 
@@ -168,6 +203,80 @@ class TestIsThinOtherMomentumMarket(unittest.TestCase):
             is_thin_other_momentum_market(
                 market={'category': 'other', 'uniqueBettorCount': 2},
                 signals=['probability_direction', 'mean_reversion'],
+            )
+        )
+
+    def test_missing_category_falls_back_to_question_inference(self):
+        # Reviewer fix (Medium, round 1): when the raw API payload OMITS
+        # `category`, the filter infers from question text — same path
+        # auto_research uses when stamping the recommendation.
+        for q in [
+            "Will Congress pass the budget this week?",   # → politics
+            "Will the president sign the executive order?",  # → politics
+            "Will Bitcoin close above $100k by end of Q2?",  # → crypto
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_thin_other_momentum_market(
+                        # No 'category' key — simulates raw API payload.
+                        market={'question': q, 'uniqueBettorCount': 2},
+                        signals=['probability_direction'],
+                    ),
+                    f"unexpected block on inferred-category market: {q!r}",
+                )
+
+    def test_raw_other_category_also_reinfers_from_question(self):
+        # Reviewer fix (Medium, round 2): when the raw payload EXPLICITLY
+        # carries category='other', we still re-infer from question text.
+        # auto_research.py unconditionally overwrites the raw category via
+        # _infer_market_category when stamping the recommendation; the
+        # filter must match that canonicalisation or it will block legit
+        # public markets that Manifold happens to tag 'other'.
+        for q in [
+            "Will Congress pass the budget this week?",
+            "Will the president sign the executive order?",
+            "Will Bitcoin close above $100k by end of Q2?",
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_thin_other_momentum_market(
+                        market={
+                            'question': q,
+                            'category': 'other',   # raw API says 'other'
+                            'uniqueBettorCount': 2,
+                        },
+                        signals=['probability_direction'],
+                    ),
+                    f"raw 'other' must re-infer; failed on: {q!r}",
+                )
+
+    def test_raw_other_stays_blocked_when_inference_also_returns_other(self):
+        # Sanity: re-inference must not make the filter toothless. A raw
+        # 'other' category combined with an uncategorisable question
+        # (inference also returns 'other') remains blocked when the other
+        # vanity signals are present.
+        self.assertTrue(
+            is_thin_other_momentum_market(
+                market={
+                    'question': 'Will we get 5 likes on this dumb thing?',
+                    'category': 'other',
+                    'uniqueBettorCount': 2,
+                },
+                signals=['probability_direction'],
+            )
+        )
+
+    def test_genuinely_uncategorisable_still_blocks(self):
+        # Sanity: when the question can't be inferred into any known
+        # category AND all other vanity signals are present, we still
+        # block. Filter shouldn't become toothless from the fallback.
+        self.assertTrue(
+            is_thin_other_momentum_market(
+                market={
+                    'question': 'Will we get 5 likes on this dumb thing?',
+                    'uniqueBettorCount': 2,
+                },
+                signals=['probability_direction'],
             )
         )
 

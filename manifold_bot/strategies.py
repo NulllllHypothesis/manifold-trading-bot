@@ -345,21 +345,27 @@ _LOW_RESOLVABILITY_PATTERNS = (
 # confidence. Distinct from "low resolvability" (which the trader treats as a
 # soft label): these are a HARD block at pre-filter.
 #
-# Checked as lowercased `startswith`. Using startswith instead of substring
-# keeps precision high (it won't fire on legitimate questions that happen to
-# quote "will I" inside a larger clause), at the cost of missing re-worded
-# variants. Compound gate below catches most of those.
-_UNVERIFIABLE_QUESTION_PREFIXES = (
-    'will i ',          # "Will I complete all my pressing tasks this week?"
-    'will my ',         # "Will my car survive another year?"
-    'do i ',
-    'can i ',
-    'am i ',
-    'should i ',
-    'could i ',
-    'have i ',
-    'did i ',
-    'does my ',
+# Matched as an anchored regex with \b boundaries. This catches both the
+# space-delimited form ("Will I complete...") and punctuation-adjacent
+# variants ("Will I, as CEO, step down?" / "Can I?") that a plain
+# `startswith('will i ')` check would miss. The \b prevents over-firing on
+# "Will island..." / "Will iceberg..." etc.
+_UNVERIFIABLE_PHRASES = (
+    'will i',           # "Will I complete all my pressing tasks this week?"
+    'will my',          # "Will my car survive another year?"
+    'do i',
+    'can i',
+    'am i',
+    'should i',
+    'could i',
+    'have i',
+    'did i',
+    'does my',
+)
+
+_UNVERIFIABLE_RE = re.compile(
+    r'^\s*(?:' + '|'.join(re.escape(p) for p in _UNVERIFIABLE_PHRASES) + r')\b',
+    re.IGNORECASE,
 )
 
 
@@ -370,21 +376,22 @@ def is_unverifiable_market(market: Dict) -> bool:
       - "Will I complete all my pressing tasks this week?"
       - "Will my car last another year?"
       - "Can I lose 10 pounds by June?"
+      - "Will I, as CEO, step down by June?"   (punctuation variant)
+      - "Can I?"                               (bare question)
 
     Counter-examples (not skipped; these are publicly verifiable):
       - "Will the Fed cut rates in May?"
       - "Will Apple announce a new iPhone before September?"
       - "Will Taylor Swift perform at the Super Bowl?"
+      - "Will island nations lose coastline by 2050?"   (`i` inside a word)
 
     The trade that motivated this filter was question:
     `"Will I complete all my pressing tasks this week?"` — category `other`,
     2 unique_bettors, AI hallucinated a reasoning chain connecting it to
     pet-content trends. Hard block at the research layer is the fix.
     """
-    question = (market.get('question') or '').strip().lower()
-    if not question:
-        return False
-    return any(question.startswith(p) for p in _UNVERIFIABLE_QUESTION_PREFIXES)
+    question = market.get('question') or ''
+    return bool(_UNVERIFIABLE_RE.match(question))
 
 
 def is_thin_other_momentum_market(
@@ -408,9 +415,30 @@ def is_thin_other_momentum_market(
     vanity-market profile.
 
     `signals` can be a list, tuple, or any iterable of strategy names.
-    Unknown/empty categories are treated as 'other' for this check.
+
+    Category canonicalisation: `auto_research` UNCONDITIONALLY overwrites
+    whatever category the Manifold payload carried with
+    `_infer_market_category(question)` when it stamps the recommendation
+    (see auto_research.py's recommendation dict). We mirror that: raw
+    payload categories of `''`, `'unknown'`, OR `'other'` all trigger a
+    re-infer from the question. If inference returns a specific category
+    (politics/crypto/sports/etc.) the market passes through this gate even
+    if the raw payload said `other`. Without this, the filter would block
+    a legitimate politics market like "Will Congress pass the budget this
+    week?" whenever Manifold's API happens to tag it as 'other', even
+    though the rest of the pipeline treats it as politics.
     """
     category = (market.get('category') or '').strip().lower()
+    if category in ('', 'unknown', 'other'):
+        # Match auto_research: re-infer from question so raw 'other' and
+        # missing-category are both canonicalised to whatever the keyword
+        # heuristic produces. If inference still returns 'other', the
+        # market remains in the blocked bucket.
+        question = (market.get('question') or '').strip()
+        if question:
+            inferred = _infer_market_category(question)
+            if inferred:
+                category = inferred.strip().lower()
     if category not in ('', 'other', 'unknown'):
         return False
 
