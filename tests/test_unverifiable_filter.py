@@ -113,6 +113,41 @@ class TestIsUnverifiableMarket(unittest.TestCase):
             is_unverifiable_market({'question': "   Will I finish by Friday?"})
         )
 
+    def test_punctuation_directly_after_pronoun_is_caught(self):
+        # Reviewer fix (Low): the old startswith('will i ') check required
+        # a trailing space, so these personal questions slipped through.
+        # The regex now uses \b, which matches punctuation transitions too.
+        for q in [
+            "Will I, as CEO, step down by June?",
+            "Should I, after all, quit my job?",
+            "Can I?",
+            "Should I?",
+            "Did I, in retrospect, make the right call?",
+            "Will my.",   # contrived but legal input
+        ]:
+            with self.subTest(q=q):
+                self.assertTrue(
+                    is_unverifiable_market({'question': q}),
+                    f"expected block on: {q!r}",
+                )
+
+    def test_word_boundary_prevents_false_positive(self):
+        # \b must prevent matches where the 'i' is the start of a longer
+        # word like "island" or "iceberg" — i.e. "Will island..." is a
+        # legitimate public question, not personal.
+        for q in [
+            "Will island nations lose coastline by 2050?",
+            "Will iceberg A-76 fully melt by 2030?",
+            "Will ice sheet coverage drop below 10M sqkm?",
+            "Do iguanas outlive cats on average?",
+            "Will myriad changes to the tax code pass?",  # "will myriad" ≠ "will my"
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_unverifiable_market({'question': q}),
+                    f"unexpected block on: {q!r}",
+                )
+
 
 # ── is_thin_other_momentum_market ────────────────────────────────────────────
 
@@ -168,6 +203,48 @@ class TestIsThinOtherMomentumMarket(unittest.TestCase):
             is_thin_other_momentum_market(
                 market={'category': 'other', 'uniqueBettorCount': 2},
                 signals=['probability_direction', 'mean_reversion'],
+            )
+        )
+
+    def test_missing_category_falls_back_to_question_inference(self):
+        # Reviewer fix (Medium): when the raw API payload omits `category`,
+        # the filter must infer from the question text — same path as
+        # auto_research uses when stamping the recommendation. Otherwise a
+        # legit public market like "Will Congress pass the budget this week?"
+        # (2 bettors, momentum-only) is blocked because its raw-API category
+        # is missing even though its inferred category is 'politics'.
+        #
+        # We test only the cases where the existing `_infer_market_category`
+        # keyword heuristic actually fires. Known inference gaps (Fed
+        # without "cut rates" keyword, MLB team names, etc.) fall through
+        # to 'other' and remain blocked — that's an upstream inference
+        # concern, not the filter's contract.
+        for q in [
+            "Will Congress pass the budget this week?",   # → politics
+            "Will the president sign the executive order?",  # → politics
+            "Will Bitcoin close above $100k by end of Q2?",  # → crypto
+        ]:
+            with self.subTest(q=q):
+                self.assertFalse(
+                    is_thin_other_momentum_market(
+                        # No 'category' key — simulates raw API payload.
+                        market={'question': q, 'uniqueBettorCount': 2},
+                        signals=['probability_direction'],
+                    ),
+                    f"unexpected block on inferred-category market: {q!r}",
+                )
+
+    def test_genuinely_uncategorisable_still_blocks(self):
+        # Sanity: when the question can't be inferred into any known
+        # category AND all other vanity signals are present, we still
+        # block. Filter shouldn't become toothless from the fallback.
+        self.assertTrue(
+            is_thin_other_momentum_market(
+                market={
+                    'question': 'Will we get 5 likes on this dumb thing?',
+                    'uniqueBettorCount': 2,
+                },
+                signals=['probability_direction'],
             )
         )
 
