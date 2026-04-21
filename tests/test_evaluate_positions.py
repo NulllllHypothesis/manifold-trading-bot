@@ -174,6 +174,80 @@ class TestClassifyPosition(unittest.TestCase):
         self.assertEqual(action, 'HOLD')
         self.assertEqual(reason, 'awaiting_resolve')
 
+    def test_xkcd_reproducer_brand_new_long_with_flat_pnl_holds(self):
+        # Reviewer-agent-caught rounding artifact: a brand-new
+        # long_or_uncertain trade with flat P&L sits exactly at
+        # -LONG_HORIZON_PENALTY, and fractional time-decay pushes it
+        # just below the `<` cutoff. Without the min-hold guard, this
+        # produced a CLOSE proposal ~10 minutes after the :20 trader
+        # placed the trade (real case: xkcd-about-AI-2026, 2026-04-20).
+        # The too_new guard must intervene BEFORE the score check.
+        p = _pos(
+            unrealised=0.0,
+            days_ago=0.0001,   # literally just placed, < 1 minute
+            position_class='long_or_uncertain',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertIsNone(score)
+        self.assertEqual(reason, 'too_new')
+
+    def test_too_new_guard_blocks_even_deeply_negative_scores(self):
+        # A brand-new trade that would otherwise score -3 also gets
+        # held with too_new. We specifically choose to wait for one
+        # reprice cycle before trusting ANY score, even an extreme one,
+        # because a brand-new extreme score is almost certainly stamped
+        # at-entry data that the evaluator can't verify yet.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=0.02,     # ~29 minutes, well under 2h floor
+            position_class='short',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertEqual(reason, 'too_new')
+
+    def test_past_min_hold_a_losing_position_still_closes(self):
+        # Regression guard: once past the min-hold threshold, a
+        # genuinely bad trade must still be flagged for CLOSE.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=1,        # well past 2h
+            position_class='short',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+        self.assertLess(score, -0.5)
+
+    def test_min_hold_hours_parameter_override(self):
+        # Callers can tighten or loosen the floor. A test-harness
+        # setting min_hold_hours=0 disables the guard so pre-existing
+        # tests that exercise the score path with young positions keep
+        # working. Default value matches production config (2h).
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=0.02,
+            position_class='short',
+        )
+        # With guard on (default): held as too_new
+        action, _, reason = classify_position(p)
+        self.assertEqual(reason, 'too_new')
+        # With guard off: falls through to score-based decision
+        action, score, reason = classify_position(p, min_hold_hours=0.0)
+        self.assertEqual(action, 'CLOSE')
+
+    def test_min_hold_boundary_exact(self):
+        # Exactly at the boundary should NOT be too_new — the check is
+        # strict `<`. A trade at exactly 2.0h is eligible for scoring.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=2.0 / 24,   # exactly 2h
+            position_class='short',
+        )
+        action, _, reason = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+        self.assertNotEqual(reason, 'too_new')
+
 
 # ── run_evaluator integration ────────────────────────────────────────────────
 
@@ -795,6 +869,49 @@ class TestMarketLevelAggregation(unittest.TestCase):
             pending = json.load(f)
         self.assertAlmostEqual(pending[0]['current_unrealised_pnl'], -3.0, places=4)
         self.assertEqual(pending[0]['n_legs'], 1)
+
+    def test_fresh_leg_protects_market_from_too_new_bypass(self):
+        # Reviewer-caught edge: multi-leg markets weight days_held by
+        # amount, so a large/old leg could drag the average over 2h while
+        # a fresh leg was still within its protection window. But
+        # close_position_early closes EVERY leg, so the aggregate CLOSE
+        # would liquidate the fresh leg too. Fix: use min-leg-age for the
+        # too_new guard, not the weighted average.
+        #
+        # Reproducer: old losing 24h leg (weighted-avg push) + fresh flat
+        # 0.5h leg (should still be in protection window) → too_new HOLD,
+        # not CLOSE.
+        self._write_state({
+            'mkt_mix_age': [
+                _pos(market_id='mkt_mix_age', trade_id=1,
+                     amount=10.0, unrealised=-3.0, days_ago=1.0,
+                     current_prob=0.3),
+                _pos(market_id='mkt_mix_age', trade_id=2,
+                     amount=10.0, unrealised=0.0, days_ago=0.5 / 24,
+                     current_prob=0.5),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        # Weighted avg would be (24 + 0.5)/2 = 12.25h → past 2h floor.
+        # Aggregate pnl -$3 would drop score below threshold → CLOSE.
+        # But min-leg-age is 0.5h → too_new must hold the whole market.
+        self.assertEqual(n, 0)
+        self.assertFalse(self.pending_path.exists())
+
+    def test_all_legs_past_min_hold_still_closes(self):
+        # Regression guard: when every leg is past the min-hold window
+        # AND the aggregate score is below threshold, the market closes
+        # as normal. Min-leg guard must not become a blanket mute.
+        self._write_state({
+            'mkt_all_old': [
+                _pos(market_id='mkt_all_old', trade_id=1,
+                     amount=10.0, unrealised=-3.0, days_ago=1.0),
+                _pos(market_id='mkt_all_old', trade_id=2,
+                     amount=10.0, unrealised=-3.0, days_ago=0.5),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 1)
 
 
 # ── Reviewer fix 5 (Medium): deterministic position_class on mixed legs ──────
