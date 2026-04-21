@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY, MIN_ESTIMATED_EV_FLOOR
 from manifold_bot.strategies import _infer_market_category
 from automation.send_telegram import send_message as _tg
 
@@ -53,6 +53,7 @@ def _new_trader_counters() -> dict:
             "kelly_no_edge":        0,
             "size_too_small":       0,
             "market_unverifiable":  0,
+            "negative_ev":          0,      # estimated_ev ≤ MIN_ESTIMATED_EV_FLOOR
         },
         "passed_filter":            0,      # survived should_trade_market
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
@@ -447,6 +448,19 @@ class AutoTrader:
         if is_thin_other_momentum_market(rec_as_market, rec_signals):
             print(f"  Vanity market profile (other + momentum-only + <3 bettors) — skipping")
             return "market_unverifiable"
+
+        # Negative-EV invariant: don't knowingly trade what the stat model
+        # expects to lose money on. Prefer estimated_ev_exec (honest stake-
+        # size EV), fall back to legacy estimated_ev. When BOTH are None
+        # the gate does not fire — missing-EV is different from negative-EV,
+        # and pre-EV-pipeline records should still be able to trade on
+        # confidence alone. See MIN_ESTIMATED_EV_FLOOR in config.py.
+        ev = recommendation.get('estimated_ev_exec')
+        if ev is None:
+            ev = recommendation.get('estimated_ev')
+        if ev is not None and ev <= MIN_ESTIMATED_EV_FLOOR:
+            print(f"  Negative EV: ${ev:+.2f} ≤ floor ${MIN_ESTIMATED_EV_FLOOR:+.2f} — skipping")
+            return "negative_ev"
 
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
