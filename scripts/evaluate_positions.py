@@ -133,12 +133,16 @@ def classify_position(
          'stale_reprice'. Phase 2.2 preserves prior repricing fields on
          fetch failure, so this is the only way to distinguish "fresh data
          says close" from "stale data from a missed cycle says close".
-      4. days_held < min_hold_hours → HOLD with reason 'too_new'. Prevents
-         the rounding-artifact pathology on brand-new long_or_uncertain
-         trades (flat pnl + long_horizon_penalty lands exactly on the
-         threshold, and fractional time-decay sneaks it below `<`).
-         Evaluator would otherwise propose CLOSE minutes after the :20
-         trader placed the trade, with no new information.
+      4. YOUNGEST-leg age < min_hold_hours → HOLD with reason 'too_new'.
+         Uses the youngest leg of a market aggregate (not the weighted
+         average) because close_position_early closes every leg at once —
+         if any one leg is still within its minimum hold window the whole
+         market must be held. Prevents the rounding-artifact pathology on
+         brand-new long_or_uncertain trades (flat pnl + long_horizon_penalty
+         lands exactly on the threshold, and fractional time-decay sneaks
+         it below `<`), and also prevents a stale older leg from dragging
+         the weighted average over 2h while a fresh sibling leg still
+         needs protection.
       5. score < threshold → CLOSE with reason summarising why.
       6. Otherwise HOLD.
     """
@@ -155,7 +159,15 @@ def classify_position(
     if _is_reprice_stale(position.get('last_repriced_at'), stale_hours, _now=_now):
         return ('HOLD', None, 'stale_reprice')
 
-    if days_held * 24.0 < float(min_hold_hours):
+    # The too_new guard uses the YOUNGEST leg's age for market aggregates
+    # (close_position_early closes every leg together — one fresh leg
+    # inside its minimum hold window protects the whole market from a
+    # CLOSE proposal). For single-leg positions the aggregate doesn't
+    # stamp _min_leg_days_held, so we fall back to days_held — which for
+    # one leg equals that leg's own age anyway.
+    min_leg = position.get('_min_leg_days_held')
+    age_for_too_new = min_leg if isinstance(min_leg, (int, float)) else days_held
+    if age_for_too_new * 24.0 < float(min_hold_hours):
         return ('HOLD', None, 'too_new')
 
     score = position_score(unrealised, days_held, pclass)
@@ -326,6 +338,7 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
     weighted_days = 0.0
     weighted_entry = 0.0
     weighted_base = 0.0  # denominator for weighted averages (sum of amounts with known values)
+    min_leg_days: Optional[float] = None  # youngest leg; drives the too_new guard
     outcomes = set()
     oldest_repriced: Optional[datetime] = None
     oldest_timestamp: Optional[datetime] = None
@@ -357,6 +370,14 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
         if leg_days is not None and amount:
             weighted_days += leg_days * float(amount)
             weighted_base += float(amount)
+        # Track the youngest leg across the market for the too_new guard.
+        # close_position_early closes EVERY OPEN leg in one call, so if any
+        # single leg is still within its minimum hold window the whole
+        # market must be treated as too_new — weighted age can mask a
+        # fresh leg behind an older/larger sibling.
+        if leg_days is not None:
+            if min_leg_days is None or leg_days < min_leg_days:
+                min_leg_days = leg_days
 
         entry_p = leg.get('entry_probability') or leg.get('probability')
         if entry_p is not None and amount:
@@ -409,6 +430,11 @@ def _aggregate_market_legs(market_id: str, legs: List[Dict]) -> Dict:
         # to re-derive it from `timestamp` (which would give the oldest
         # leg's age, not the weighted average).
         '_aggregate_days_held': (weighted_days / weighted_base) if weighted_base else None,
+        # Youngest leg's days_held. The too_new guard uses THIS, not the
+        # weighted average, because close_position_early closes every leg
+        # at once — if any single leg is still within its minimum hold
+        # window the whole market must be held.
+        '_min_leg_days_held': min_leg_days,
     }
 
 

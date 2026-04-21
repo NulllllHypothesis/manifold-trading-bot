@@ -870,6 +870,49 @@ class TestMarketLevelAggregation(unittest.TestCase):
         self.assertAlmostEqual(pending[0]['current_unrealised_pnl'], -3.0, places=4)
         self.assertEqual(pending[0]['n_legs'], 1)
 
+    def test_fresh_leg_protects_market_from_too_new_bypass(self):
+        # Reviewer-caught edge: multi-leg markets weight days_held by
+        # amount, so a large/old leg could drag the average over 2h while
+        # a fresh leg was still within its protection window. But
+        # close_position_early closes EVERY leg, so the aggregate CLOSE
+        # would liquidate the fresh leg too. Fix: use min-leg-age for the
+        # too_new guard, not the weighted average.
+        #
+        # Reproducer: old losing 24h leg (weighted-avg push) + fresh flat
+        # 0.5h leg (should still be in protection window) → too_new HOLD,
+        # not CLOSE.
+        self._write_state({
+            'mkt_mix_age': [
+                _pos(market_id='mkt_mix_age', trade_id=1,
+                     amount=10.0, unrealised=-3.0, days_ago=1.0,
+                     current_prob=0.3),
+                _pos(market_id='mkt_mix_age', trade_id=2,
+                     amount=10.0, unrealised=0.0, days_ago=0.5 / 24,
+                     current_prob=0.5),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        # Weighted avg would be (24 + 0.5)/2 = 12.25h → past 2h floor.
+        # Aggregate pnl -$3 would drop score below threshold → CLOSE.
+        # But min-leg-age is 0.5h → too_new must hold the whole market.
+        self.assertEqual(n, 0)
+        self.assertFalse(self.pending_path.exists())
+
+    def test_all_legs_past_min_hold_still_closes(self):
+        # Regression guard: when every leg is past the min-hold window
+        # AND the aggregate score is below threshold, the market closes
+        # as normal. Min-leg guard must not become a blanket mute.
+        self._write_state({
+            'mkt_all_old': [
+                _pos(market_id='mkt_all_old', trade_id=1,
+                     amount=10.0, unrealised=-3.0, days_ago=1.0),
+                _pos(market_id='mkt_all_old', trade_id=2,
+                     amount=10.0, unrealised=-3.0, days_ago=0.5),
+            ],
+        })
+        h, c, n = run_evaluator(notify=self._notify)
+        self.assertEqual(n, 1)
+
 
 # ── Reviewer fix 5 (Medium): deterministic position_class on mixed legs ──────
 
