@@ -646,9 +646,16 @@ class AutoTrader:
         print(f"  Sizing: {sizing_method} → ${position_size:.2f}")
         return position_size
 
-    def execute_trade(self, recommendation: Dict) -> bool:
+    def execute_trade(self, recommendation: Dict, counters: Optional[Dict] = None) -> bool:
         """
-        Execute a trade based on recommendation
+        Execute a trade based on recommendation.
+
+        counters: optional trader_counters dict from the caller. When a live-
+        time guard (e.g. live-EV) blocks a trade that already passed the
+        pre-flight _trade_rejection_reason gate, execute_trade increments
+        the corresponding entry in `counters["rejected"]` so the accounting
+        reflects the real cause instead of showing up only as
+        `passed_filter - trades_executed`.
 
         Returns:
             bool: True if trade successful
@@ -738,6 +745,17 @@ class AutoTrader:
                 f"  Live EV ${estimated_ev:+.2f} ≤ floor ${MIN_ESTIMATED_EV_FLOOR:+.2f} "
                 f"after fetching current prob ({current_prob:.3f}) — skipping"
             )
+            # Attribute this skip to the same reason counter as the
+            # pre-flight gate. Without this the trader run would show it
+            # only as `passed_filter - trades_executed`, obscuring the
+            # cause. Caller passes `counters` from run_trading_cycle;
+            # None is tolerated so unit-test call sites don't have to
+            # synthesise a full counters dict.
+            if counters is not None:
+                counters.setdefault("rejected", {})
+                counters["rejected"]["negative_ev"] = (
+                    counters["rejected"].get("negative_ev", 0) + 1
+                )
             return False
 
         # Place paper trade — estimated_ev now flows into the position record so
@@ -924,7 +942,7 @@ class AutoTrader:
                 continue
 
             print(f"\n{'─'*40}")
-            if self.execute_trade(rec):
+            if self.execute_trade(rec, counters=counters):
                 trades_executed += 1
 
         counters["trades_executed"] = trades_executed

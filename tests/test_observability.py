@@ -498,6 +498,24 @@ class TestExecuteTradeLiveEvGuard(unittest.TestCase):
         self.assertFalse(result, "trade should have been skipped on live-EV guard")
         paper.place_paper_bet.assert_not_called()
 
+    def test_live_skip_increments_rejected_negative_ev_counter(self):
+        # Reviewer-caught accounting gap: the live guard blocks the trade
+        # but the rec already incremented `passed_filter` in the caller.
+        # To keep the reason tally honest, execute_trade increments
+        # `rejected.negative_ev` on the counters dict when the live guard
+        # fires. Without this, live-drift skips would show up only as
+        # `passed_filter - trades_executed`, obscuring the cause.
+        trader, paper = self._make_trader()
+        counters = _new_trader_counters()
+
+        with patch("automation.auto_trader.api_client.get_market",
+                   return_value={"probability": 0.90, "isResolved": False,
+                                 "closeTime": 9999999999999}):
+            trader.execute_trade(self._make_rec(), counters=counters)
+
+        self.assertEqual(counters["rejected"]["negative_ev"], 1)
+        paper.place_paper_bet.assert_not_called()
+
     def test_live_fetch_that_keeps_ev_positive_still_places(self):
         # Regression guard: when the market hasn't moved enough to flip
         # EV negative, the trade still goes through.
