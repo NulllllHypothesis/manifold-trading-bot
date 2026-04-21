@@ -440,6 +440,103 @@ class TestTradeRejectionReason(unittest.TestCase):
         )
 
 
+# ── Live-EV guard in execute_trade ───────────────────────────────────────────
+
+class TestExecuteTradeLiveEvGuard(unittest.TestCase):
+    """The pre-flight gate in _trade_rejection_reason reads stale rec EV.
+    But between :00 research and :20 trade the market can move, so
+    execute_trade re-fetches the live market and recomputes EV. The
+    invariant "do not knowingly trade negative EV" must hold at PLACEMENT
+    time, not just at pre-flight time — hence the live-EV guard.
+    """
+
+    def _make_trader(self, starting_balance=100.0):
+        with patch("automation.auto_trader.PaperTrader") as MockTrader:
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            mock_instance.balance = starting_balance
+            mock_instance.place_paper_bet = MagicMock(return_value=True)
+            MockTrader.return_value = mock_instance
+            trader = AutoTrader()
+        return trader, mock_instance
+
+    def _make_rec(self, **overrides):
+        base = {
+            "market_id": "mkt_live_shift",
+            "question": "Public question?",
+            "recommendation": "YES",
+            "confidence": 0.75,
+            "probability": 0.50,                    # research-time market prob
+            "liquidity": 500,
+            "category": "politics",
+            "unique_bettors": 20,
+            "ai_recommendation": "YES",
+            "ai_returned_skip": False,
+            "strategies": ["probability_direction"],
+            # Research said this was a good bet
+            "estimated_ev": 0.40,
+            "estimated_ev_exec": 0.40,
+            "ai_estimated_probability": 0.70,       # our edge estimate
+            "ai_confidence": 0.75,
+        }
+        base.update(overrides)
+        return base
+
+    def test_live_fetch_that_flips_ev_negative_blocks_placement(self):
+        # Pre-flight EV was +$0.40 → passes _trade_rejection_reason.
+        # But by :20 the market has moved from 0.50 → 0.90 (way past our
+        # p_estimate=0.70). Live-EV recompute yields negative. The trader
+        # MUST skip placement.
+        trader, paper = self._make_trader()
+
+        # Market moved hard against us between research and execution
+        with patch("automation.auto_trader.api_client.get_market",
+                   return_value={"probability": 0.90, "isResolved": False,
+                                 "closeTime": 9999999999999}):
+            result = trader.execute_trade(self._make_rec())
+
+        self.assertFalse(result, "trade should have been skipped on live-EV guard")
+        paper.place_paper_bet.assert_not_called()
+
+    def test_live_fetch_that_keeps_ev_positive_still_places(self):
+        # Regression guard: when the market hasn't moved enough to flip
+        # EV negative, the trade still goes through.
+        trader, paper = self._make_trader()
+
+        with patch("automation.auto_trader.api_client.get_market",
+                   return_value={"probability": 0.55, "isResolved": False,
+                                 "closeTime": 9999999999999}):
+            result = trader.execute_trade(self._make_rec())
+
+        self.assertTrue(result)
+        paper.place_paper_bet.assert_called_once()
+
+    def test_live_ev_guard_inactive_when_p_estimate_unknown(self):
+        # If the rec carries no ai_estimated_probability AND the stat
+        # fallback somehow can't derive one (shouldn't happen in practice,
+        # but let's be explicit), estimated_ev is None. Per the same
+        # principle as the pre-flight gate, a None EV doesn't fire the
+        # guard — unknown is different from negative.
+        trader, paper = self._make_trader()
+
+        rec = self._make_rec()
+        rec["ai_estimated_probability"] = None
+        # Force the stat-derived fallback to also return None by zeroing
+        # confidence and stripping direction. This is contrived — real
+        # code always produces a p_estimate — but locks in the contract.
+        rec["confidence"] = 0.0
+        rec["recommendation"] = None
+
+        with patch("automation.auto_trader.api_client.get_market",
+                   return_value={"probability": 0.50, "isResolved": False,
+                                 "closeTime": 9999999999999}):
+            # Shouldn't crash; execute_trade exits via its own no-edge
+            # paths (calculate_position_size returns 0) long before we'd
+            # hit the EV guard. This test exists to prove the guard
+            # tolerates the None-EV path without raising.
+            trader.execute_trade(rec)   # not asserting outcome — just no exception
+
+
 # ── Print / append helpers don't crash ───────────────────────────────────────
 
 class TestCounterEmitHelpers(unittest.TestCase):

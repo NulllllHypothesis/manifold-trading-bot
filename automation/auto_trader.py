@@ -721,6 +721,25 @@ class AutoTrader:
         else:
             estimated_ev = None  # truly unknown — don't fake a value
 
+        # Live-EV invariant (same floor as the pre-flight gate in
+        # _trade_rejection_reason, but applied to the EV recomputed AFTER
+        # fetching the live market probability). Between `:00` research
+        # and `:20` trade the market can move: a recommendation that
+        # passed the pre-flight gate at +$0.40 EV may now have live EV
+        # below the floor. Without this check the trader would place a
+        # trade its own live computation says has negative expected
+        # value — violating the stated invariant.
+        #
+        # Skipped when estimated_ev is None (missing p_estimate + no
+        # legacy EV): unknown-EV remains allowed per the same principle
+        # as the pre-flight gate. Only known-negative is blocked.
+        if estimated_ev is not None and estimated_ev <= MIN_ESTIMATED_EV_FLOOR:
+            print(
+                f"  Live EV ${estimated_ev:+.2f} ≤ floor ${MIN_ESTIMATED_EV_FLOOR:+.2f} "
+                f"after fetching current prob ({current_prob:.3f}) — skipping"
+            )
+            return False
+
         # Place paper trade — estimated_ev now flows into the position record so
         # resolve_market() → _write_bet_outcome() can store it in bet_outcomes.
         success = self.trader.place_paper_bet(
