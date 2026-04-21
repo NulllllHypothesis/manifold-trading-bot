@@ -2,9 +2,50 @@
 
 > **Purpose**: this is not a reference manual. It's the doc you read *once*, running commands on the sandbox alongside, so you build a mental model of how the bot actually decides things.
 >
-> **How to use**: start at §1, work down. Every section ends with a `now run this` block — actually run it on the sandbox. Don't skip the runs, they're what make it stick.
+> **How to use**: start at §0 (safety + drift check), then §1, work down. Every section ends with a `now run this` block — actually run it on the sandbox. Don't skip the runs, they're what make it stick.
 >
 > **Estimated time**: 90–120 minutes, ideally in one sitting.
+>
+> **Doc version**: written 2026-04-21. Specific sandbox-state numbers in this doc are as-observed on that date and will drift — follow the `now run this` blocks to see current values, don't trust the numbers in prose.
+
+---
+
+## 0. Before You Start
+
+### 0.1 Safe vs unsafe commands
+
+This doc asks you to run commands against the live sandbox. The colour/prefix convention in every `now run this` block:
+
+| Prefix | Meaning | Examples |
+|---|---|---|
+| `🟢 READ` | Pure read. No state mutation anywhere. Safe to run any number of times. | `crontab -l`, `sqlite3 ... SELECT ...`, `cat market_research.json`, `python3 -c 'import json; print(...)'` |
+| `🟡 OBSERVE` | Reads + runs a script in its natural read phase. Safe but may append to log files (`/tmp/*.log`, `data/*_counters.jsonl`). | `python3 scripts/detect_stale_positions.py` (no `--apply`) |
+| `🔴 MUTATE` | Changes state (`paper_trading_state.json`, `bet_outcomes`, balance). Only run when you mean to. | `execute_close.py --id N`, `execute_abandon.py --id N`, `close_position_early(...)` direct calls, `place_paper_bet(...)` |
+
+**Every `now run this` block in this doc is `🟢 READ`.** If you see 🔴 elsewhere, stop and confirm intent before running.
+
+While studying: **never run a `🔴 MUTATE` command.** If you need to trace what a mutation would do, read the code, don't execute it.
+
+### 0.2 Version drift checklist
+
+The code changes frequently. Before trusting specific numbers in this doc, confirm you're in sync:
+
+```bash
+🟢 READ
+# 1. Local main commit
+git -C /Users/amirghari/Desktop/Hackathon/workspace log --oneline -1
+
+# 2. Sandbox main commit (should match local)
+ssh hackathon-server 'cd /home/hackathon/.openclaw/workspace && git log --oneline -1'
+
+# 3. Live crontab (should match §1 map below)
+ssh hackathon-server 'crontab -l' | grep -E "^[0-9]" | sort
+
+# 4. Cron generator in the repo (should match live crontab)
+grep "^[0-9].*cd \$WORKSPACE" /Users/amirghari/Desktop/Hackathon/workspace/automation/setup_cron_jobs.py
+```
+
+If any of (1)–(4) disagree with each other or with §1, **resolve the drift first**. A walkthrough against a stale doc teaches the wrong model.
 
 ---
 
@@ -69,7 +110,7 @@ Confirm the cron schedule is what this doc claims:
 ssh hackathon-server 'crontab -l' | grep -E "^[0-9]"
 ```
 
-You should see `:00 research`, `:05 reprice`, `:10 resolve`, `:20 trade`, `:30 evaluate`, `13:00 stale detection`, plus the weekly Sunday/Monday jobs.
+As of 2026-04-21 you should see `:00 research`, `:05 reprice`, `:10 resolve`, `:20 trade`, `:30 evaluate`, `13:00 stale detection`, plus the weekly Sunday/Monday jobs. If your output differs, go back to §0.2 and resolve the drift.
 
 ---
 
@@ -169,13 +210,83 @@ cat data/strategy_weights.json | python3 -m json.tool | head -12
 '
 ```
 
-You should see `post_ev_fix: 10` rows (right at the min-sample gate) and every strategy weight = 1.0. That's "pipeline works but no signal moved yet" — the state we want to flip on Monday.
+As of 2026-04-21 we saw: `post_ev_fix: 10`, `early_close: 6`, `pre_ev_fix: 3`, every strategy weight = 1.0. Your run may differ — that's "pipeline works but no signal moved yet," exactly the state we want to flip on Monday.
 
 ---
 
-## 3. Walkthrough — Three Trades
+## 2.5 Decision Gates — Cheat Sheet
 
-One accepted. One rejected (pattern). One closed. For each, the "why did this happen?" drill.
+When a trade shows up somewhere unexpected (or doesn't show up where you expected), one of these gates is why. Keep this table open as a reference.
+
+### Research-time filters (`:00` cron, `automation/auto_research.py`)
+
+Applied **before** any strategy runs. Each counts into the corresponding `skipped_*` counter in `data/research_counters.jsonl`.
+
+| Filter | Rejects if... | Code |
+|---|---|---|
+| `skipped_resolved` | `isResolved=True` on the API payload | [auto_research.py](/Users/amirghari/Desktop/Hackathon/workspace/automation/auto_research.py:541) |
+| `skipped_low_liquidity` | `totalLiquidity < MIN_LIQUIDITY` (200) | same |
+| `skipped_stale` | Last bet > 72h ago AND near-zero 24h volume | `TradingStrategies.is_stale_market` |
+| `skipped_noise` | Structurally random (coinflip, lottery, etc.) | `_is_noise_market(question)` |
+| `skipped_unverifiable` | Question starts with "Will I… / Will my… / Do I…" etc. | `is_unverifiable_market` (PR #19) |
+| `skipped_thin_other_momentum` | category=other (or inferred-other) + only `probability_direction` fired + <3 unique bettors | `is_thin_other_momentum_market` (PR #19/20) |
+
+### Trader rejection reasons (`:20` cron, `automation/auto_trader.py:_trade_rejection_reason`)
+
+Applied **per recommendation** after research has already shortlisted it. Each writes to `data/trader_counters.jsonl` under `rejected.<reason>`.
+
+| Reason | Rejects if... |
+|---|---|
+| `ai_veto` | `ai_status=='skip'` (real AI SKIP, not just timeout) |
+| `market_unverifiable` | Backstop — `is_unverifiable_market()` or `is_thin_other_momentum_market()` returns True even though research should have caught it |
+| `low_confidence` | `confidence < MIN_CONFIDENCE` (0.65) |
+| `existing_open` | We already hold an OPEN leg on this market (use swap, don't stack) |
+| `max_positions` | Global book at 10/10 |
+| `position_class_full` | short=5 / medium=3 / long_or_uncertain=2 bucket is at cap |
+| `category_cap` | A category already has `MAX_POSITIONS_PER_CATEGORY=3` open legs |
+| `liquidity` | Live liquidity dropped below floor between research and trade-time |
+| `kelly_no_edge` | Kelly sizing returned ≤0 bet |
+| `size_too_small` | Bet would be < `MIN_BET_AMOUNT` |
+
+### Evaluator HOLD/CLOSE reasons (`:30` cron, `scripts/evaluate_positions.py:classify_position`)
+
+Applied **per OPEN market aggregate**. Reason string lands in the Telegram CTA text.
+
+| Reason | Meaning | Action |
+|---|---|---|
+| `awaiting_resolve` | `is_resolved_on_api=True` — resolve_positions handles it next | HOLD |
+| `no_reprice` | No `current_unrealised_pnl` stamped yet (Phase 2.2 hasn't touched it) | HOLD |
+| `stale_reprice` | Last reprice > `REPRICE_STALE_HOURS` (2h) — old data, don't score | HOLD |
+| `too_new` | Youngest leg < `MIN_HOLD_HOURS` (2h) — let it settle first (PR #21) | HOLD |
+| `score_above_threshold` | position_score ≥ -0.50 | HOLD |
+| `pnl=..., age=..., [long_horizon_penalty]` | position_score < -0.50 | **CLOSE** |
+
+### Stale-detector transitions (`13:00` daily, `scripts/detect_stale_positions.py:classify_stale`)
+
+Applied **per OPEN market**. Thresholds measured from `closeTime`.
+
+| Transition | When | Terminal? |
+|---|---|---|
+| `SKIP_NOT_CLOSED` | `now < closeTime` | — (normal OPEN) |
+| `SKIP_GRACE` | `0 ≤ now-closeTime < 48h` | — (creators often late) |
+| `STRANDED` (auto) | `48h ≤ now-closeTime < 90d`, not resolved | ✅ reversible if market resolves later |
+| `ABANDON` (propose) | `now-closeTime ≥ 90d`, still not resolved | → `ABANDONED` terminal write-off on approval |
+| `SKIP_RESOLVED` | `isResolved=True` | → let resolve_positions handle |
+
+### `era` field on `bet_outcomes` — what drives weights?
+
+| `era` | Written by | Counts toward live weights? |
+|---|---|---|
+| `post_ev_fix` | `resolve_market*` on post-2026-04-07 trades | ✅ yes (min_samples=10) |
+| `early_close` | `close_position_early` (Phase 2.3 approvals) | ❌ audit only |
+| `write_off` | `mark_market_abandoned` (Phase 2.4 approvals) | ❌ audit only |
+| `pre_ev_fix` | Backfilled on legacy rows with NULL `estimated_ev` | ❌ excluded |
+
+---
+
+## 3. Walkthrough — Four Trades
+
+One accepted. One rejected (pattern). One closed early. One fully resolved. For each, the "why did this happen?" drill.
 
 ---
 
@@ -323,7 +434,7 @@ for line in sys.stdin:
 "'
 ```
 
-You'll see the same pattern: 4-ish rejections per run, maybe 0-1 trades executed. That's the bot straining against its own slot structure.
+As of 2026-04-21 the pattern was ~4 rejections/run, 0–1 trades/run — the bot straining against its own slot structure after the Phase 3 capital epoch. Your values may differ as the book churns; compare to today's `data/trader_counters.jsonl` tail.
 
 ---
 
@@ -392,6 +503,76 @@ print(\"is_unverifiable_market:\", is_unverifiable_market({\"question\": q}))
 ```
 
 Both rows should show `era=early_close` with pnl=0.00, and the filter check should return `True`. That's the full lifecycle — opened, closed, filtered going forward.
+
+---
+
+### 3.4 Trade 4 — Resolved: `Ic9p2lCd05`, the boring sports loss
+
+The previous three trades are all unusual: structurally bad (CEIUnpQL26), rejected-by-pattern, or still open (Cameroon). You need at least one *boring* example: a trade that was placed normally, resolved normally, and landed in `bet_outcomes` as a single clean row. This is what 95% of the bot's output looks like when the system is working.
+
+**The trade** (from `bet_outcomes`, resolved 2026-04-19 20:10):
+
+```
+market_id:       Ic9p2lCd05
+recommendation:  NO @ 48%
+amount:          $5
+category:        sports
+strategies:      ['probability_bias']
+estimated_ev:    +$3.08     ← EV said "good bet"
+ai_confidence:   0.0        ← AI didn't vote
+market_resolution: YES      ← market resolved YES, our NO LOSES
+actual_pnl:      -$5.00
+era:             post_ev_fix   ← counts toward Monday's learning loop
+```
+
+#### The path this trade took
+
+1. **`:00` research**: sports market, had ≥200 liquidity, passed all filters. `probability_bias` fired (market's probability was ~48% and the strategy identified a bias). Written to `market_research.json` with `recommendation: NO, confidence: ≥0.65, estimated_ev: +3.08`.
+2. **`:20` trader**: `_trade_rejection_reason` returned `None`. No AI veto (AI didn't vote), confidence cleared floor, no existing open, class + category caps OK, Kelly sized at $5 (MAX_BET_AMOUNT). Placed via `place_paper_bet`.
+3. **Lifecycle**: `:05` reprice each hour updated `current_unrealised_pnl` as the market drifted. **Evaluator left it alone** — sports is `medium` class (no long-horizon penalty), and a small unrealised loss wouldn't trip `-0.50` threshold.
+4. **`:10` resolve**: at some point Manifold's API flagged `isResolved=True, resolution=YES`. `auto_resolve_markets` picked it up, called `resolve_market('Ic9p2lCd05', 'YES')`. Our NO bet lost. `status → LOSE`, `profit → -5.0`.
+5. **`_write_bet_outcome`**: wrote the row with `era='post_ev_fix'`, `ev_error = estimated_ev - actual_pnl = 3.08 - (-5.0) = +$8.08` (huge overestimate — said "I expected +3, got -5").
+
+#### Why did this happen? (the drill)
+
+| Question | Answer |
+|---|---|
+| **Why did research consider this?** | Sports market, active, liquid, fits the `probability_bias` strategy shape. |
+| **Which filters did it survive?** | All research filters. |
+| **Which strategy signal fired?** | Only `probability_bias` — stat thought the market was mispricing, and biased toward NO at 48%. |
+| **Did AI approve?** | AI didn't vote (`ai_confidence=0.0`, `ai_status` not stamped — predates that field). No AI contribution either way. |
+| **Why did the trader accept?** | All gates cleared. `estimated_ev=+3.08` meant the stat-derived expected value was positive too. On paper, a good bet. |
+| **What position class did it get?** | `medium` (sports market, closeTime ~days to weeks away). No long-horizon penalty to worry about. |
+| **What would make us close it?** | The evaluator ran `:30` every hour. Given small unrealised fluctuations, score stayed above -0.50 → HOLD every time. This is exactly the case where the evaluator should stay out of the way. |
+| **When did it become learning data?** | The moment `resolve_market` wrote the `bet_outcomes` row with `era='post_ev_fix'`. From then on, it's counted in the weekly EV audit (next Monday 2026-04-27) and in strategy weight computation (if `probability_bias` has ≥10 similar rows). |
+
+#### The important teaching moment: `ev_error = +$8.08`
+
+The stat-derived EV said we'd gain ~$3 on this bet. We actually lost $5. That's an `ev_error` of +$8.08 — EV was too optimistic by about 2.5× a whole bet size.
+
+**What this means for Phase 3**:
+
+- If *most* `probability_bias` trades have strongly-positive `ev_error` (EV systematically overpredicts), then `compute_strategy_weights.py` will penalise that strategy's weight on Monday — it'll drop toward 0.5 or so, which reduces its confidence in future research runs.
+- Conversely, if `ev_error` is *consistently zero-ish* across 10+ trades of a strategy, its weight stays near 1.0 (it's accurate) or moves above 1.0 (it's under-confident).
+
+**The system learns the gap between expected and realised EV per strategy.** That's the whole point of `bet_outcomes` and `era='post_ev_fix'`. This one trade, by itself, tells us nothing — but 10 of them across `probability_bias` is signal.
+
+#### Now run this
+
+```bash
+🟢 READ
+ssh hackathon-server "
+cd /home/hackathon/.openclaw/workspace
+echo '=== The row in bet_outcomes ==='
+sqlite3 data/calibration.db 'SELECT market_id, our_recommendation, market_resolution, estimated_ev, actual_pnl, ev_error, era, strategies FROM bet_outcomes WHERE market_id = \"Ic9p2lCd05\"'
+
+echo
+echo '=== All post_ev_fix rows, grouped by strategy ==='
+sqlite3 data/calibration.db 'SELECT strategies, COUNT(*), ROUND(AVG(ev_error), 2) as avg_err FROM bet_outcomes WHERE era = \"post_ev_fix\" AND ev_error IS NOT NULL GROUP BY strategies ORDER BY COUNT(*) DESC'
+"
+```
+
+The second query is what `compute_strategy_weights.py` does on Monday — groups by strategy, averages `ev_error`, and updates weights if the sample size ≥ 10. As of 2026-04-21 most strategies have <10 samples so weights stay at 1.0. That's the bottleneck — not the code, just data volume.
 
 ---
 
@@ -496,7 +677,7 @@ is honest accounting.
 
 ## 6. What You Now Know
 
-If you did the runs: you've seen the research counters update, walked a real trade's data through the state file, watched the rejection pattern in the trader log, and confirmed the filter deployment on sandbox. That's the whole pipeline, end-to-end, with your own eyes.
+If you did the runs: you've seen the research counters update, walked a real trade's data through the state file, watched the rejection pattern in the trader log, traced a genuine resolution into `bet_outcomes`, and confirmed the filter deployment on sandbox. That's the whole pipeline, end-to-end, with your own eyes.
 
 You don't need to memorize every function name. You need to know:
 - **Where data flows** (the system map)
@@ -507,4 +688,97 @@ Everything else is reference — lookable when you need it, not load-bearing in 
 
 ---
 
-*Written 2026-04-21. If the pipeline changes, this doc rots — check the last-modified date and compare to the actual cron output before trusting it.*
+## 7. Debug Worksheet — "why did this trade happen?"
+
+When you spot something weird in the book, fill this in before diving into code. Most of the time the worksheet itself points at the answer.
+
+Copy this into a scratch file or a chat and fill it in against the specific market.
+
+```markdown
+## Debug Worksheet — <market_id>
+
+### 1. Research record (if still on menu)
+🟢 READ
+$ cat market_research.json | python3 -c "
+import json,sys
+d=json.load(sys.stdin).get('latest',{})
+m=[r for r in d.get('recommendations',[]) if r.get('market_id')=='<market_id>']
+print(json.dumps(m[0] if m else {}, indent=2, default=str))
+"
+
+- [ ] Was it on the menu? Y/N
+- [ ] Which strategies fired?
+- [ ] What was the recommendation + confidence?
+- [ ] What was estimated_ev?
+- [ ] What was ai_status?
+- [ ] What position_class was stamped?
+
+### 2. Trader gate result
+🟢 READ
+Look at /tmp/trader.log around the relevant :20 run:
+$ ssh hackathon-server "tail -200 /tmp/trader.log | grep -A3 '<market_id>'"
+
+- [ ] Was it passed or rejected?
+- [ ] If rejected, which reason string? (see §2.5 trader table)
+- [ ] If passed, what was the Kelly sizing?
+
+### 3. State leg (if accepted)
+🟢 READ
+$ ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && python3 -c '
+import json
+s=json.load(open(\"manifold_bot/paper_trading_state.json\"))
+for mid,lgs in s[\"positions\"].items():
+    for l in lgs:
+        if l.get(\"market_id\")==\"<market_id>\":
+            print(json.dumps(l, indent=2, default=str))
+'"
+
+- [ ] What's the current status? (OPEN / WIN / LOSE / CLOSED_EARLY / STRANDED / ABANDONED)
+- [ ] entry_probability vs current_probability?
+- [ ] current_unrealised_pnl?
+- [ ] last_repriced_at — how fresh?
+- [ ] position_class — current, or obsolete 4-bucket value?
+
+### 4. Snapshot rows (P&L trajectory)
+🟢 READ
+$ ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && sqlite3 data/calibration.db \
+  'SELECT snapshot_at, current_probability, unrealised_pnl, api_error FROM position_snapshots WHERE market_id=\"<market_id>\" ORDER BY snapshot_at'"
+
+- [ ] How many snapshots?
+- [ ] P&L trend (up/down/flat)?
+- [ ] Any api_error=1 rows? (Phase 2.2 fetch failures)
+
+### 5. Pending proposals (if any)
+🟢 READ
+$ ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && cat pending_closes.json pending_abandons.json pending_swaps.json 2>/dev/null | python3 -c '
+import json,sys
+for line in sys.stdin:
+    pass  # simple scan; better: jq the files individually
+'"
+Better:
+$ ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && \
+  python3 -c 'import json; [print(p) for p in json.load(open(\"pending_closes.json\")) if p.get(\"market_id\") == \"<market_id>\"]' 2>/dev/null"
+
+- [ ] Any proposal live?
+- [ ] If expired/dismissed: why?
+
+### 6. Outcome row (if resolved/closed)
+🟢 READ
+$ ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && sqlite3 data/calibration.db \
+  'SELECT * FROM bet_outcomes WHERE market_id=\"<market_id>\" ORDER BY resolved_at'"
+
+- [ ] market_resolution?
+- [ ] actual_pnl vs estimated_ev → ev_error?
+- [ ] era (post_ev_fix / early_close / write_off / pre_ev_fix)?
+
+### 7. Conclusion
+- [ ] Which gate made this happen (or not happen)?
+- [ ] Is the observed behaviour correct per §2.5 of this doc?
+- [ ] If incorrect: is it a config issue, a classifier issue, or a real bug?
+```
+
+**When to use this**: any trade you don't immediately understand. Don't look at code first. The data in 1–6 usually tells the whole story; code only helps when the data contradicts §2.5.
+
+---
+
+*Written 2026-04-21. If the pipeline changes, this doc rots. Run §0.2 before each session to confirm you're in sync. If the decision-gate cheat sheet in §2.5 or the trade-walk details drift from current code, patch them — they're the highest-value part for a working operator.*
