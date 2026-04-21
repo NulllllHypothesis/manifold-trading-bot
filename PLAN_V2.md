@@ -834,17 +834,19 @@ This is the "if I could only do one thing at a time, what order?" list:
 9. ✅ **Legacy metadata backfill** (Phase 1.4) — SHIPPED (PR #17), sandbox apply pending host return
 10. ✅ **Position Management dashboard page** (Phase 2.5) — SHIPPED (PR #18)
 11. ✅ **Unverifiable + vanity-market filter** (reactive fix, out-of-band) — SHIPPED (PR #19 + #20). Hard block on "Will I... / Will my..." + compound gate for `other` + momentum + thin-bettor markets. Triggered by the CEIUnpQL26 incident on 2026-04-20.
-12. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
-13. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-14. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-15. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-16. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-17. **Polymarket integration** (Phase 4.1) — multiply training data
-18. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-19. **Dashboard API** (Phase 5.2) — real-time updates
-20. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-21. **Dashboard write surface** (Phase 5.3) — operator can act
-22. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+12. ✅ **Evaluator min-hold-period guard** (reactive fix, out-of-band) — SHIPPED (PR #21). `MIN_HOLD_HOURS=2.0` guard in `classify_position` prevents the rounding-artifact CLOSE on brand-new flat `long_or_uncertain` trades; uses youngest leg (not weighted avg) so multi-leg markets can't bypass via an old/large sibling. Triggered by the xkcd-about-AI close proposal incident on 2026-04-20.
+13. ✅ **SYSTEM_WALKTHROUGH.md operator doc** — SHIPPED at `docs/SYSTEM_WALKTHROUGH.md`. Study path for getting hands-on with the pipeline. Safe/unsafe command legend, version-drift checklist, decision-gate cheat sheet, four real trade walkthroughs (accepted / rejected pattern / closed-early / resolved), Phase 3 preview, operator-brain reference, debug worksheet template.
+14. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
+15. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+16. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+17. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+18. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+19. **Polymarket integration** (Phase 4.1) — multiply training data
+20. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+21. **Dashboard API** (Phase 5.2) — real-time updates
+22. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+23. **Dashboard write surface** (Phase 5.3) — operator can act
+24. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.
