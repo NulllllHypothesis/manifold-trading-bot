@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.strategies import TradingStrategies
-from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY
+from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY, MIN_ESTIMATED_EV_FLOOR
 from manifold_bot.strategies import _infer_market_category
 from automation.send_telegram import send_message as _tg
 
@@ -53,6 +53,7 @@ def _new_trader_counters() -> dict:
             "kelly_no_edge":        0,
             "size_too_small":       0,
             "market_unverifiable":  0,
+            "negative_ev":          0,      # estimated_ev ≤ MIN_ESTIMATED_EV_FLOOR
         },
         "passed_filter":            0,      # survived should_trade_market
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
@@ -448,6 +449,19 @@ class AutoTrader:
             print(f"  Vanity market profile (other + momentum-only + <3 bettors) — skipping")
             return "market_unverifiable"
 
+        # Negative-EV invariant: don't knowingly trade what the stat model
+        # expects to lose money on. Prefer estimated_ev_exec (honest stake-
+        # size EV), fall back to legacy estimated_ev. When BOTH are None
+        # the gate does not fire — missing-EV is different from negative-EV,
+        # and pre-EV-pipeline records should still be able to trade on
+        # confidence alone. See MIN_ESTIMATED_EV_FLOOR in config.py.
+        ev = recommendation.get('estimated_ev_exec')
+        if ev is None:
+            ev = recommendation.get('estimated_ev')
+        if ev is not None and ev <= MIN_ESTIMATED_EV_FLOOR:
+            print(f"  Negative EV: ${ev:+.2f} ≤ floor ${MIN_ESTIMATED_EV_FLOOR:+.2f} — skipping")
+            return "negative_ev"
+
         # Check confidence threshold
         if recommendation['confidence'] < self.min_confidence:
             print(f"  Confidence too low: {recommendation['confidence']*100:.0f}% < {self.min_confidence*100:.0f}%")
@@ -632,9 +646,16 @@ class AutoTrader:
         print(f"  Sizing: {sizing_method} → ${position_size:.2f}")
         return position_size
 
-    def execute_trade(self, recommendation: Dict) -> bool:
+    def execute_trade(self, recommendation: Dict, counters: Optional[Dict] = None) -> bool:
         """
-        Execute a trade based on recommendation
+        Execute a trade based on recommendation.
+
+        counters: optional trader_counters dict from the caller. When a live-
+        time guard (e.g. live-EV) blocks a trade that already passed the
+        pre-flight _trade_rejection_reason gate, execute_trade increments
+        the corresponding entry in `counters["rejected"]` so the accounting
+        reflects the real cause instead of showing up only as
+        `passed_filter - trades_executed`.
 
         Returns:
             bool: True if trade successful
@@ -706,6 +727,36 @@ class AutoTrader:
             estimated_ev = win_prob * payout_if_win - amount
         else:
             estimated_ev = None  # truly unknown — don't fake a value
+
+        # Live-EV invariant (same floor as the pre-flight gate in
+        # _trade_rejection_reason, but applied to the EV recomputed AFTER
+        # fetching the live market probability). Between `:00` research
+        # and `:20` trade the market can move: a recommendation that
+        # passed the pre-flight gate at +$0.40 EV may now have live EV
+        # below the floor. Without this check the trader would place a
+        # trade its own live computation says has negative expected
+        # value — violating the stated invariant.
+        #
+        # Skipped when estimated_ev is None (missing p_estimate + no
+        # legacy EV): unknown-EV remains allowed per the same principle
+        # as the pre-flight gate. Only known-negative is blocked.
+        if estimated_ev is not None and estimated_ev <= MIN_ESTIMATED_EV_FLOOR:
+            print(
+                f"  Live EV ${estimated_ev:+.2f} ≤ floor ${MIN_ESTIMATED_EV_FLOOR:+.2f} "
+                f"after fetching current prob ({current_prob:.3f}) — skipping"
+            )
+            # Attribute this skip to the same reason counter as the
+            # pre-flight gate. Without this the trader run would show it
+            # only as `passed_filter - trades_executed`, obscuring the
+            # cause. Caller passes `counters` from run_trading_cycle;
+            # None is tolerated so unit-test call sites don't have to
+            # synthesise a full counters dict.
+            if counters is not None:
+                counters.setdefault("rejected", {})
+                counters["rejected"]["negative_ev"] = (
+                    counters["rejected"].get("negative_ev", 0) + 1
+                )
+            return False
 
         # Place paper trade — estimated_ev now flows into the position record so
         # resolve_market() → _write_bet_outcome() can store it in bet_outcomes.
@@ -891,7 +942,7 @@ class AutoTrader:
                 continue
 
             print(f"\n{'─'*40}")
-            if self.execute_trade(rec):
+            if self.execute_trade(rec, counters=counters):
                 trades_executed += 1
 
         counters["trades_executed"] = trades_executed

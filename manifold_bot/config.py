@@ -124,3 +124,19 @@ MIN_HOLD_HOURS = 2.0
 # ABANDONED is terminal: profit = -amount booked, era='write_off' in bet_outcomes.
 STALE_GRACE_HOURS = 48       # creators regularly resolve 1-2 days late
 STALE_ABANDON_DAYS = 90      # 3 months past close with no resolution = dead
+
+# ── Trader EV gate (negative-expected-value invariant) ────────────────────────
+#
+# Trader rejects any recommendation whose execution-time EV is at or below
+# MIN_ESTIMATED_EV_FLOOR. Prefers `estimated_ev_exec` (real stake-size EV),
+# falls back to legacy `estimated_ev`. If BOTH are None the gate does NOT
+# fire — a missing EV is different from a negative one; we don't block
+# recs that predate the EV pipeline.
+#
+# Starting floor is 0.0: "do not knowingly trade negative expected value."
+# The EV model CAN be wrong, but letting the trader override its own
+# estimate muddies the learning loop — Phase 3's ev_error data becomes
+# harder to read when we deliberately kept trades the model said were bad.
+# Loosen toward -$0.25 later if/when enough ev_error samples show the
+# model is systematically too pessimistic.
+MIN_ESTIMATED_EV_FLOOR = 0.0
