@@ -174,6 +174,80 @@ class TestClassifyPosition(unittest.TestCase):
         self.assertEqual(action, 'HOLD')
         self.assertEqual(reason, 'awaiting_resolve')
 
+    def test_xkcd_reproducer_brand_new_long_with_flat_pnl_holds(self):
+        # Reviewer-agent-caught rounding artifact: a brand-new
+        # long_or_uncertain trade with flat P&L sits exactly at
+        # -LONG_HORIZON_PENALTY, and fractional time-decay pushes it
+        # just below the `<` cutoff. Without the min-hold guard, this
+        # produced a CLOSE proposal ~10 minutes after the :20 trader
+        # placed the trade (real case: xkcd-about-AI-2026, 2026-04-20).
+        # The too_new guard must intervene BEFORE the score check.
+        p = _pos(
+            unrealised=0.0,
+            days_ago=0.0001,   # literally just placed, < 1 minute
+            position_class='long_or_uncertain',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertIsNone(score)
+        self.assertEqual(reason, 'too_new')
+
+    def test_too_new_guard_blocks_even_deeply_negative_scores(self):
+        # A brand-new trade that would otherwise score -3 also gets
+        # held with too_new. We specifically choose to wait for one
+        # reprice cycle before trusting ANY score, even an extreme one,
+        # because a brand-new extreme score is almost certainly stamped
+        # at-entry data that the evaluator can't verify yet.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=0.02,     # ~29 minutes, well under 2h floor
+            position_class='short',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'HOLD')
+        self.assertEqual(reason, 'too_new')
+
+    def test_past_min_hold_a_losing_position_still_closes(self):
+        # Regression guard: once past the min-hold threshold, a
+        # genuinely bad trade must still be flagged for CLOSE.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=1,        # well past 2h
+            position_class='short',
+        )
+        action, score, reason = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+        self.assertLess(score, -0.5)
+
+    def test_min_hold_hours_parameter_override(self):
+        # Callers can tighten or loosen the floor. A test-harness
+        # setting min_hold_hours=0 disables the guard so pre-existing
+        # tests that exercise the score path with young positions keep
+        # working. Default value matches production config (2h).
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=0.02,
+            position_class='short',
+        )
+        # With guard on (default): held as too_new
+        action, _, reason = classify_position(p)
+        self.assertEqual(reason, 'too_new')
+        # With guard off: falls through to score-based decision
+        action, score, reason = classify_position(p, min_hold_hours=0.0)
+        self.assertEqual(action, 'CLOSE')
+
+    def test_min_hold_boundary_exact(self):
+        # Exactly at the boundary should NOT be too_new — the check is
+        # strict `<`. A trade at exactly 2.0h is eligible for scoring.
+        p = _pos(
+            unrealised=-3.0,
+            days_ago=2.0 / 24,   # exactly 2h
+            position_class='short',
+        )
+        action, _, reason = classify_position(p)
+        self.assertEqual(action, 'CLOSE')
+        self.assertNotEqual(reason, 'too_new')
+
 
 # ── run_evaluator integration ────────────────────────────────────────────────
 

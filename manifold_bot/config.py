@@ -98,6 +98,17 @@ LONG_HORIZON_PENALTY = 0.50
 # CLOSE proposal. -0.50 means "we're already down 50¢ net of time cost" —
 # tolerant of small unrealised losses, aggressive on persistent ones.
 CLOSE_SCORE_THRESHOLD = -0.50
+# MIN_HOLD_HOURS: minimum age before a position is eligible to be scored
+# against the threshold. Prevents a rounding-artifact pathology on brand-
+# new long_or_uncertain positions: at age 0.0d with pnl 0.0, the score is
+# exactly -LONG_HORIZON_PENALTY (-0.50), and a few minutes of time-decay
+# (0.005h * DAILY_DECAY_COST/24 ≈ 1e-5) pushes it fractionally below the
+# strict `<` cutoff. Evaluator would fire CLOSE on a trade the `:20`
+# trader just placed, undoing its decision 10 minutes later with no new
+# information. Two hours is a pragmatic floor: enough for at least one
+# Phase 2.2 :05 reprice cycle, short enough that genuinely bad trades
+# aren't held indefinitely.
+MIN_HOLD_HOURS = 2.0
 
 # ── Phase 2.4 — stale position detection (STRANDED / ABANDONED) ───────────────
 #

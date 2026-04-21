@@ -46,6 +46,7 @@ from manifold_bot.config import (
     DAILY_DECAY_COST,
     LONG_HORIZON_PENALTY,
     CLOSE_SCORE_THRESHOLD,
+    MIN_HOLD_HOURS,
 )
 from automation.send_telegram import send_telegram_message
 # Single source of truth for the 4-bucket → 3-bucket migration map. Importing
@@ -112,6 +113,7 @@ def classify_position(
     position: Dict,
     threshold: float = CLOSE_SCORE_THRESHOLD,
     stale_hours: float = REPRICE_STALE_HOURS,
+    min_hold_hours: float = MIN_HOLD_HOURS,
     _now=None,  # injectable for tests
 ) -> Tuple[str, Optional[float], str]:
     """
@@ -131,8 +133,14 @@ def classify_position(
          'stale_reprice'. Phase 2.2 preserves prior repricing fields on
          fetch failure, so this is the only way to distinguish "fresh data
          says close" from "stale data from a missed cycle says close".
-      4. score < threshold → CLOSE with reason summarising why.
-      5. Otherwise HOLD.
+      4. days_held < min_hold_hours → HOLD with reason 'too_new'. Prevents
+         the rounding-artifact pathology on brand-new long_or_uncertain
+         trades (flat pnl + long_horizon_penalty lands exactly on the
+         threshold, and fractional time-decay sneaks it below `<`).
+         Evaluator would otherwise propose CLOSE minutes after the :20
+         trader placed the trade, with no new information.
+      5. score < threshold → CLOSE with reason summarising why.
+      6. Otherwise HOLD.
     """
     if position.get('is_resolved_on_api'):
         return ('HOLD', None, 'awaiting_resolve')
@@ -146,6 +154,9 @@ def classify_position(
 
     if _is_reprice_stale(position.get('last_repriced_at'), stale_hours, _now=_now):
         return ('HOLD', None, 'stale_reprice')
+
+    if days_held * 24.0 < float(min_hold_hours):
+        return ('HOLD', None, 'too_new')
 
     score = position_score(unrealised, days_held, pclass)
     if score is None:
