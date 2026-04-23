@@ -779,6 +779,8 @@ class AutoTrader:
             resolvability=recommendation.get('resolvability'),
             position_class=recommendation.get('position_class'),
             close_time_ms=recommendation.get('close_time_ms'),
+            confidence=confidence,
+            ai_status=recommendation.get('ai_status'),
         )
 
         if success:

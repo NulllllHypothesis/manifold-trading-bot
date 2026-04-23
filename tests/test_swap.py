@@ -724,6 +724,7 @@ class TestClosePositionEarly(unittest.TestCase):
         trader.positions = {}
         trader.trade_history = []
         trader.performance_metrics = {}
+        trader.capital_epochs = []
         trader.state_file = tempfile.mktemp(suffix='.json')
 
         trade = {

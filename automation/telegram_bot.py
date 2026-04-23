@@ -139,7 +139,16 @@ def cmd_positions() -> str:
         direction = t.get("outcome", "?")
         amount    = t.get("amount", 0)
         entry_p   = t.get("entry_probability") or t.get("probability", 0)
-        conf      = t.get("entry_confidence") or t.get("confidence", 0)
+        # Blended stat+AI confidence is what the gate actually saw. Fall back to
+        # the legacy entry_confidence (which is ai_confidence and is 0 when AI
+        # didn't vote) only for rows written before the confidence field existed.
+        conf = t.get("confidence")
+        if conf is None:
+            conf = t.get("entry_confidence") or 0
+
+        # ai_status at entry — lets the reader tell "AI didn't vote" apart from
+        # "AI voted with 0% confidence". Older legs lack this field.
+        ai_status = t.get("ai_status")
 
         # Prefer stored question, fall back to research lookup, then market ID
         raw_title = t.get("question") or _title_lookup.get(market_id) or market_id
@@ -147,7 +156,10 @@ def cmd_positions() -> str:
 
         direction_symbol = "🟢" if direction == "YES" else "🔴"
         msg += f"{i}. {direction_symbol} *{direction}* — {question}\n"
-        msg += f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%\n"
+        line = f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%"
+        if ai_status:
+            line += f" · AI {ai_status}"
+        msg += line + "\n"
 
     msg += f"\n_Updated {datetime.now().strftime('%H:%M UTC')}_"
     return msg

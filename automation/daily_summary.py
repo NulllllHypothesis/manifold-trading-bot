@@ -148,13 +148,23 @@ class DailySummary:
             if trade_time.startswith(today_str):
                 today_trades.append(trade)
 
+        # Effective baseline honours capital epochs — if a deliberate top-up was
+        # recorded, profit is measured from that top-up, not from INITIAL_BALANCE.
+        capital_epochs = state.get('capital_epochs', [])
+        if capital_epochs:
+            baseline = float(capital_epochs[-1].get('topup_to', INITIAL_BALANCE))
+        else:
+            baseline = float(INITIAL_BALANCE)
+
+        balance = state.get('balance', 0)
+
         # Calculate metrics
         metrics = {
             'date': today_str,
             'total_trades_today': len(today_trades),
-            'balance': state.get('balance', 0),
-            'initial_balance': INITIAL_BALANCE,
-            'total_profit': state.get('balance', 0) - INITIAL_BALANCE
+            'balance': balance,
+            'initial_balance': baseline,
+            'total_profit': balance - baseline,
         }
 
         # Today's profit
@@ -254,7 +264,9 @@ class DailySummary:
         # Performance
         summary += "💰 *PERFORMANCE*\n"
         summary += f"Balance: ${metrics['balance']:.2f}\n"
-        summary += f"Total Profit: ${metrics['total_profit']:+.2f} ({metrics['total_profit']/10:+.1f}%)\n"
+        baseline = metrics.get('initial_balance') or INITIAL_BALANCE
+        pct = (metrics['total_profit'] / baseline * 100) if baseline else 0.0
+        summary += f"Total Profit: ${metrics['total_profit']:+.2f} ({pct:+.1f}%)\n"
         summary += f"Today's Profit: ${metrics['today_profit']:+.2f}\n"
 
         if metrics['today_wins'] + metrics['today_losses'] > 0:
