@@ -44,6 +44,13 @@ PENDING_SWAPS_FILE = WORKSPACE / "pending_swaps.json"
 MAX_POSITIONS = 10       # must match AutoTrader.max_positions
 SWAP_EXPIRY_HOURS = 4    # proposals expire after this many hours
 
+# Dismissal cooldown — once the operator dismisses a swap, suppress further
+# swap proposals targeting the SAME close_market_id for this many hours. The
+# replacement market (open target) can change between runs, but from the
+# operator's perspective the annoying thing is the same losing position being
+# poked at every hour. Cooldown on close_market_id matches that intent.
+DISMISS_COOLDOWN_HOURS = 48
+
 # Op5 (2026-04-11): minimum EV cushion beyond the realised loss that a swap
 # must clear before we're willing to execute it.
 #
@@ -273,6 +280,30 @@ def has_active_pending_swaps() -> bool:
     return False
 
 
+def recently_dismissed_close_ids() -> set:
+    """Return close_market_ids dismissed within DISMISS_COOLDOWN_HOURS.
+
+    Suppresses re-proposing a swap for a position the operator already said
+    "no" to. Falls back to proposed_at if dismissed_at is missing (older rows
+    from before the execute_swap.py 'dismissed_at' field existed)."""
+    swaps = load_pending_swaps()
+    cutoff = datetime.now() - timedelta(hours=DISMISS_COOLDOWN_HOURS)
+    dismissed = set()
+    for s in swaps:
+        if s.get('status') != 'dismissed':
+            continue
+        ts_raw = s.get('dismissed_at') or s.get('proposed_at', '2000-01-01')
+        try:
+            dismissed_at = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        if dismissed_at > cutoff:
+            close_id = s.get('close_market_id')
+            if close_id:
+                dismissed.add(close_id)
+    return dismissed
+
+
 def build_swap_entry(swap_id: int, weakest: Dict, best_rec: Dict) -> Dict:
     """Build a single swap proposal dict."""
     return {
@@ -367,6 +398,23 @@ def run_swap_check() -> int:
 
     if not weak_positions:
         print("All positions are profitable or neutral — no swap recommended.")
+        return 0
+
+    # Suppress positions the operator recently dismissed a swap for. Without
+    # this filter, dismissing swap #N at 10:15 leads to swap #N+1 for the
+    # exact same close_market_id at 11:15 — just a different open target.
+    cooldown_ids = recently_dismissed_close_ids()
+    if cooldown_ids:
+        before = len(weak_positions)
+        weak_positions = [w for w in weak_positions if w['market_id'] not in cooldown_ids]
+        skipped = before - len(weak_positions)
+        if skipped:
+            print(
+                f"  Skipping {skipped} position(s) in {DISMISS_COOLDOWN_HOURS}h "
+                f"post-dismissal cooldown."
+            )
+    if not weak_positions:
+        print("All losing positions are in post-dismissal cooldown — no swap proposed.")
         return 0
 
     print(f"Found {len(weak_positions)} losing position(s). Pairing with opportunities...")

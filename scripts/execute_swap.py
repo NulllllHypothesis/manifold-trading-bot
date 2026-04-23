@@ -216,7 +216,11 @@ def main() -> int:
     # ── Dismiss path ──────────────────────────────────────────────────────────
     if args.dismiss:
         swap['status'] = 'dismissed'
-        swap['executed_at'] = datetime.now().isoformat()
+        # Both fields for backwards compat: dismissed_at is what the cooldown
+        # reader in position_swap_checker.recently_dismissed_close_ids keys off.
+        now_iso = datetime.now().isoformat()
+        swap['dismissed_at'] = now_iso
+        swap['executed_at'] = now_iso
         save_swaps(swaps)
         msg = (
             f"🚫 Swap #{swap['id']} dismissed.\n"
