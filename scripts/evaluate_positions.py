@@ -67,6 +67,12 @@ _MEDIUM_TERM_DAYS = 30
 # Match the 4h expiry used by position_swap_checker for consistency.
 CLOSE_EXPIRY_HOURS = 4
 
+# Dismissal cooldown — once the operator dismisses a close proposal, suppress
+# any further proposal on that market for this many hours. Without it the
+# evaluator re-generates the same proposal every hour because statistical
+# scores drift ~0 between runs, spamming Telegram.
+DISMISS_COOLDOWN_HOURS = 48
+
 # A repricing snapshot older than this is stale. Phase 2.2 runs hourly at
 # :05, so any live position should be ≤1h stale in normal operation; 2h is
 # one missed cycle plus slack. If Phase 2.2 has missed multiple cycles we'd
@@ -540,23 +546,44 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 
 
 def _existing_pending_ids(pending: List[Dict]) -> set:
-    """Market IDs that already have a non-expired, non-dismissed close proposal.
+    """Market IDs that should be suppressed from new close proposals.
 
-    Matches the expiry/status semantics of position_swap_checker:pending_swaps
-    so we don't spam Telegram with the same CLOSE proposal every hour.
+    Two reasons a market is suppressed:
+
+      1. It has an active 'pending' proposal (within CLOSE_EXPIRY_HOURS) —
+         re-proposing would duplicate an open ask to the operator.
+      2. It has a 'dismissed' proposal within DISMISS_COOLDOWN_HOURS of its
+         dismissal — the operator already said "no" and nothing material has
+         changed in an hour; re-pinging them is noise. Cooldown expires so
+         genuinely-new situations (big price move, close-time nearing) still
+         get another proposal once it elapses.
     """
-    cutoff = datetime.now() - timedelta(hours=CLOSE_EXPIRY_HOURS)
-    active = set()
+    now = datetime.now()
+    pending_cutoff  = now - timedelta(hours=CLOSE_EXPIRY_HOURS)
+    dismiss_cutoff  = now - timedelta(hours=DISMISS_COOLDOWN_HOURS)
+    suppressed = set()
     for p in pending:
-        if p.get('status') != 'pending':
+        status = p.get('status')
+        market_id = p.get('market_id')
+        if not market_id:
             continue
-        try:
-            proposed_at = datetime.fromisoformat(p.get('proposed_at', '2000-01-01'))
-        except ValueError:
-            continue
-        if proposed_at > cutoff:
-            active.add(p.get('market_id'))
-    return active
+        if status == 'pending':
+            try:
+                proposed_at = datetime.fromisoformat(p.get('proposed_at', '2000-01-01'))
+            except ValueError:
+                continue
+            if proposed_at > pending_cutoff:
+                suppressed.add(market_id)
+        elif status == 'dismissed':
+            # Fall back to proposed_at if dismissed_at is missing (older rows).
+            ts_raw = p.get('dismissed_at') or p.get('proposed_at', '2000-01-01')
+            try:
+                dismissed_at = datetime.fromisoformat(ts_raw)
+            except ValueError:
+                continue
+            if dismissed_at > dismiss_cutoff:
+                suppressed.add(market_id)
+    return suppressed
 
 
 def _auto_expire_old_closes(pending: List[Dict]) -> bool:
