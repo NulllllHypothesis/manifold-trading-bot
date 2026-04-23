@@ -161,11 +161,18 @@ class PaperTrader:
         self.positions = {}  # market_id -> position info
         self.trade_history = []
         self.performance_metrics = {}
-        
+        # List of capital-reset events. Each entry:
+        #   {"started_at": iso8601, "topup_from": float, "topup_to": float, "note": str}
+        # Used by daily_summary.py to compute the effective baseline — without
+        # this, "Total Profit" would compare balance against the original
+        # INITIAL_BALANCE and show nonsense like -$922 when a deliberate reset
+        # was made. Persisted across save_state / load_state.
+        self.capital_epochs: List[Dict] = []
+
         # Load/save state
         self.state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_trading_state.json")
         self.load_state()
-    
+
     def load_state(self):
         """Load trading state from file"""
         try:
@@ -174,20 +181,45 @@ class PaperTrader:
                 self.balance = state.get('balance', self.initial_balance)
                 self.positions = state.get('positions', {})
                 self.trade_history = state.get('trade_history', [])
+                self.capital_epochs = state.get('capital_epochs', [])
                 print(f"Loaded state: Balance=${self.balance:.2f}, {len(self.positions)} positions")
         except FileNotFoundError:
             print("No saved state found, starting fresh")
-    
+
     def save_state(self):
         """Save trading state to file"""
         state = {
             'balance': self.balance,
             'positions': self.positions,
             'trade_history': self.trade_history,
+            'capital_epochs': self.capital_epochs,
             'saved_at': datetime.now().isoformat()
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
+
+    def effective_baseline(self) -> float:
+        """Return the most recent capital-reset top-up value, else INITIAL_BALANCE.
+
+        Used by daily_summary (and any other "total profit" calculation) to
+        avoid comparing current balance against a baseline that was superseded
+        by a deliberate capital reset.
+        """
+        return self.baseline_from_state(
+            {"capital_epochs": self.capital_epochs},
+            default=self.initial_balance,
+        )
+
+    @staticmethod
+    def baseline_from_state(state: Dict, default: float = INITIAL_BALANCE) -> float:
+        """Compute the effective baseline from a state dict (or anything with
+        a ``capital_epochs`` key). Lets callers that already loaded state
+        avoid a second disk read + PaperTrader instantiation, while keeping
+        the baseline math in one place."""
+        epochs = (state or {}).get("capital_epochs") or []
+        if epochs:
+            return float(epochs[-1].get("topup_to", default))
+        return float(default)
     
     def place_paper_bet(self, market_id: str, outcome: str,
                        amount: float, probability: float,
@@ -200,7 +232,9 @@ class PaperTrader:
                        term: Optional[str] = None,
                        resolvability: Optional[str] = None,
                        position_class: Optional[str] = None,
-                       close_time_ms: Optional[int] = None) -> bool:
+                       close_time_ms: Optional[int] = None,
+                       confidence: Optional[float] = None,
+                       ai_status: Optional[str] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
@@ -265,6 +299,11 @@ class PaperTrader:
             # Entry snapshot — used by position_swap_checker to measure drift
             'entry_probability': probability,
             'entry_confidence': ai_confidence,
+            # Blended stat+AI confidence that gated the trade. Distinct from
+            # ai_confidence (0 when AI didn't vote) and entry_confidence (legacy
+            # alias for ai_confidence). Telegram portfolio reads this so "conf X%"
+            # reflects the number the gate actually saw.
+            'confidence': confidence,
             'payout_if_win': payout,
             'profit_if_win': profit_if_win,
             'profit_if_lose': profit_if_lose,
@@ -273,6 +312,11 @@ class PaperTrader:
             'estimated_ev': estimated_ev,
             'ai_confidence': ai_confidence,
             'ai_estimated_probability': ai_estimated_probability,
+            # ai_status at entry: not_run / no_result / skip / agree / disagree.
+            # Kept so Telegram portfolio can distinguish "AI didn't vote" from
+            # "AI confidence was 0", and post-hoc audits can tell which trades
+            # the AI actually weighed in on.
+            'ai_status': ai_status,
             'strategies': strategies,
             # Category and question stored for exposure-cap counting and daily summary
             'category': category or 'other',

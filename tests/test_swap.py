@@ -724,6 +724,7 @@ class TestClosePositionEarly(unittest.TestCase):
         trader.positions = {}
         trader.trade_history = []
         trader.performance_metrics = {}
+        trader.capital_epochs = []
         trader.state_file = tempfile.mktemp(suffix='.json')
 
         trade = {
@@ -1073,6 +1074,46 @@ class TestExecuteSwapZeroKelly(unittest.TestCase):
         self.assertTrue(result)
         trader.close_position_early.assert_called_once()
         trader.place_paper_bet.assert_called_once()
+
+    def test_swap_replacement_leg_threads_reporting_metadata(self):
+        """PR #23 follow-up: swap-opened legs must carry the same context
+        auto-trader trades do — confidence, ai_status, ai_estimated_probability,
+        category, question, term, resolvability, position_class, close_time_ms.
+        Without this, swap replacements show 'conf 0%' with no AI tag in /positions."""
+        from scripts.execute_swap import execute_swap
+
+        trader = self._make_trader(balance=200.0)
+        trader.close_position_early.return_value = -10.0
+        trader.place_paper_bet.return_value = True
+
+        swap = self._make_swap(ai_prob=0.70, outcome='YES', mkt_prob=0.30)
+        # Load the fields execute_swap is supposed to forward
+        swap['open_recommendation'].update({
+            'ai_confidence': 0.82,
+            'ai_status': 'agree',
+            'category': 'politics',
+            'question': 'Will Foo happen?',
+            'term': 'short',
+            'resolvability': 'high',
+            'position_class': 'short',
+            'close_time_ms': 1_750_000_000_000,
+        })
+
+        with patch('scripts.execute_swap.api_client', self._api_returning(0.30)):
+            result = execute_swap(swap, trader)
+
+        self.assertTrue(result)
+        kwargs = trader.place_paper_bet.call_args.kwargs
+        self.assertEqual(kwargs['confidence'], 0.70)           # from open_recommendation.confidence
+        self.assertEqual(kwargs['ai_confidence'], 0.82)
+        self.assertEqual(kwargs['ai_status'], 'agree')
+        self.assertEqual(kwargs['ai_estimated_probability'], 0.70)
+        self.assertEqual(kwargs['category'], 'politics')
+        self.assertEqual(kwargs['question'], 'Will Foo happen?')
+        self.assertEqual(kwargs['term'], 'short')
+        self.assertEqual(kwargs['resolvability'], 'high')
+        self.assertEqual(kwargs['position_class'], 'short')
+        self.assertEqual(kwargs['close_time_ms'], 1_750_000_000_000)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

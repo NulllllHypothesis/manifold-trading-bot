@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.config import INITIAL_BALANCE
 from manifold_bot.manifold_api import api_client
+from manifold_bot.paper_trader import PaperTrader
 from automation.send_telegram import send_message
 
 # ── File paths ─────────────────────────────────────────────────────────────────
@@ -63,8 +64,12 @@ def cmd_portfolio() -> str:
         return "No trading state found yet — bot hasn't run."
 
     balance = state.get("balance", 0)
-    total_pnl = balance - INITIAL_BALANCE
-    pnl_pct = (total_pnl / INITIAL_BALANCE) * 100
+    # Honour capital_epochs so P&L reads against the latest deliberate
+    # top-up baseline, not the hard-coded INITIAL_BALANCE. Shared helper
+    # with daily_summary so both surfaces agree.
+    baseline = PaperTrader.baseline_from_state(state, default=INITIAL_BALANCE)
+    total_pnl = balance - baseline
+    pnl_pct = (total_pnl / baseline) * 100 if baseline else 0.0
 
     history = state.get("trade_history", [])
     closed = [t for t in history if t.get("status") in ("WIN", "LOSE", "CLOSED_EARLY")]
@@ -139,7 +144,16 @@ def cmd_positions() -> str:
         direction = t.get("outcome", "?")
         amount    = t.get("amount", 0)
         entry_p   = t.get("entry_probability") or t.get("probability", 0)
-        conf      = t.get("entry_confidence") or t.get("confidence", 0)
+        # Blended stat+AI confidence is what the gate actually saw. Fall back to
+        # the legacy entry_confidence (which is ai_confidence and is 0 when AI
+        # didn't vote) only for rows written before the confidence field existed.
+        conf = t.get("confidence")
+        if conf is None:
+            conf = t.get("entry_confidence") or 0
+
+        # ai_status at entry — lets the reader tell "AI didn't vote" apart from
+        # "AI voted with 0% confidence". Older legs lack this field.
+        ai_status = t.get("ai_status")
 
         # Prefer stored question, fall back to research lookup, then market ID
         raw_title = t.get("question") or _title_lookup.get(market_id) or market_id
@@ -147,7 +161,10 @@ def cmd_positions() -> str:
 
         direction_symbol = "🟢" if direction == "YES" else "🔴"
         msg += f"{i}. {direction_symbol} *{direction}* — {question}\n"
-        msg += f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%\n"
+        line = f"   ${amount:.0f} at {entry_p*100:.0f}% | conf {conf*100:.0f}%"
+        if ai_status:
+            line += f" · AI {ai_status}"
+        msg += line + "\n"
 
     msg += f"\n_Updated {datetime.now().strftime('%H:%M UTC')}_"
     return msg
