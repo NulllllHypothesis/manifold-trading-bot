@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.config import INITIAL_BALANCE
 from manifold_bot.manifold_api import api_client
+from manifold_bot.paper_trader import PaperTrader
 from automation.send_telegram import send_message
 
 # ── File paths ─────────────────────────────────────────────────────────────────
@@ -63,8 +64,12 @@ def cmd_portfolio() -> str:
         return "No trading state found yet — bot hasn't run."
 
     balance = state.get("balance", 0)
-    total_pnl = balance - INITIAL_BALANCE
-    pnl_pct = (total_pnl / INITIAL_BALANCE) * 100
+    # Honour capital_epochs so P&L reads against the latest deliberate
+    # top-up baseline, not the hard-coded INITIAL_BALANCE. Shared helper
+    # with daily_summary so both surfaces agree.
+    baseline = PaperTrader.baseline_from_state(state, default=INITIAL_BALANCE)
+    total_pnl = balance - baseline
+    pnl_pct = (total_pnl / baseline) * 100 if baseline else 0.0
 
     history = state.get("trade_history", [])
     closed = [t for t in history if t.get("status") in ("WIN", "LOSE", "CLOSED_EARLY")]

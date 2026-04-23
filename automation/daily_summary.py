@@ -150,12 +150,9 @@ class DailySummary:
 
         # Effective baseline honours capital epochs — if a deliberate top-up was
         # recorded, profit is measured from that top-up, not from INITIAL_BALANCE.
-        capital_epochs = state.get('capital_epochs', [])
-        if capital_epochs:
-            baseline = float(capital_epochs[-1].get('topup_to', INITIAL_BALANCE))
-        else:
-            baseline = float(INITIAL_BALANCE)
-
+        # Single source of truth: PaperTrader.baseline_from_state (also used by
+        # telegram_bot /portfolio).
+        baseline = PaperTrader.baseline_from_state(state, default=INITIAL_BALANCE)
         balance = state.get('balance', 0)
 
         # Calculate metrics

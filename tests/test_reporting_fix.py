@@ -212,6 +212,68 @@ class TestDailySummaryBaseline(unittest.TestCase):
         self.assertEqual(metrics["total_profit"], 1050.0 - INITIAL_BALANCE)
 
 
+class TestBaselineFromState(unittest.TestCase):
+    """PaperTrader.baseline_from_state is the single helper both
+    daily_summary and telegram_bot /portfolio call."""
+
+    def test_empty_state_returns_default(self):
+        self.assertEqual(
+            PaperTrader.baseline_from_state({}, default=1000.0), 1000.0
+        )
+
+    def test_latest_epoch_wins(self):
+        state = {"capital_epochs": [
+            {"topup_to": 100},
+            {"topup_to": 250},
+        ]}
+        self.assertEqual(
+            PaperTrader.baseline_from_state(state, default=1000.0), 250.0
+        )
+
+    def test_none_state_returns_default(self):
+        self.assertEqual(
+            PaperTrader.baseline_from_state(None, default=1000.0), 1000.0
+        )
+
+
+class TestPortfolioTelegram(unittest.TestCase):
+    """cmd_portfolio P&L must be measured against effective baseline."""
+
+    def test_portfolio_uses_effective_baseline(self):
+        from automation import telegram_bot
+
+        state = {
+            "balance": 82.19,
+            "capital_epochs": [{"topup_to": 100.00}],
+            "positions": {},
+            "trade_history": [],
+        }
+        with patch.object(telegram_bot, "_load_state", return_value=state):
+            msg = telegram_bot.cmd_portfolio()
+
+        # Effective P&L: $82.19 - $100 = -$17.81 (-17.8%)
+        self.assertIn("$-17.81", msg)
+        self.assertIn("-17.8%", msg)
+        # Must not show the old broken computation
+        self.assertNotIn("-917.81", msg)
+        self.assertNotIn("-91.8%", msg)
+
+    def test_portfolio_falls_back_to_initial_balance(self):
+        from automation import telegram_bot
+
+        state = {
+            "balance": 1050.0,
+            "positions": {},
+            "trade_history": [],
+        }
+        with patch.object(telegram_bot, "_load_state", return_value=state):
+            msg = telegram_bot.cmd_portfolio()
+
+        # $1050 - $1000 = +$50 (+5.0%)
+        self.assertIn("+50.00", msg)
+        self.assertIn("+5.0%", msg)
+
+
 class TestPositionsTelegram(unittest.TestCase):
     """cmd_positions must prefer blended confidence and render AI status tag."""
 

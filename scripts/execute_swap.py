@@ -165,7 +165,16 @@ def execute_swap(swap: dict, trader: PaperTrader) -> bool:
         probability=current_open_prob,
         estimated_ev=estimated_ev,
         ai_confidence=ai_confidence,
+        ai_estimated_probability=ai_estimated_prob,
         strategies=strategies,
+        category=open_rec.get('category'),
+        question=open_rec.get('question'),
+        term=open_rec.get('term'),
+        resolvability=open_rec.get('resolvability'),
+        position_class=open_rec.get('position_class'),
+        close_time_ms=open_rec.get('close_time_ms'),
+        confidence=confidence,
+        ai_status=open_rec.get('ai_status'),
     )
 
     if not success:

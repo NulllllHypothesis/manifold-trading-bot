@@ -205,9 +205,21 @@ class PaperTrader:
         avoid comparing current balance against a baseline that was superseded
         by a deliberate capital reset.
         """
-        if self.capital_epochs:
-            return float(self.capital_epochs[-1].get('topup_to', self.initial_balance))
-        return float(self.initial_balance)
+        return self.baseline_from_state(
+            {"capital_epochs": self.capital_epochs},
+            default=self.initial_balance,
+        )
+
+    @staticmethod
+    def baseline_from_state(state: Dict, default: float = INITIAL_BALANCE) -> float:
+        """Compute the effective baseline from a state dict (or anything with
+        a ``capital_epochs`` key). Lets callers that already loaded state
+        avoid a second disk read + PaperTrader instantiation, while keeping
+        the baseline math in one place."""
+        epochs = (state or {}).get("capital_epochs") or []
+        if epochs:
+            return float(epochs[-1].get("topup_to", default))
+        return float(default)
     
     def place_paper_bet(self, market_id: str, outcome: str,
                        amount: float, probability: float,
