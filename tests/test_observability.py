@@ -1054,6 +1054,90 @@ class TestStatDerivedProbability(unittest.TestCase):
         self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='YES', current_prob=-0.1))
 
 
+class TestComputeRecEv(unittest.TestCase):
+    """Research-side EV computation now flows through the same stat-derived
+    probability helper as the trader. Locks in two regressions:
+      1. Stat-only recs no longer get None EV (the research-layer hole the
+         reviewer flagged on PR #26 — pre-flight negative_ev gate and
+         cross-market EV ranking were blind to stat-only recs).
+      2. AI estimate still wins when present.
+    """
+
+    def test_stat_only_rec_now_has_non_none_ev(self):
+        """Pre-fix: ai_p missing → estimated_ev None → gate blind, ranking 0.
+        Post-fix: stat fallback fills in honest EV."""
+        from automation.auto_research import _compute_rec_ev
+        rec = {
+            'recommendation': 'NO',
+            'confidence':     0.865,
+            'probability':    0.524,
+            # no ai_estimated_probability
+        }
+        ev_ref, ev_exec = _compute_rec_ev(rec, ev_ref_stake=25.0, ev_exec_stake=5.0)
+        self.assertIsNotNone(ev_ref)
+        self.assertIsNotNone(ev_exec)
+        # ev_exec is at the executable stake, ev_ref at the reference stake.
+        # Their ratio equals the stake ratio (5/25 = 0.2).
+        self.assertAlmostEqual(ev_exec / ev_ref, 0.2, places=4)
+
+    def test_ai_probability_takes_precedence_over_stat_fallback(self):
+        """When AI provided a probability, the fallback must not engage."""
+        from automation.auto_research import _compute_rec_ev
+        rec_ai = {
+            'recommendation': 'YES',
+            'confidence':     0.65,
+            'probability':    0.50,
+            'ai_estimated_probability': 0.80,
+        }
+        rec_stat_only = dict(rec_ai)
+        rec_stat_only.pop('ai_estimated_probability')
+
+        ev_ai_ref, _   = _compute_rec_ev(rec_ai,        25.0, 5.0)
+        ev_stat_ref, _ = _compute_rec_ev(rec_stat_only, 25.0, 5.0)
+
+        # AI claims 0.80 win prob; stat fallback derives a far smaller edge
+        # (current_prob + bounded shrinkage). Their EVs must differ, and
+        # AI's bigger claimed edge produces the larger EV.
+        self.assertNotAlmostEqual(ev_ai_ref, ev_stat_ref, places=3)
+        self.assertGreater(ev_ai_ref, ev_stat_ref)
+
+    def test_phantom_ev_regression_research_side(self):
+        """The 4-23 crypto trade (conf=0.865 NO @ 52.4%) used to log
+        estimated_ev=None at research time → trader couldn't reject pre-flight
+        on negative EV. Post-fix the research layer surfaces honest stat-only
+        EV, well below any phantom value the old execution-time path emitted."""
+        from automation.auto_research import _compute_rec_ev
+        rec = {
+            'recommendation': 'NO',
+            'confidence':     0.865,
+            'probability':    0.524,
+        }
+        _, ev_exec = _compute_rec_ev(rec, ev_ref_stake=25.0, ev_exec_stake=5.0)
+        self.assertLess(ev_exec, 2.0,
+                        f"stat-only EV must not exceed ~$2 on a coin-flip "
+                        f"market; got {ev_exec}")
+
+    def test_invalid_direction_returns_none_pair(self):
+        from automation.auto_research import _compute_rec_ev
+        ev_ref, ev_exec = _compute_rec_ev(
+            {'recommendation': 'SKIP', 'confidence': 0.7, 'probability': 0.5},
+            25.0, 5.0,
+        )
+        self.assertIsNone(ev_ref)
+        self.assertIsNone(ev_exec)
+
+    def test_missing_confidence_returns_none_pair(self):
+        """Without confidence the stat-derived helper returns None — EV
+        cannot be computed and both fields stay None."""
+        from automation.auto_research import _compute_rec_ev
+        ev_ref, ev_exec = _compute_rec_ev(
+            {'recommendation': 'YES', 'probability': 0.5},  # no confidence
+            25.0, 5.0,
+        )
+        self.assertIsNone(ev_ref)
+        self.assertIsNone(ev_exec)
+
+
 class TestAiAnalysisCache(unittest.TestCase):
     """
     AI analyze-once cache (Phase 1.3): reuse prior AI results when the market
