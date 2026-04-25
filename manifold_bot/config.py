@@ -140,3 +140,24 @@ STALE_ABANDON_DAYS = 90      # 3 months past close with no resolution = dead
 # Loosen toward -$0.25 later if/when enough ev_error samples show the
 # model is systematically too pessimistic.
 MIN_ESTIMATED_EV_FLOOR = 0.0
+
+# When AI didn't supply ai_estimated_probability, the trader has to derive a
+# probability estimate from the bot's own confidence to compute EV. Confidence
+# is NOT a calibrated direction-correctness probability — it's a hand-picked
+# strategy-level base score (0.65 for prob_direction, 0.68 for mean_reversion,
+# etc.) that gets scaled by strategy weights. Treating it as P(direction wins)
+# directly (as the original implementation did) overstates edge dramatically
+# and produces phantom positive EV on coin-flip markets.
+#
+# The corrected estimate is current_prob + bounded edge in the direction's
+# favor, where the edge is shrunk by this factor:
+#
+#   edge = (confidence - 0.5) * STAT_PROB_EDGE_SHRINKAGE
+#   p_yes = current_prob + edge   (or - edge for direction='NO')
+#
+# At STAT_PROB_EDGE_SHRINKAGE = 0.3, max effective edge at confidence=0.95 is
+# 0.135pp from current_prob — small enough to keep EV honest, large enough
+# that real signals still produce non-zero EV for the calibration loop.
+# Tighten toward 0.2 if Phase 3 ev_error data shows the model is still
+# overestimating; loosen toward 0.5 if it's too pessimistic.
+STAT_PROB_EDGE_SHRINKAGE = 0.3

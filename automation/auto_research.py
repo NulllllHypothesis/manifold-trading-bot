@@ -91,6 +91,73 @@ def _new_research_counters() -> dict:
     }
 
 
+def _compute_rec_ev(rec: dict, ev_ref_stake: float, ev_exec_stake: float) -> tuple:
+    """Return (estimated_ev_ref, estimated_ev_exec) for one recommendation.
+
+    Probability source priority:
+      1. ai_estimated_probability when present (AI saw the market and gave a P).
+      2. Stat-derived fallback: current_prob anchored, bounded edge from
+         confidence — same helper auto_trader.execute_trade uses at execution.
+
+    Without (2) stat-only recommendations had estimated_ev=None, which meant:
+      - the pre-flight negative_ev gate in auto_trader couldn't see honest
+        stat-only EV (the gate is silent on None)
+      - cross-market EV ranking treated stat-only recs as 0.0 EV
+    Both effects masked the bug PR #26 was fixing at execution time. This
+    keeps the two layers using the same probability math.
+
+    Returns (None, None) when no usable probability source exists OR when
+    direction is not 'YES'/'NO'.
+    """
+    # Lazy import: pulls the trader-side helper. Module-top import would
+    # create an automation-internal cross-import that, while not strictly
+    # cyclic today, is a footgun if either module ever needs the other at
+    # load time. Keep the dependency one-directional and explicit.
+    from automation.auto_trader import _stat_derived_probability
+
+    direction = rec.get('recommendation')
+    if direction not in ('YES', 'NO'):
+        return (None, None)
+
+    # Match the trader-side _stat_derived_probability validation exactly:
+    # reject None / non-numeric / out-of-range. The earlier clamp-then-divide
+    # version turned probability=0.0 into 0.01 → payout=1/0.01=100x → phantom
+    # +$150 EV on a "this never happens" market, and probability=None or
+    # probability='0.5' (string) raised TypeError that swallowed the whole
+    # research cycle via the outer try/except. Same source of truth as the
+    # trader; same rejection criteria.
+    raw_p = rec.get('probability')
+    if not isinstance(raw_p, (int, float)) or not 0 < raw_p < 1:
+        return (None, None)
+    mkt_p = float(raw_p)
+    ai_p = rec.get('ai_estimated_probability')
+
+    if ai_p is not None:
+        p_yes = float(ai_p)
+    else:
+        p_yes = _stat_derived_probability(
+            confidence=rec.get('confidence'),
+            recommendation_direction=direction,
+            current_prob=mkt_p,
+        )
+
+    if p_yes is None:
+        return (None, None)
+
+    if direction == 'YES':
+        win_p = p_yes
+        payout_per_dollar = 1.0 / mkt_p
+    else:
+        win_p = 1.0 - p_yes
+        payout_per_dollar = 1.0 / (1.0 - mkt_p)
+
+    ev_per_dollar = win_p * payout_per_dollar - 1.0
+    return (
+        round(ev_ref_stake * ev_per_dollar, 4),
+        round(ev_exec_stake * ev_per_dollar, 4),
+    )
+
+
 def _finalize_research_counters(counters: dict, recommendations: list) -> None:
     """
     Compute the 'final_*' breakdowns from the output recommendation list.
@@ -1136,27 +1203,10 @@ class MarketResearcher:
             _EV_REF = 25.0
             _EV_EXEC = float(MAX_BET_AMOUNT)
             for rec in recommendations:
-                ai_p = rec.get('ai_estimated_probability')
-                direction = rec.get('recommendation')
-                mkt_p = max(0.01, min(0.99, rec.get('probability', 0.5)))
-
-                if ai_p is not None and direction in ('YES', 'NO'):
-                    if direction == 'YES':
-                        win_p = float(ai_p)
-                        payout_per_dollar = 1.0 / mkt_p
-                    else:
-                        win_p = 1.0 - float(ai_p)
-                        payout_per_dollar = 1.0 / (1.0 - mkt_p)
-
-                    # EV(stake) = stake * (win_p * payout_per_dollar - 1)
-                    ev_per_dollar = win_p * payout_per_dollar - 1.0
-                    rec['estimated_ev_ref']  = round(_EV_REF  * ev_per_dollar, 4)
-                    rec['estimated_ev_exec'] = round(_EV_EXEC * ev_per_dollar, 4)
-                    rec['estimated_ev']      = rec['estimated_ev_ref']  # legacy alias
-                else:
-                    rec['estimated_ev_ref']  = None
-                    rec['estimated_ev_exec'] = None
-                    rec['estimated_ev']      = None
+                ev_ref, ev_exec = _compute_rec_ev(rec, _EV_REF, _EV_EXEC)
+                rec['estimated_ev_ref']  = ev_ref
+                rec['estimated_ev_exec'] = ev_exec
+                rec['estimated_ev']      = ev_ref  # legacy alias
 
             # Re-sort after AI pass
             recommendations.sort(key=lambda x: x['confidence'], reverse=True)
