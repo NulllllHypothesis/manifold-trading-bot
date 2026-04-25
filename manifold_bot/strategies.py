@@ -106,7 +106,35 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
                       ' win ', ' team ', ' match ', ' game ', ' score ', ' league ', ' player ',
                       'tournament', 'bundesliga', 'la liga', 'serie a',
                       'champions league', 'europa league', 'boxing',
-                      'formula 1', 'wimbledon', 'super bowl', 'world series'],
+                      'formula 1', 'wimbledon', 'super bowl', 'world series',
+                      # Team names — added 2026-04-25 after audit found "Cavaliers
+                      # vs Raptors", "Nuggets vs Timberwolves", "Spurs vs Trail
+                      # Blazers" type markets falling through to 'other'. Only
+                      # LOW-collision team names are listed here. High-collision
+                      # ones (Giants/Lions/Eagles/Saints/Rams/Cardinals/Bears/
+                      # Bulls/Hawks/Tigers/Bruins/Devils/Wild/Stars/Reds/Coyotes/
+                      # Panthers/Chargers/Magic/Heat/Jazz/Thunder) are deliberately
+                      # OMITTED to avoid bucketing non-sports markets ("tech giants",
+                      # "Daniel in the lions' den", etc.) into sports. Those will
+                      # still hit the generic ' game '/' team '/' match ' tokens
+                      # when the question phrases the contest, or fall through to
+                      # 'other' if the question is just "Cardinals win Game 7?".
+                      # NBA (low-collision):
+                      'cavaliers', 'raptors', 'nuggets', 'timberwolves',
+                      'mavericks', 'knicks', 'lakers', 'celtics', 'bucks',
+                      'pelicans', 'grizzlies', 'hornets', 'pistons', 'clippers',
+                      'wizards', '76ers', 'sixers', 'spurs', 'trail blazers',
+                      'trailblazers', 'thunder okc',
+                      # NFL (low-collision):
+                      'steelers', '49ers', 'buccaneers', 'cowboys', 'broncos',
+                      'packers', 'patriots', 'seahawks', 'bengals', 'browns',
+                      # MLB (low-collision):
+                      'yankees', 'mets', 'phillies', 'astros', 'mariners',
+                      'padres', 'diamondbacks', 'dodgers',
+                      # NHL (low-collision):
+                      'canadiens', 'maple leafs', 'predators', 'flyers',
+                      'penguins', 'capitals', 'senators', 'oilers',
+                      'blackhawks'],
     'science':       ['nasa', 'spacex', 'climate', 'vaccine', 'fda', 'cdc', 'pandemic',
                       'cancer', 'physics', 'biology', 'crispr', 'fusion',
                       'earthquake', 'hurricane', 'temperature', 'science', 'research',
