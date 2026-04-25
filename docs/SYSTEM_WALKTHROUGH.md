@@ -239,6 +239,8 @@ Applied **per recommendation** after research has already shortlisted it. Each w
 |---|---|
 | `ai_veto` | `ai_status=='skip'` (real AI SKIP, not just timeout) |
 | `market_unverifiable` | Backstop — `is_unverifiable_market()` or `is_thin_other_momentum_market()` returns True even though research should have caught it |
+| `solo_momentum_low_res` | (PR #25) Voting strategies = `['probability_direction']` only AND `resolvability == 'low'`. `thin_market` is excluded from the voter count. Multi-signal trades and high/medium-resolvability markets pass. |
+| `negative_ev` | (PR #22, refined PR #26) `estimated_ev_exec` (or legacy `estimated_ev`) ≤ `MIN_ESTIMATED_EV_FLOOR` (0.0). Pre-flight uses the rec's stale EV; live recompute in `execute_trade` uses fresh market price. After PR #26 the EV at this gate is honest current-price-anchored math, not the old `confidence`-as-`P(YES)` shortcut. |
 | `low_confidence` | `confidence < MIN_CONFIDENCE` (0.65) |
 | `existing_open` | We already hold an OPEN leg on this market (use swap, don't stack) |
 | `max_positions` | Global book at 10/10 |
@@ -247,6 +249,10 @@ Applied **per recommendation** after research has already shortlisted it. Each w
 | `liquidity` | Live liquidity dropped below floor between research and trade-time |
 | `kelly_no_edge` | Kelly sizing returned ≤0 bet |
 | `size_too_small` | Bet would be < `MIN_BET_AMOUNT` |
+
+**EV math change (PR #26):** stat-only EV used to be `P(YES) = confidence` (or `1 − confidence` for NO), which conflated signal reliability with outcome probability and produced phantom +$4 EVs on coin-flip markets. The fix anchors `P(YES)` to `current_prob` and applies a bounded edge: `edge = (confidence − 0.5) × STAT_PROB_EDGE_SHRINKAGE` (default 0.3). Both `auto_trader.execute_trade` and the new `auto_research._compute_rec_ev` helper use the same `_stat_derived_probability` function and validate `probability` identically (None / non-numeric / out-of-range → None). Tune `STAT_PROB_EDGE_SHRINKAGE` in `manifold_bot/config.py` if Phase 3 `ev_error` data shows the model is systematically over- or under-estimating.
+
+**Dismiss cooldown (PR #24):** A dismissed close or swap proposal silences that market for `DISMISS_COOLDOWN_HOURS=48`. `evaluate_positions._existing_pending_ids` and `position_swap_checker.recently_dismissed_close_ids` both honor this; expiry releases the suppression.
 
 ### Evaluator HOLD/CLOSE reasons (`:30` cron, `scripts/evaluate_positions.py:classify_position`)
 
@@ -345,13 +351,17 @@ This is a really interesting one to trace. Let me walk you through what happened
 | **What would make us close it?** | The Phase 2.3 evaluator will score it hourly: `score = unrealised_pnl − days_held × 0.05 − (medium → no long penalty)`. If it drops below -$0.50 for more than 2h (MIN_HOLD_HOURS, PR #21), we get a CLOSE proposal. |
 | **When does it become learning data?** | Either at market resolution (Apr 30, goes into `bet_outcomes` with `era='post_ev_fix'` and counts toward weight updates on Monday 2026-05-04) or if closed early (`era='early_close'`, audit-only, doesn't drive weights). |
 
-#### The uncomfortable fact
+#### The uncomfortable fact (historical — fixed by PR #22 and PR #26)
 
-**`estimated_ev = -0.078`.** The bot placed a trade with *negative expected value*. Why?
+**`estimated_ev = -0.078`** at the time this trade was recorded. The bot placed a trade with *negative expected value*.
 
-Because the trader's gate is `confidence ≥ 0.65`, not `estimated_ev > 0`. The stat-derived EV fallback (Phase 1.2) just stamps an EV number for later auditing — it doesn't block the trade. So a high-confidence + negative-EV trade still fires.
+**Why it was allowed back then:** the trader's gate was `confidence ≥ 0.65`, not `estimated_ev > 0`. The stat-derived EV fallback (Phase 1.2) just stamped an EV number for later auditing — it didn't block the trade.
 
-**Is this a bug?** Not really — it's a deliberate choice. Over many trades, if the confidence signal is meaningful, slightly-negative-EV trades average out to positive EV. But it IS something you should file as a real question for Phase 3: **does confidence actually track EV in our data?** If the weekly report shows confidence > 0.65 trades are systematically negative-EV, we have a calibration problem.
+**What changed since:**
+- **PR #22** added `MIN_ESTIMATED_EV_FLOOR=0.0`. The trader now rejects any rec whose `estimated_ev_exec` (or legacy `estimated_ev`) is ≤ 0 at both pre-flight and live-recompute stages. A trade like this one would now fire `rejected.negative_ev` and never reach `place_paper_bet`.
+- **PR #26** rewrote the stat-derived probability math. The old fallback set `P(YES) = confidence`, which inflated edge — a `confidence=0.65 NO` call on a 50% market produced `P(YES)=0.35` and a positive-looking EV that wasn't real. The new math anchors P(YES) to `current_prob` with a bounded edge, so the EV the gate sees is honest.
+
+**Net:** the leg shown above is the type of trade the bot used to take and no longer takes. Phase 3's weekly EV report will, once it has data, tell us whether the new gate is too tight or too loose.
 
 #### Now run this
 

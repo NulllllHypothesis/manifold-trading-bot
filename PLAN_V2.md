@@ -837,17 +837,26 @@ This is the "if I could only do one thing at a time, what order?" list:
 12. ✅ **Evaluator min-hold-period guard** (reactive fix, out-of-band) — SHIPPED (PR #21). `MIN_HOLD_HOURS=2.0` guard in `classify_position` prevents the rounding-artifact CLOSE on brand-new flat `long_or_uncertain` trades; uses youngest leg (not weighted avg) so multi-leg markets can't bypass via an old/large sibling. Triggered by the xkcd-about-AI close proposal incident on 2026-04-20.
 13. ✅ **SYSTEM_WALKTHROUGH.md operator doc** — SHIPPED at `docs/SYSTEM_WALKTHROUGH.md`. Study path for getting hands-on with the pipeline. Safe/unsafe command legend, version-drift checklist, decision-gate cheat sheet, four real trade walkthroughs (accepted / rejected pattern / closed-early / resolved), Phase 3 preview, operator-brain reference, debug worksheet template.
 14. ✅ **Negative-EV trader gate** (reactive fix, out-of-band) — SHIPPED (PR #22). `MIN_ESTIMATED_EV_FLOOR=0.0` applied at two layers: pre-flight in `_trade_rejection_reason` (stale rec EV) and placement-time in `execute_trade` (live-recomputed EV after market fetch). Both layers increment `rejected.negative_ev`. Triggered by 24h audit finding 3 of 6 open positions had negative stat-derived EV at placement — the model was telling us "this bet is expected to lose money" and the trader was ignoring it. Rejects Monday's first learning cycle data from including trades the model already flagged as bad.
-15. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
-16. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-17. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-18. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-19. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-20. **Polymarket integration** (Phase 4.1) — multiply training data
-21. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-22. **Dashboard API** (Phase 5.2) — real-time updates
-23. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-24. **Dashboard write surface** (Phase 5.3) — operator can act
-25. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+15. ✅ **Reporting-fix bundle** (out-of-band) — SHIPPED (PR #23). `capital_epochs: list[dict]` first-class on `PaperTrader`; `effective_baseline()` + `baseline_from_state()` shared helper. `place_paper_bet` persists blended `confidence` + `ai_status` per leg. `daily_summary` and `/portfolio` both route through `baseline_from_state`. `/positions` Telegram prefers blended confidence (legacy fallback) and renders `· AI <status>` tag. `scripts/seed_capital_epoch.py` one-shot migration applied on sandbox.
+16. ✅ **Dismiss-cooldown** (operator-feedback fix, out-of-band) — SHIPPED (PR #24). `DISMISS_COOLDOWN_HOURS=48` in both `evaluate_positions.py` and `position_swap_checker.py`. A dismissed close/swap proposal silences that market for 48h after `dismissed_at`. `execute_swap.py` now persists `dismissed_at` (was only `executed_at`). Triggered by operator frustration: dismissing a proposal led to identical re-proposal next hour because suppression only checked `status=='pending'`, dropping dismissed rows from the suppression set.
+17. ✅ **Solo-momentum × low-resolvability block** (containment fix, out-of-band) — SHIPPED (PR #25). New `solo_momentum_low_res` rejection in `_trade_rejection_reason`: solo `probability_direction` (excluding `thin_market` confirmation) in `resolvability=low` markets is rejected. Empirically the dominant losing-trade pattern in the post-Apr-20 epoch book (6 of 7 OPEN positions had `resolvability=low`; both settled losses matched solo-signal × low-res). Multi-strategy trades and high/medium-resolvability markets untouched. Solo `probability_bias` in low-res deliberately scope-guarded for follow-up after Phase 3 weights have data.
+18. ✅ **Confidence→probability honest math** (root-cause fix, out-of-band) — SHIPPED (PR #26). The original `_stat_derived_probability` mapped `P(YES) = confidence` for YES and `P(YES) = 1 − confidence` for NO, conflating signal reliability with outcome probability. Replaced with current-price-anchored bounded edge: `P(YES) = current_prob ± (confidence − 0.5) × STAT_PROB_EDGE_SHRINKAGE`, default shrinkage 0.3 (configurable in `config.py`). Same fix applied at both layers: `auto_trader.execute_trade` (live) and the new `auto_research._compute_rec_ev` helper (research-time, was previously `None` for stat-only recs, blinding the pre-flight gate and EV ranking). Both helpers validate `probability` identically (None / non-numeric / out-of-range → None). Verified on the actual losing crypto trade: phantom +$4.09 EV → honest +$1.15 EV.
+19. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
+20. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
+21. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
+22. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+23. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+24. **Polymarket integration** (Phase 4.1) — multiply training data
+25. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+26. **Dashboard API** (Phase 5.2) — real-time updates
+27. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
+28. **Dashboard write surface** (Phase 5.3) — operator can act
+29. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+
+**Open follow-ups from PR #26 review (deferred, not yet scheduled):**
+- Reset `probability_bias` weight from 1.2 → 1.0 in `data/strategy_weights.json` (Apr-12 backtest seed with 0 live samples). Damage shrinks once PR #26 lands; revisit after Monday 2026-04-27 weekly EV report.
+- Sports keyword gap: `_CATEGORY_KEYWORDS['sports']` doesn't catch NBA team-vs-team questions ("Cavaliers vs Raptors"). Bundle with whatever sports-specific gates we add later.
+- Widen low-res block to solo `probability_bias` (currently scope-guarded by `test_solo_probability_bias_low_res_currently_passes`). Decide after Phase 3 weights cell-data shows whether `probability_bias` has edge in low-resolvability markets.
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.
