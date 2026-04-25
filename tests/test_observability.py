@@ -172,6 +172,7 @@ class TestTraderCountersShape(unittest.TestCase):
             "ai_veto", "low_confidence", "existing_open", "max_positions",
             "category_cap", "position_class_full", "liquidity", "kelly_no_edge",
             "size_too_small", "market_unverifiable", "negative_ev",
+            "solo_momentum_low_res",
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():
@@ -334,6 +335,98 @@ class TestTradeRejectionReason(unittest.TestCase):
             self._make_rec(confidence=0.50),
         )
         self.assertEqual(reason, "low_confidence")
+
+    # ── solo probability_direction in low-resolvability ──────────────────────
+
+    def test_solo_momentum_low_res_blocked(self):
+        """The empirically problematic combo: only-vote=probability_direction
+        with resolvability=low. Both legs of the post-Apr-20 epoch losses
+        matched this pattern."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                resolvability="low",
+            ),
+        )
+        self.assertEqual(reason, "solo_momentum_low_res")
+
+    def test_solo_momentum_high_res_passes(self):
+        """Same solo signal in a high-resolvability market is fine — the
+        market itself is predictable enough that single-vote momentum is
+        a defensible gate."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                resolvability="high",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_solo_momentum_medium_res_passes(self):
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                resolvability="medium",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_multi_signal_low_res_passes(self):
+        """Two independent voting signals override the gate — the second
+        signal supplies the confirmation that solo momentum lacks."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction", "probability_bias"],
+                resolvability="low",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_thin_market_does_not_count_as_extra_voter(self):
+        """thin_market is a confirmation-only +0.03 boost, never an
+        independent vote. ['probability_direction', 'thin_market'] is still
+        effectively solo momentum and must be blocked in low-res."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction", "thin_market"],
+                resolvability="low",
+            ),
+        )
+        self.assertEqual(reason, "solo_momentum_low_res")
+
+    def test_solo_probability_bias_low_res_currently_passes(self):
+        """Scope guard: this PR only blocks solo probability_direction.
+        Solo probability_bias in low-res is also empirically risky but is
+        out of scope for this fix; locks in the narrow rule. Revisit after
+        Monday's strategy weights have data."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_bias"],
+                resolvability="low",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_missing_resolvability_does_not_trigger(self):
+        """A recommendation without resolvability (legacy or pre-classify)
+        falls through this gate — None is not 'low'."""
+        trader = self._make_trader_with_empty_book()
+        rec = self._make_rec(strategies=["probability_direction"])
+        rec.pop('resolvability', None)
+        reason = trader._trade_rejection_reason("mkt_test", rec)
+        self.assertIsNone(reason)
 
     def test_existing_open_reason(self):
         trader = self._make_trader_with_empty_book()

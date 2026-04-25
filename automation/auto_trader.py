@@ -54,6 +54,7 @@ def _new_trader_counters() -> dict:
             "size_too_small":       0,
             "market_unverifiable":  0,
             "negative_ev":          0,      # estimated_ev ≤ MIN_ESTIMATED_EV_FLOOR
+            "solo_momentum_low_res": 0,     # solo probability_direction in low-resolvability
         },
         "passed_filter":            0,      # survived should_trade_market
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
@@ -448,6 +449,27 @@ class AutoTrader:
         if is_thin_other_momentum_market(rec_as_market, rec_signals):
             print(f"  Vanity market profile (other + momentum-only + <3 bettors) — skipping")
             return "market_unverifiable"
+
+        # Block solo `probability_direction` trades in low-resolvability markets.
+        # Empirical pattern from the post-Apr-20 epoch book: 6 of 7 OPEN
+        # positions had resolvability=low, and the two settled losses both
+        # matched (solo voting signal × low-resolvability). The signal is the
+        # weakest valid one (0.65 base confidence, single momentum vote) and
+        # the market itself is by definition hard to predict — combining the
+        # two stacks the failure modes. thin_market is excluded from the count
+        # because it's confirmation-only and never an independent vote.
+        # Multi-strategy trades and high/medium-resolvability markets are
+        # untouched by this gate.
+        voting_strats = [s for s in rec_signals if s != 'thin_market']
+        if (
+            voting_strats == ['probability_direction']
+            and recommendation.get('resolvability') == 'low'
+        ):
+            print(
+                f"  Solo probability_direction in low-resolvability market — "
+                f"skipping (signal too weak to overcome resolution uncertainty)"
+            )
+            return "solo_momentum_low_res"
 
         # Negative-EV invariant: don't knowingly trade what the stat model
         # expects to lose money on. Prefer estimated_ev_exec (honest stake-
