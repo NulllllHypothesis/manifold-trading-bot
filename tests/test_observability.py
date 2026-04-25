@@ -1137,6 +1137,39 @@ class TestComputeRecEv(unittest.TestCase):
         self.assertIsNone(ev_ref)
         self.assertIsNone(ev_exec)
 
+    def test_invalid_probability_returns_none_pair(self):
+        """Reviewer regression: the helper used to clamp probability with
+        max(0.01, min(0.99, ...)) BEFORE validating, which had two bad
+        outcomes:
+          - probability=0.0 became 0.01, then 1/0.01 = 100× phantom payout
+            → (150.0, 30.0) absurd EV on a 'this never happens' market
+          - probability=None or non-numeric raised TypeError that fell
+            through analyze_markets' outer try/except, killing the whole
+            research cycle's recommendations
+        Now validates exactly like the trader-side _stat_derived_probability."""
+        from automation.auto_research import _compute_rec_ev
+
+        for bad_prob in [0.0, 1.0, -0.1, 1.5, None, '0.5']:
+            rec = {'recommendation': 'YES', 'confidence': 0.7,
+                   'probability': bad_prob}
+            ev_ref, ev_exec = _compute_rec_ev(rec, 25.0, 5.0)
+            self.assertIsNone(ev_ref,
+                              f'probability={bad_prob!r} should have produced None')
+            self.assertIsNone(ev_exec,
+                              f'probability={bad_prob!r} should have produced None')
+
+    def test_missing_probability_returns_none_pair(self):
+        """No `probability` key at all → return None instead of silently
+        defaulting to 0.5 (the previous behavior). EV can't be computed
+        without a real market price."""
+        from automation.auto_research import _compute_rec_ev
+        ev_ref, ev_exec = _compute_rec_ev(
+            {'recommendation': 'YES', 'confidence': 0.7},
+            25.0, 5.0,
+        )
+        self.assertIsNone(ev_ref)
+        self.assertIsNone(ev_exec)
+
 
 class TestAiAnalysisCache(unittest.TestCase):
     """

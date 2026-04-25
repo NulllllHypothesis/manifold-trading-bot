@@ -119,7 +119,17 @@ def _compute_rec_ev(rec: dict, ev_ref_stake: float, ev_exec_stake: float) -> tup
     if direction not in ('YES', 'NO'):
         return (None, None)
 
-    mkt_p = max(0.01, min(0.99, rec.get('probability', 0.5)))
+    # Match the trader-side _stat_derived_probability validation exactly:
+    # reject None / non-numeric / out-of-range. The earlier clamp-then-divide
+    # version turned probability=0.0 into 0.01 → payout=1/0.01=100x → phantom
+    # +$150 EV on a "this never happens" market, and probability=None or
+    # probability='0.5' (string) raised TypeError that swallowed the whole
+    # research cycle via the outer try/except. Same source of truth as the
+    # trader; same rejection criteria.
+    raw_p = rec.get('probability')
+    if not isinstance(raw_p, (int, float)) or not 0 < raw_p < 1:
+        return (None, None)
+    mkt_p = float(raw_p)
     ai_p = rec.get('ai_estimated_probability')
 
     if ai_p is not None:
