@@ -22,13 +22,18 @@ Which strategies can be backtested:
   - probability_bias   ✓  (needs probability + calibration table — both available)
   - probability_direction  PARTIAL (skipped when volume24h is NULL, which is all reconstructed rows)
 
-  The backtest weights are labelled source='backtest' so callers can decide how
-  to blend them with live bet_outcomes weights.
+  The backtest weights are labelled source='backtest' (or 'backtest_clamped'
+  when the asymmetric cap fires) so callers can decide how to blend them
+  with live bet_outcomes weights.
 
 Merge logic (written to strategy_weights.json):
   For each strategy:
     - If live weight has >= MIN_SAMPLES_PER_STRATEGY → use live weight (trust real trades)
-    - Else if backtest weight has >= BACKTEST_MIN_SAMPLES → use backtest weight
+    - Else if backtest weight has >= BACKTEST_MIN_SAMPLES:
+        - backtest_w ≤ MAX_BACKTEST_ONLY_WEIGHT → use as-is, source='backtest'
+        - backtest_w >  MAX_BACKTEST_ONLY_WEIGHT → cap at MAX_BACKTEST_ONLY_WEIGHT,
+          source='backtest_clamped' (asymmetric clamp — backtests can
+          down-weight defensively but cannot up-weight without live data)
     - Else → keep default 1.0
 
 Usage:
