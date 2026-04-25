@@ -218,39 +218,55 @@ def _stat_derived_probability(
     current_prob: float,
 ) -> float | None:
     """
-    Stat-derived probability estimate used when AI doesn't provide one.
+    Stat-derived P(YES) estimate used when AI didn't supply one.
 
-    The bot's confidence represents how strongly it believes the direction is
-    correct, NOT the probability of the YES outcome. We map it to a probability
-    using the recommendation direction:
+    The previous implementation set P(YES) = confidence (or 1 - confidence
+    for NO). That conflated two different quantities:
 
-        direction='YES' → our estimate of P(YES) = confidence
-                          (we think YES is `confidence`-likely to happen)
-        direction='NO'  → our estimate of P(YES) = 1 - confidence
-                          (we think YES is only (1-confidence)-likely to happen)
+      - confidence: epistemic — "how reliable is my signal" — a hand-picked
+        strategy-level base score (0.65 for prob_direction, 0.68 for
+        mean_reversion, etc.) optionally scaled by strategy weights.
+      - P(YES): ontic — "what fraction of worlds does YES occur in"
 
-    We intentionally DON'T apply calibration bias adjustments here — that would
-    double-count against adjustments already baked into the strategies. The
-    estimate is a deliberately simple read of what the bot's confidence means.
+    Treating them as the same dramatically inflates edge: a confidence=0.84
+    NO call on a 52% market would imply P(YES)=0.16 → EV +$3.82 on a $5
+    bet, which the negative-EV gate then waves through. The actual win
+    probability of such a market is much closer to 50/50.
 
-    This gets us off the "estimated_ev is always null" floor. It's not as good
-    as a real probability estimate from an LLM, but it's better than nothing —
-    and importantly it lets the EV calibration feedback loop actually collect
-    data (weekly_ev_report.py needs a value to regress against).
+    The honest read: when the strategy fires with confidence c in direction
+    d, our estimate of P(YES) is the *current market price* with a small
+    edge in d's favor:
+
+        edge = (confidence - 0.5) * STAT_PROB_EDGE_SHRINKAGE
+        P(YES) = current_prob + edge   (direction = YES)
+               = current_prob - edge   (direction = NO)
+
+    STAT_PROB_EDGE_SHRINKAGE bounds the maximum claimed edge — at 0.3, even
+    confidence=0.95 only buys ~13.5pp of tilt from market price. This keeps
+    EV honest while still producing non-zero EV for the calibration loop.
 
     Guards:
-    - confidence must be in (0, 1) to produce meaningful estimate
-    - direction must be YES or NO (other values → None, no estimate)
-    - Result is clamped to (0.01, 0.99) to avoid zero-edge-zero-payout cases
-    - current_prob is accepted but not used (could be used for bias-aware
-      variants in a future iteration)
+    - confidence must be in (0, 1)
+    - direction must be 'YES' or 'NO' (anything else → None)
+    - current_prob must be in (0, 1) to be meaningful — outside that the
+      estimate degenerates to a clamp, which is a signal that the input was
+      bad rather than a real estimate, so we return None
+    - result is clamped to (0.01, 0.99) for finite EV math
     """
+    from manifold_bot.config import STAT_PROB_EDGE_SHRINKAGE
+
     if not isinstance(confidence, (int, float)) or not 0 < confidence < 1:
         return None
     if recommendation_direction not in ('YES', 'NO'):
         return None
-    del current_prob  # reserved for future bias-aware extension
-    p_yes = float(confidence) if recommendation_direction == 'YES' else 1.0 - float(confidence)
+    if not isinstance(current_prob, (int, float)) or not 0 < current_prob < 1:
+        return None
+
+    edge = (float(confidence) - 0.5) * float(STAT_PROB_EDGE_SHRINKAGE)
+    if recommendation_direction == 'YES':
+        p_yes = float(current_prob) + edge
+    else:
+        p_yes = float(current_prob) - edge
     return max(0.01, min(0.99, p_yes))
 
 

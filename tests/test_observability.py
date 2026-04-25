@@ -961,35 +961,75 @@ class TestAnalyzeMarketsZeroCandidatePath(unittest.TestCase):
 
 class TestStatDerivedProbability(unittest.TestCase):
     """
-    Stat-derived probability fallback for estimated_ev.
+    Stat-derived P(YES) fallback for estimated_ev.
 
-    Used when AI doesn't provide ai_estimated_probability — ensures EV is
-    computed on every trade, not just AI-analyzed ones. Otherwise the EV
-    calibration feedback loop has no data to work with.
+    Behavior change (PR #26): the fallback used to set P(YES)=confidence,
+    conflating signal reliability with outcome probability and inflating
+    EV estimates. Replaced with current_prob ± bounded edge in the
+    direction's favor, where edge = (confidence - 0.5) * SHRINKAGE.
+
+    With STAT_PROB_EDGE_SHRINKAGE = 0.3 (default):
+      conf=0.70, dir=YES, current=0.50 → edge=0.06, p=0.56
+      conf=0.70, dir=NO,  current=0.50 → edge=0.06, p=0.44
+      conf=0.95, dir=YES, current=0.50 → edge=0.135, p=0.635
     """
 
-    def test_yes_direction_maps_confidence_to_p_yes(self):
+    def _shrinkage(self):
+        from manifold_bot.config import STAT_PROB_EDGE_SHRINKAGE
+        return STAT_PROB_EDGE_SHRINKAGE
+
+    def test_yes_direction_tilts_above_current_prob_by_bounded_edge(self):
         from automation.auto_trader import _stat_derived_probability
         p = _stat_derived_probability(confidence=0.70, recommendation_direction='YES', current_prob=0.50)
-        self.assertEqual(p, 0.70)
+        expected = 0.50 + (0.70 - 0.50) * self._shrinkage()
+        self.assertAlmostEqual(p, expected, places=6)
 
-    def test_no_direction_maps_confidence_to_one_minus_p(self):
+    def test_no_direction_tilts_below_current_prob_by_bounded_edge(self):
         from automation.auto_trader import _stat_derived_probability
         p = _stat_derived_probability(confidence=0.70, recommendation_direction='NO', current_prob=0.50)
-        self.assertAlmostEqual(p, 0.30, places=6)  # 1 - 0.70
+        expected = 0.50 - (0.70 - 0.50) * self._shrinkage()
+        self.assertAlmostEqual(p, expected, places=6)
 
-    def test_extreme_confidence_clamped(self):
+    def test_high_confidence_does_not_imply_high_probability(self):
+        """Regression: the bug being fixed. conf=0.84 NO at 52% market used
+        to produce P(YES)=0.16 (treating confidence as 1-P). Now it should
+        stay near 0.52 — confidence is signal reliability, not outcome
+        probability."""
         from automation.auto_trader import _stat_derived_probability
-        # confidence > 0.99 would produce p > 0.99 and then 1-p = 0 for NO
-        # — but confidence is always < 1 so we clamp internally
-        p = _stat_derived_probability(confidence=0.999, recommendation_direction='YES', current_prob=0.5)
-        self.assertLessEqual(p, 0.99)
-        self.assertGreater(p, 0.95)
+        p = _stat_derived_probability(confidence=0.84, recommendation_direction='NO', current_prob=0.52)
+        # Old broken behavior: p ≈ 0.16. New behavior: only mild tilt below 0.52.
+        self.assertGreater(p, 0.40)
+        self.assertLess(p, 0.52)
 
-    def test_low_confidence_still_produces_estimate(self):
+    def test_edge_is_anchored_to_current_market_price(self):
+        """Anchor changes with market price — the same confidence in a
+        different market produces a different P(YES). The old impl ignored
+        current_prob entirely."""
+        from automation.auto_trader import _stat_derived_probability
+        p_at_50 = _stat_derived_probability(confidence=0.70, recommendation_direction='YES', current_prob=0.50)
+        p_at_75 = _stat_derived_probability(confidence=0.70, recommendation_direction='YES', current_prob=0.75)
+        # Both tilt up by the same edge, so the difference between them
+        # equals the difference in current_prob.
+        self.assertAlmostEqual(p_at_75 - p_at_50, 0.25, places=6)
+
+    def test_extreme_confidence_clamped_to_finite_range(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.999, recommendation_direction='YES', current_prob=0.95)
+        # 0.95 + (0.499 * 0.3) = 1.0997 → clamped to 0.99
+        self.assertLessEqual(p, 0.99)
+
+    def test_extreme_low_clamped_to_finite_range(self):
+        from automation.auto_trader import _stat_derived_probability
+        p = _stat_derived_probability(confidence=0.999, recommendation_direction='NO', current_prob=0.05)
+        # 0.05 - (0.499 * 0.3) = -0.0997 → clamped to 0.01
+        self.assertGreaterEqual(p, 0.01)
+
+    def test_low_confidence_produces_tiny_edge(self):
         from automation.auto_trader import _stat_derived_probability
         p = _stat_derived_probability(confidence=0.55, recommendation_direction='YES', current_prob=0.50)
-        self.assertEqual(p, 0.55)
+        # edge = 0.05 * 0.3 = 0.015 → p = 0.515. Modest, as it should be.
+        expected = 0.50 + 0.05 * self._shrinkage()
+        self.assertAlmostEqual(p, expected, places=6)
 
     def test_invalid_confidence_returns_none(self):
         from automation.auto_trader import _stat_derived_probability
@@ -1003,6 +1043,15 @@ class TestStatDerivedProbability(unittest.TestCase):
         self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='SKIP', current_prob=0.5))
         self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction=None, current_prob=0.5))
         self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='', current_prob=0.5))
+
+    def test_invalid_current_prob_returns_none(self):
+        """Out-of-range current_prob signals upstream data corruption — return
+        None rather than producing a bogus clamped estimate."""
+        from automation.auto_trader import _stat_derived_probability
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='YES', current_prob=0.0))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='YES', current_prob=1.0))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='YES', current_prob=None))
+        self.assertIsNone(_stat_derived_probability(confidence=0.65, recommendation_direction='YES', current_prob=-0.1))
 
 
 class TestAiAnalysisCache(unittest.TestCase):
