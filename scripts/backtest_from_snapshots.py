@@ -59,6 +59,20 @@ REPORT_PATH    = os.path.join(ROOT_DIR, "data", "backtest_report.json")
 # Lower than live because we have more data but it's older and less representative.
 BACKTEST_MIN_SAMPLES = 30
 
+# Asymmetric clamp on backtest-only weights (no live data to confirm):
+# a backtest may DOWN-weight a strategy below 1.0 (defensive, helpful when the
+# strategy is bad), but cannot UP-weight above 1.0 without live confirmation.
+# Boost weights without live data are dangerous: an over-fit reconstruction
+# can manufacture apparent edge that pushes the trader to take MORE trades on
+# a fictional signal — exactly the failure mode we saw with probability_bias
+# at 1.2 on Apr-12 (0 live samples, backtest-seeded boost compounded with the
+# old confidence-as-probability bug to produce phantom +EV).
+#
+# Live data with n >= MIN_SAMPLES_PER_STRATEGY can still raise weights up to
+# the per-formula cap (1.20). This clamp ONLY applies when the source is
+# 'backtest' (no live confirmation yet).
+MAX_BACKTEST_ONLY_WEIGHT = 1.0
+
 # Strategies that can be meaningfully evaluated from reconstructed snapshots.
 # probability_direction is excluded because its volume24h guard always fires
 # on reconstructed rows (volume24h is NULL — not available from bet history).
@@ -290,8 +304,14 @@ def merge_weights(
             source = "live"
             final_w = live_w
         elif backtest_w is not None:
-            source = "backtest"
-            final_w = backtest_w
+            # Asymmetric clamp: backtest can down-weight (defensive) but not
+            # up-weight without live confirmation. See MAX_BACKTEST_ONLY_WEIGHT.
+            if backtest_w > MAX_BACKTEST_ONLY_WEIGHT:
+                source = "backtest_clamped"
+                final_w = MAX_BACKTEST_ONLY_WEIGHT
+            else:
+                source = "backtest"
+                final_w = backtest_w
         else:
             source = "default"
             final_w = 1.0
@@ -387,7 +407,9 @@ def main(dry_run: bool = False, window: int | None = None) -> None:
                 existing = json.load(f)
             updated = False
             for strat, info in merged.items():
-                if info["source"] == "backtest":
+                # Both 'backtest' and 'backtest_clamped' are backtest-sourced;
+                # the clamp only changed the value, not the provenance.
+                if info["source"] in ("backtest", "backtest_clamped"):
                     existing.setdefault("weights", {})[strat] = info["weight"]
                     updated = True
             if updated:

@@ -1478,7 +1478,11 @@ class TestMergeWeights(unittest.TestCase):
             os.unlink(path)
 
     def test_backtest_fills_when_live_insufficient(self):
-        from scripts.backtest_from_snapshots import merge_weights
+        """When live data is insufficient AND backtest UP-weights above 1.0,
+        the asymmetric clamp (PR #27) caps the result at 1.0 — backtest can
+        down-weight defensively but cannot up-weight without live confirmation.
+        See test_backtest_boost_clamp.py for the full policy table."""
+        from scripts.backtest_from_snapshots import merge_weights, MAX_BACKTEST_ONLY_WEIGHT
         path = self._write_weights_file(
             {"mean_reversion": 1.0},
             sample_count=3,
@@ -1486,8 +1490,10 @@ class TestMergeWeights(unittest.TestCase):
         )
         try:
             merged, _ = merge_weights({"mean_reversion": 1.15}, live_weights_path=path)
-            self.assertEqual(merged["mean_reversion"]["source"], "backtest")
-            self.assertAlmostEqual(merged["mean_reversion"]["weight"], 1.15, places=4)
+            self.assertEqual(merged["mean_reversion"]["source"], "backtest_clamped")
+            self.assertAlmostEqual(
+                merged["mean_reversion"]["weight"], MAX_BACKTEST_ONLY_WEIGHT, places=4
+            )
         finally:
             os.unlink(path)
 
@@ -1679,10 +1685,13 @@ class TestComputeStrategyWeightsPerStrategySamples(unittest.TestCase):
         """
         If strategy_weights.json has no per_strategy_samples (old format),
         merge_weights() must fall back to backtest weight (live_n defaults to 0).
+        With the asymmetric clamp from PR #27, an UP-weighting backtest
+        (1.10 > 1.0) is clamped — source is 'backtest_clamped' rather than
+        'backtest', and the weight caps at MAX_BACKTEST_ONLY_WEIGHT (1.0).
         """
         import json
         import tempfile
-        from scripts.backtest_from_snapshots import merge_weights
+        from scripts.backtest_from_snapshots import merge_weights, MAX_BACKTEST_ONLY_WEIGHT
 
         fd, path = tempfile.mkstemp(suffix=".json")
         os.close(fd)
@@ -1697,8 +1706,10 @@ class TestComputeStrategyWeightsPerStrategySamples(unittest.TestCase):
                 json.dump(live_data, f)
 
             merged, _ = merge_weights({"mean_reversion": 1.10}, live_weights_path=path)
-            self.assertEqual(merged["mean_reversion"]["source"], "backtest",
-                             "backtest must fill gap when per_strategy_samples is absent")
+            self.assertEqual(merged["mean_reversion"]["source"], "backtest_clamped",
+                             "backtest UP-weight must be clamped without live confirmation")
+            self.assertAlmostEqual(merged["mean_reversion"]["weight"],
+                                   MAX_BACKTEST_ONLY_WEIGHT, places=4)
         finally:
             os.unlink(path)
 

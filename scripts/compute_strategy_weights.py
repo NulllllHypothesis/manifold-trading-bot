@@ -28,6 +28,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.weekly_ev_report import _fetch_outcomes, MIN_SAMPLES_PER_STRATEGY, MIN_SAMPLES_PER_CATEGORY
+from scripts.backtest_from_snapshots import MAX_BACKTEST_ONLY_WEIGHT
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _WEIGHTS_PATH = os.path.join(_ROOT, "data", "strategy_weights.json")
@@ -220,9 +221,9 @@ def main(dry_run: bool = False) -> None:
     # keep whatever weight exists in the current file (which may have been
     # set by backtest_from_snapshots.py on Sunday).
     existing: dict = {}
-    if os.path.exists(WEIGHTS_PATH):
+    if os.path.exists(_WEIGHTS_PATH):
         try:
-            with open(WEIGHTS_PATH) as f:
+            with open(_WEIGHTS_PATH) as f:
                 existing = json.load(f)
         except Exception:
             existing = {}
@@ -235,11 +236,26 @@ def main(dry_run: bool = False) -> None:
             # might be from backtest, or a previous live computation, or
             # the default 1.0). Only live data with sufficient samples
             # should override.
+            #
+            # Asymmetric clamp (mirrors backtest_from_snapshots): without
+            # current live confirmation we cap preserved weights at
+            # MAX_BACKTEST_ONLY_WEIGHT (1.0). The backtest path now never
+            # writes > 1.0, but stale rows from before that change (or a
+            # legitimate-but-now-undersampled previous live boost) can still
+            # carry > 1.0. Treat both the same: no boost without live data.
             prev = existing_weights.get(strat)
-            if prev is not None and prev != weights[strat]:
-                print(f"  {strat}: preserving existing weight {prev} "
-                      f"(live samples {n} < {MIN_SAMPLES_PER_STRATEGY})")
-                weights[strat] = prev
+            if prev is not None:
+                preserved = min(float(prev), MAX_BACKTEST_ONLY_WEIGHT)
+                if preserved != weights[strat]:
+                    if preserved < float(prev):
+                        print(f"  {strat}: clamping preserved weight {prev} → "
+                              f"{preserved} (live samples {n} < "
+                              f"{MIN_SAMPLES_PER_STRATEGY}, no boost without "
+                              f"live confirmation)")
+                    else:
+                        print(f"  {strat}: preserving existing weight {preserved} "
+                              f"(live samples {n} < {MIN_SAMPLES_PER_STRATEGY})")
+                    weights[strat] = preserved
 
     result = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
