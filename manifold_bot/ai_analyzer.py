@@ -228,7 +228,8 @@ def _log_llm_call(
     ollama_timed_out: bool = False,
     ollama_returned_none: bool = False,
     ollama_parse_failed: bool = False,
-    fallback_to_deepseek_used: bool = False,
+    deepseek_attempted: bool = False,
+    deepseek_returned_value: bool = False,
     deepseek_saved_a_parse_failure: bool = False,
 ) -> None:
     """Append a JSONL record for every LLM call (for future distillation).
@@ -266,16 +267,24 @@ def _log_llm_call(
             "ollama_timed_out": ollama_timed_out,    # True = stuck runner detected
             # PR #29 fallback observability — counted in 24h audits to validate
             # the parse-failure-fallback fix actually moves the parsed_output
-            # success rate. ollama_returned_none = transport failure (existed
-            # pre-PR); ollama_parse_failed = Ollama returned text but couldn't
-            # be parsed (was the silent-failure mode pre-PR);
-            # fallback_to_deepseek_used = we reached the DeepSeek path;
-            # deepseek_saved_a_parse_failure = headline metric — DeepSeek
-            # produced parseable output specifically after Ollama's parse
-            # failure (the new path this PR added).
+            # success rate. Two separate flags so we can distinguish "DeepSeek
+            # was tried but didn't help" from "DeepSeek wasn't tried":
+            #   ollama_returned_none           = transport failure (existed pre-PR)
+            #   ollama_parse_failed            = Ollama returned text but couldn't
+            #                                    be parsed (silent-failure mode pre-PR)
+            #   deepseek_attempted             = we entered the fallback branch
+            #                                    (Ollama failed for any reason)
+            #   deepseek_returned_value        = _call_deepseek_api returned non-None
+            #                                    (transport+API succeeded; says nothing
+            #                                    about whether the response parsed)
+            #   deepseek_saved_a_parse_failure = headline metric — DeepSeek produced
+            #                                    parseable output specifically after
+            #                                    Ollama's parse failure (the new path
+            #                                    this PR added)
             "ollama_returned_none": ollama_returned_none,
             "ollama_parse_failed": ollama_parse_failed,
-            "fallback_to_deepseek_used": fallback_to_deepseek_used,
+            "deepseek_attempted": deepseek_attempted,
+            "deepseek_returned_value": deepseek_returned_value,
             "deepseek_saved_a_parse_failure": deepseek_saved_a_parse_failure,
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
@@ -534,16 +543,25 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
 
     # Fall back to DeepSeek on EITHER transport-failure (raw is None) or
     # parse-failure (result is None despite raw being non-empty).
-    fallback_to_deepseek_used = False
+    #
+    # We log TWO separate flags so 24h audits can distinguish "DeepSeek
+    # was tried but didn't help" from "DeepSeek wasn't tried":
+    #   deepseek_attempted     — entered the fallback branch (Ollama failed)
+    #   deepseek_returned_value — _call_deepseek_api returned non-None
+    # The metric reviewer originally flagged (was named fallback_to_deepseek_used)
+    # was conflating these — name said "tried", behavior was "returned a value".
+    deepseek_attempted = False
+    deepseek_returned_value = False
     if result is None:
+        deepseek_attempted = True
         ds_raw = _call_deepseek_api(prompt)
         if ds_raw is not None:
-            fallback_to_deepseek_used = True
+            deepseek_returned_value = True
             source = "deepseek_api"
             result = _parse_response(ds_raw)
 
     deepseek_saved_a_parse_failure = (
-        ollama_parse_failed and fallback_to_deepseek_used and result is not None
+        ollama_parse_failed and deepseek_returned_value and result is not None
     )
 
     latency_ms = (time.monotonic() - t0) * 1000
@@ -560,7 +578,8 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
         ollama_timed_out=ollama_timed_out,
         ollama_returned_none=ollama_returned_none,
         ollama_parse_failed=ollama_parse_failed,
-        fallback_to_deepseek_used=fallback_to_deepseek_used,
+        deepseek_attempted=deepseek_attempted,
+        deepseek_returned_value=deepseek_returned_value,
         deepseek_saved_a_parse_failure=deepseek_saved_a_parse_failure,
     )
 

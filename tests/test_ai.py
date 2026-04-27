@@ -186,10 +186,11 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_log_record_carries_observability_flags(self):
-        """The new log fields (ollama_parse_failed, fallback_to_deepseek_used,
-        deepseek_saved_a_parse_failure) are what PR #29's 24h validation
-        keys off. Test that the headline metric is True when DeepSeek
-        actually saves an Ollama parse failure."""
+        """The log fields are what PR #29's 24h validation keys off. The
+        attempt vs. returned-value split (deepseek_attempted vs.
+        deepseek_returned_value) lets the audit distinguish 'DeepSeek was
+        tried but didn't help' from 'DeepSeek wasn't tried' — the original
+        single flag conflated them."""
         import unittest.mock as mock
 
         market = self._make_market()
@@ -210,12 +211,41 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(captured.get('ollama_parse_failed'),
                         "ollama_parse_failed must be True when Ollama returned garbage")
-        self.assertTrue(captured.get('fallback_to_deepseek_used'),
-                        "fallback_to_deepseek_used must be True when we reached DeepSeek")
+        self.assertTrue(captured.get('deepseek_attempted'),
+                        "deepseek_attempted must be True when we entered the fallback branch")
+        self.assertTrue(captured.get('deepseek_returned_value'),
+                        "deepseek_returned_value must be True when DeepSeek returned non-None")
         self.assertTrue(captured.get('deepseek_saved_a_parse_failure'),
                         "deepseek_saved_a_parse_failure must be True — that's the headline metric")
         self.assertFalse(captured.get('ollama_returned_none'),
                          "ollama_returned_none must be False — Ollama did return something")
+
+    def test_log_record_when_deepseek_attempted_but_unavailable(self):
+        """Reviewer-flagged ambiguity: when Ollama parse-fails AND DeepSeek
+        is also unavailable, deepseek_attempted should be True (we tried)
+        but deepseek_returned_value should be False (it didn't help). The
+        24h audit needs both numbers to triage 'rescue path tried but
+        broken' vs 'rescue path never reached'."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+
+        captured = {}
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value="garbage"), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value=None), \
+             mock.patch('manifold_bot.ai_analyzer._log_llm_call', side_effect=_capture):
+            result = analyze_market(market)
+
+        self.assertIsNone(result)
+        self.assertTrue(captured.get('ollama_parse_failed'))
+        self.assertTrue(captured.get('deepseek_attempted'),
+                        "We tried DeepSeek even though it returned None")
+        self.assertFalse(captured.get('deepseek_returned_value'),
+                         "DeepSeek returned None — fallback was attempted but failed")
+        self.assertFalse(captured.get('deepseek_saved_a_parse_failure'))
 
     def test_log_record_when_ollama_returns_none_and_deepseek_succeeds(self):
         """Pre-PR behavior preserved: transport-level Ollama failure → DeepSeek
@@ -240,13 +270,14 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
         self.assertTrue(captured.get('ollama_returned_none'))
         self.assertFalse(captured.get('ollama_parse_failed'),
                          "Parse never ran — Ollama returned None, not garbage")
-        self.assertTrue(captured.get('fallback_to_deepseek_used'))
+        self.assertTrue(captured.get('deepseek_attempted'))
+        self.assertTrue(captured.get('deepseek_returned_value'))
         self.assertFalse(captured.get('deepseek_saved_a_parse_failure'),
                          "deepseek_saved_a_parse_failure is specifically the parse-fail-rescue case")
 
     def test_log_record_when_only_ollama_used(self):
         """Happy path: Ollama returns parseable JSON. None of the failure
-        flags should be set."""
+        flags should be set, including the new attempt+returned split."""
         import unittest.mock as mock
 
         market = self._make_market()
@@ -264,7 +295,8 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
 
         self.assertFalse(captured.get('ollama_returned_none'))
         self.assertFalse(captured.get('ollama_parse_failed'))
-        self.assertFalse(captured.get('fallback_to_deepseek_used'))
+        self.assertFalse(captured.get('deepseek_attempted'))
+        self.assertFalse(captured.get('deepseek_returned_value'))
         self.assertFalse(captured.get('deepseek_saved_a_parse_failure'))
 
     def test_deepseek_key_read_at_call_time_not_import_time(self):
