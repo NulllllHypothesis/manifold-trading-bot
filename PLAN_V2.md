@@ -841,22 +841,54 @@ This is the "if I could only do one thing at a time, what order?" list:
 16. ✅ **Dismiss-cooldown** (operator-feedback fix, out-of-band) — SHIPPED (PR #24). `DISMISS_COOLDOWN_HOURS=48` in both `evaluate_positions.py` and `position_swap_checker.py`. A dismissed close/swap proposal silences that market for 48h after `dismissed_at`. `execute_swap.py` now persists `dismissed_at` (was only `executed_at`). Triggered by operator frustration: dismissing a proposal led to identical re-proposal next hour because suppression only checked `status=='pending'`, dropping dismissed rows from the suppression set.
 17. ✅ **Solo-momentum × low-resolvability block** (containment fix, out-of-band) — SHIPPED (PR #25). New `solo_momentum_low_res` rejection in `_trade_rejection_reason`: solo `probability_direction` (excluding `thin_market` confirmation) in `resolvability=low` markets is rejected. Empirically the dominant losing-trade pattern in the post-Apr-20 epoch book (6 of 7 OPEN positions had `resolvability=low`; both settled losses matched solo-signal × low-res). Multi-strategy trades and high/medium-resolvability markets untouched. Solo `probability_bias` in low-res deliberately scope-guarded for follow-up after Phase 3 weights have data.
 18. ✅ **Confidence→probability honest math** (root-cause fix, out-of-band) — SHIPPED (PR #26). The original `_stat_derived_probability` mapped `P(YES) = confidence` for YES and `P(YES) = 1 − confidence` for NO, conflating signal reliability with outcome probability. Replaced with current-price-anchored bounded edge: `P(YES) = current_prob ± (confidence − 0.5) × STAT_PROB_EDGE_SHRINKAGE`, default shrinkage 0.3 (configurable in `config.py`). Same fix applied at both layers: `auto_trader.execute_trade` (live) and the new `auto_research._compute_rec_ev` helper (research-time, was previously `None` for stat-only recs, blinding the pre-flight gate and EV ranking). Both helpers validate `probability` identically (None / non-numeric / out-of-range → None). Verified on the actual losing crypto trade: phantom +$4.09 EV → honest +$1.15 EV.
-19. **Swap checker migration to position_score** (Phase 2.3b) — after ~1 week observing 2.3/2.4
-20. **Expanded harvest + reconstruction** (Phase 3.1) — unblocks learning
-21. **Lower adaptive gates** (Phase 3.2) — lets new data drive weight changes
-22. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
-23. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
-24. **Polymarket integration** (Phase 4.1) — multiply training data
-25. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
-26. **Dashboard API** (Phase 5.2) — real-time updates
-27. **Kalshi / Metaculus** (Phase 4.2, 4.4) — quality priors
-28. **Dashboard write surface** (Phase 5.3) — operator can act
-29. **LoRA fine-tune** (Phase 6.1) — after 3 months of real data accumulation
+19. ✅ **Asymmetric backtest-boost clamp** (out-of-band) — SHIPPED (PR #27). `MAX_BACKTEST_ONLY_WEIGHT=1.0` in `scripts/backtest_from_snapshots.py`. A backtest can DOWN-weight defensively but cannot UP-weight above 1.0 without `live_n >= MIN_SAMPLES_PER_STRATEGY`. Mirrored in `compute_strategy_weights.py`'s preserve-existing-weight path. Fixed a latent NameError (`WEIGHTS_PATH` vs `_WEIGHTS_PATH`) that would have crashed Monday's first weights run. Triggered by `probability_bias` being at 1.2 from Apr-12 backtest with 0 live samples — compounding with PR #26's pre-fix bug to produce phantom EVs.
+20. ✅ **Sports team-name keywords** (out-of-band) — SHIPPED (PR #28). LOW-collision NBA/NFL/MLB/NHL team names added to `_CATEGORY_KEYWORDS['sports']`. HIGH-collision names (Giants/Lions/Eagles/Saints/Cardinals/Bears/Bulls/etc.) deliberately omitted to avoid bucketing non-sports markets as sports. Asymmetric tradeoff: `'other'` already has the strongest defensive filters, so a missed sports market is safer than a misclassified non-sports market.
+21. ✅ **AI parse-failure fallback to DeepSeek** (priority pivot, 2026-04-27) — SHIPPED (PR #29). Pre-fix audit on sandbox: 21/27 (~78%) AI calls returned `parsed_output=null`, all on Ollama, all silently giving up — DeepSeek never got a turn. Fix: `_parse_response` runs on Ollama output regardless; if result is `None`, try DeepSeek (covers both transport-failure AND parse-failure modes). Added `ollama_returned_none`, `ollama_parse_failed`, `deepseek_attempted`, `deepseek_returned_value`, `deepseek_saved_a_parse_failure` flags to `_log_llm_call` for the 24h post-merge audit. Lazy-read of `DEEPSEEK_API_KEY` via `_get_deepseek_api_key()` removes import-order ordering contract. Switched `DEEPSEEK_MODEL` from deprecated `deepseek-chat` to `deepseek-v4-flash`. Acceptance: parsed_output rate moves from ~22% baseline toward >50%; if it doesn't, the dominant failure isn't parse and PR #30's structured-output fix matters more.
+22. **PR #30 — Ollama constrained decoding + DeepSeek json_object** (open at time of writing) — root-cause companion to PR #29. Pass `format=ANALYSIS_SCHEMA` to Ollama's `/api/generate` (FSM-based constrained decoding, makes non-JSON output mathematically impossible). Pass `response_format={"type":"json_object"}` to DeepSeek (syntax-only enforcement; DeepSeek doesn't expose strict-schema mode). Expected to drop Ollama parse-failure rate from ~78% to <5% regardless of model.
+23. **PR #31 — Local model swap** (planned) — `llama3.2:3b` → `qwen2.5:7b-instruct` after PR #30 establishes a clean parse-reliability baseline. Strict A/B; no bundling. `phi-4:14b` and the already-installed `deepseek-r1:14b` available as backfill-only models for hard cases.
+24. **Multi-platform ingestion** (Tier-2 per strategic pivot) — `markets_normalized` unified schema + read-only Polymarket fetcher + Kalshi fetcher + cross-platform market matching. Replaces "Polymarket integration (Phase 4.1)" as the next major architectural step.
+25. **AI backfill cron** (Tier-3) — analyze held positions and resolved-but-not-traded markets to grow fine-tune corpus. Memory: `project_ai_backfill_idea.md`. Promoted from "deferred" to Tier-3 after the strategic pivot.
+26. **Swap checker migration to position_score** (Phase 2.3b) — deferred per pivot
+27. **Expanded harvest + reconstruction** (Phase 3.1) — Tier-3 corpus growth
+28. **Pipeline end-to-end run** (Phase 3.3) — first real learning cycle
+29. **Real-world data sources** (Phase 4.3) — faster resolution for short-term markets
+30. **Event-sourced audit log** (Phase 5.1) — foundation for real-time dashboard
+31. **Dashboard API** (Phase 5.2) — real-time updates
+32. **Metaculus** (Phase 4.4) — quality priors
+33. **Dashboard / assistant write surface** (Phase 5.3) — portfolio-aware AI copilot
+34. **LoRA fine-tune** (Phase 6.1) — after fine-tune corpus reaches 2,000+ resolved markets
 
-**Open follow-ups from PR #26 review (deferred, not yet scheduled):**
-- Reset `probability_bias` weight from 1.2 → 1.0 in `data/strategy_weights.json` (Apr-12 backtest seed with 0 live samples). Damage shrinks once PR #26 lands; revisit after Monday 2026-04-27 weekly EV report.
-- Sports keyword gap: `_CATEGORY_KEYWORDS['sports']` doesn't catch NBA team-vs-team questions ("Cavaliers vs Raptors"). Bundle with whatever sports-specific gates we add later.
-- Widen low-res block to solo `probability_bias` (currently scope-guarded by `test_solo_probability_bias_low_res_currently_passes`). Decide after Phase 3 weights cell-data shows whether `probability_bias` has edge in low-resolvability markets.
+## Strategic priority pivot — 2026-04-27
+
+Phase 3's first weights run produced no movement (sample_count=18 but
+no strategy cleared the 10-sample threshold). Combined with the 78% AI
+parse-failure rate found that day, the priority order shifted:
+
+**Old:** "make this Manifold bot smarter" — keep adding gates, weights,
+strategies on a single-platform paper trader.
+
+**New:** "build a prediction-market intelligence engine." Manifold demoted
+to sandbox/data-source. Real product surface is multi-platform AI signal,
+fine-tuned local model, eventually a portfolio-aware AI copilot.
+
+**Tier 1 — AI signal quality (active):** PR #29 done, PR #30 open, PR #31 planned.
+
+**Tier 2 — Multi-platform data (next):** Polymarket + Kalshi + unified
+schema + cross-platform matching.
+
+**Tier 3 — Productize the engine:** AI backfill cron, fine-tune corpus,
+LoRA experiment, portfolio-aware AI copilot UI.
+
+**STOPPED:** further `MIN_SAMPLES_PER_STRATEGY` tuning, new statistical
+strategies, fine-grained trader gate work, generic dashboard work.
+
+Memory record of the pivot rationale: `project_strategic_pivot_2026_04_27.md`
+in the agent's persistent memory store.
+
+**Open carry-over follow-ups (deferred, not yet scheduled):**
+- Widen low-res block to solo `probability_bias` (currently scope-guarded by `test_solo_probability_bias_low_res_currently_passes`). Decide once we have multi-platform data and Phase 3 cell-data, whichever lands first.
+- Resolvability classifier conflation — surfaced by 2026-04-27 Knicks-vs-Hawks trade analysis. The classifier folds "is the market answerable?" into "is the AMM trustworthy?" — a same-day NBA game with thin liquidity is high-resolvability + thin-AMM, not low-resolvability. Defer until it bites again.
+- News-disagree penalty too soft (current −4% scaling). Defer; might become irrelevant if AI signal quality lifts enough that we always have AI confirmation.
 
 Phases 1-3 = unblock the bot. Weeks 1-4.
 Phases 4-5 = make it actually live and multi-source. Month 2.

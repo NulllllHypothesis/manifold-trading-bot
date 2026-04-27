@@ -254,6 +254,41 @@ Applied **per recommendation** after research has already shortlisted it. Each w
 
 **Dismiss cooldown (PR #24):** A dismissed close or swap proposal silences that market for `DISMISS_COOLDOWN_HOURS=48`. `evaluate_positions._existing_pending_ids` and `position_swap_checker.recently_dismissed_close_ids` both honor this; expiry releases the suppression.
 
+**AI reliability stack (PR #29 + PR #30):** the bot's AI calls go local-first (Ollama `llama3.2:3b`), then API-fallback (DeepSeek `deepseek-v4-flash`). Two layers of reliability work matter for understanding logs:
+
+- **PR #29 (parse-failure fallback):** if Ollama returns text that `_parse_response` can't extract JSON from, we now retry on DeepSeek. Pre-fix audit: 78% of Ollama responses gave up silently. Post-fix the rescue rate is logged via flags below.
+- **PR #30 (constrained decoding) — pending merge:** Ollama's `format=ANALYSIS_SCHEMA` parameter forces FSM-decoded JSON output that conforms to the schema mathematically. DeepSeek leg gets `response_format={"type":"json_object"}` (syntax-only; DeepSeek doesn't expose strict-schema mode).
+
+`logs/llm_calls.jsonl` carries one record per call with these fields (introduced in PR #29):
+
+| Flag | Meaning |
+|---|---|
+| `parsed_output` | The structured fields, or `null` if both backends failed |
+| `source` | `"ollama"` or `"deepseek_api"` — which one produced the result |
+| `ollama_returned_none` | Transport-level failure (timeout, HTTP non-200, connection error) |
+| `ollama_parse_failed` | Ollama returned text but couldn't be parsed (silent-failure mode pre-PR #29) |
+| `deepseek_attempted` | We entered the DeepSeek fallback branch (Ollama failed for any reason) |
+| `deepseek_returned_value` | `_call_deepseek_api` returned non-None |
+| `deepseek_saved_a_parse_failure` | Headline metric: DeepSeek produced parseable output specifically after Ollama parse-failed |
+
+Post-merge audit pattern (run 24h after a reliability PR ships):
+
+```bash
+ssh hackathon-server "cd /home/hackathon/.openclaw/workspace && python3 -c '
+import json, datetime
+total = parsed_ok = saved = 0
+with open(\"logs/llm_calls.jsonl\") as f:
+    for line in f:
+        r = json.loads(line)
+        ts = datetime.datetime.fromisoformat(r[\"timestamp\"])
+        if (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() > 86400: continue
+        total += 1
+        parsed_ok += int(r.get(\"parsed_output\") is not None)
+        saved += int(r.get(\"deepseek_saved_a_parse_failure\") or False)
+print(f\"24h: {parsed_ok}/{total} parsed ({parsed_ok/total*100:.1f}%), DeepSeek rescues: {saved}\")
+'"
+```
+
 ### Evaluator HOLD/CLOSE reasons (`:30` cron, `scripts/evaluate_positions.py:classify_position`)
 
 Applied **per OPEN market aggregate**. Reason string lands in the Telegram CTA text.
