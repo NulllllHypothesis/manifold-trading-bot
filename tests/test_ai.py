@@ -473,6 +473,19 @@ class TestAnalysisSchemaShape(unittest.TestCase):
             self.assertEqual(field["minimum"], 0.0)
             self.assertEqual(field["maximum"], 1.0)
 
+    def test_additional_properties_forbidden(self):
+        """Reviewer follow-up on PR #30: with additionalProperties: false the
+        constrained decoder physically can't generate extra keys, eliminating
+        any noise from chatty model outputs that might slip into sibling
+        fields. Without this, the schema only enforces required fields and
+        types — silently allowing extras."""
+        self.assertIn("additionalProperties", ANALYSIS_SCHEMA)
+        self.assertFalse(
+            ANALYSIS_SCHEMA["additionalProperties"],
+            "ANALYSIS_SCHEMA must set additionalProperties: False so the FSM "
+            "can't generate unexpected fields",
+        )
+
 
 class TestStructuredOutputWiring(unittest.TestCase):
     """Verify the schema and response_format actually get sent to the

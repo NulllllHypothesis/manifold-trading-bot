@@ -36,11 +36,19 @@ DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
 # JSON Schema for the structured market-analysis output. Passed to Ollama
-# via `format=<schema>` to enable constrained decoding (Ollama 0.5+) — the
-# model literally cannot emit non-JSON or wrong-shape JSON. Same dict is
-# also used to validate the parsed response in _parse_response as a safety
-# net for the DeepSeek leg, which only supports json_object (free-form
-# valid JSON), not full schema enforcement.
+# via `format=<schema>` to enable constrained decoding (Ollama 0.5+) —
+# the model literally cannot emit non-JSON or non-conforming JSON, including
+# unexpected fields (additionalProperties: False).
+#
+# Note on DeepSeek: this schema is NOT passed to DeepSeek and is NOT used
+# to validate DeepSeek output. DeepSeek only supports
+# `response_format={"type":"json_object"}` (syntax-only). The DeepSeek leg
+# relies on `_parse_response`'s manual per-field extraction-with-clamps to
+# accept the response — the existing logic tolerates missing/wrong-typed
+# fields by clamping or defaulting (e.g. invalid `recommendation` → SKIP,
+# `confidence` clamped to [0, 1]). That manual path is the de-facto safety
+# net; this schema constant is the source of truth for what shape we ASK
+# for, not what we enforce on DeepSeek's reply.
 #
 # Source for Ollama format: https://docs.ollama.com/capabilities/structured-outputs
 # Source for DeepSeek json_object: https://api-docs.deepseek.com/api/create-chat-completion
@@ -71,6 +79,9 @@ ANALYSIS_SCHEMA = {
         "reasoning",
         "risk_factors",
     ],
+    # Reject extra keys outright. Constrained decoding then can't even
+    # generate them, eliminating any noise from chatty model outputs.
+    "additionalProperties": False,
 }
 
 
