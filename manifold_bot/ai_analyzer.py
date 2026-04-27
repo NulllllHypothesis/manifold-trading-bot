@@ -461,7 +461,11 @@ def _call_deepseek_api(prompt: str) -> Optional[str]:
                 "max_tokens": 400,
                 # DeepSeek json_object mode = guarantee valid JSON syntax.
                 # NOT a strict-schema mode (DeepSeek doesn't expose one), so
-                # _parse_response still validates shape against ANALYSIS_SCHEMA.
+                # _parse_response's manual per-field extraction-with-clamps is
+                # what tolerates missing/wrong-typed fields here (e.g. unknown
+                # recommendation → SKIP, confidence clamped to [0, 1]). The
+                # ANALYSIS_SCHEMA constant is the source of truth for what we
+                # ASK for, but it's not enforced on this reply.
                 # Source: https://api-docs.deepseek.com/api/create-chat-completion
                 "response_format": {"type": "json_object"},
             },

@@ -536,9 +536,11 @@ class TestStructuredOutputWiring(unittest.TestCase):
     def test_deepseek_request_carries_json_object_response_format(self):
         """DeepSeek doesn't support strict JSON Schema; it does support
         `response_format={"type":"json_object"}` which guarantees valid JSON
-        syntax (not shape). _parse_response still validates shape against
-        ANALYSIS_SCHEMA. Without json_object, the fallback re-introduces
-        the parse-failure mode we just fixed for Ollama."""
+        syntax (not shape). Shape on the DeepSeek leg is handled by
+        `_parse_response`'s manual per-field extraction-with-clamps, NOT by
+        passing ANALYSIS_SCHEMA to DeepSeek (which would be a no-op since
+        DeepSeek can't enforce it anyway). Without json_object, the fallback
+        re-introduces the parse-failure mode we just fixed for Ollama."""
         import unittest.mock as mock
 
         captured_request = {}
