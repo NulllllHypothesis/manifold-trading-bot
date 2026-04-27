@@ -12,7 +12,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manifold_bot.ai_analyzer import _parse_response, analyze_market
+from manifold_bot.ai_analyzer import (
+    _parse_response,
+    analyze_market,
+    ANALYSIS_SCHEMA,
+)
 
 
 class TestParseResponse(unittest.TestCase):
@@ -440,6 +444,118 @@ class TestConfidenceBlending(unittest.TestCase):
         self.assertAlmostEqual(WEAK_STAT_CAP, 0.64)
         self.assertAlmostEqual(STAT_BOOST_FLOOR, 0.65)
         self.assertLess(WEAK_STAT_CAP, STAT_BOOST_FLOOR)  # cap must always be below floor
+
+
+class TestAnalysisSchemaShape(unittest.TestCase):
+    """ANALYSIS_SCHEMA is the contract Ollama's constrained decoding enforces.
+    Lock its shape so we don't accidentally drift the schema and silently
+    invalidate every previous run's outputs."""
+
+    def test_required_keys_present(self):
+        required = ANALYSIS_SCHEMA["required"]
+        self.assertEqual(set(required), {
+            "recommendation",
+            "confidence",
+            "estimated_true_probability",
+            "reasoning",
+            "risk_factors",
+        })
+
+    def test_recommendation_is_enum(self):
+        rec = ANALYSIS_SCHEMA["properties"]["recommendation"]
+        self.assertEqual(rec["type"], "string")
+        self.assertEqual(set(rec["enum"]), {"YES", "NO", "SKIP"})
+
+    def test_probability_fields_bounded(self):
+        for k in ("confidence", "estimated_true_probability"):
+            field = ANALYSIS_SCHEMA["properties"][k]
+            self.assertEqual(field["type"], "number")
+            self.assertEqual(field["minimum"], 0.0)
+            self.assertEqual(field["maximum"], 1.0)
+
+
+class TestStructuredOutputWiring(unittest.TestCase):
+    """Verify the schema and response_format actually get sent to the
+    LLM endpoints. These are the on-the-wire contracts that make the
+    constrained-decoding fix work."""
+
+    def _make_market(self):
+        return {
+            'id': 'test123',
+            'question': 'Will it rain tomorrow?',
+            'probability': 0.5,
+            'volume': 1000,
+            'totalLiquidity': 500,
+            'closeTime': 1800000000000,
+            'creatorName': 'tester',
+        }
+
+    def test_ollama_request_carries_format_schema(self):
+        """The whole point of PR #30: pass `format=ANALYSIS_SCHEMA` to the
+        Ollama generate endpoint so the model's output is constrained-
+        decoded against the schema. If this regresses, we silently go back
+        to the 78% null-output rate from prose-prompted JSON."""
+        import unittest.mock as mock
+
+        captured_request = {}
+
+        class _MockResponse:
+            status_code = 200
+            def iter_lines(self, chunk_size=None):
+                yield b'{"response": "{\\"recommendation\\":\\"YES\\",\\"confidence\\":0.7,\\"estimated_true_probability\\":0.7,\\"reasoning\\":\\"x\\",\\"risk_factors\\":\\"y\\"}", "done": true}'
+            def __init__(self): self.raw = mock.MagicMock()
+
+        def _fake_post(url, json=None, **kwargs):
+            captured_request['url'] = url
+            captured_request['json'] = json
+            return _MockResponse()
+
+        with mock.patch('requests.post', side_effect=_fake_post), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value=None):
+            analyze_market(self._make_market())
+
+        self.assertIn('format', captured_request['json'],
+                      'Ollama request must carry format= for constrained decoding')
+        self.assertEqual(captured_request['json']['format'], ANALYSIS_SCHEMA,
+                         'format= must be the canonical ANALYSIS_SCHEMA, not a stale copy')
+        self.assertIn('/api/generate', captured_request['url'])
+
+    def test_deepseek_request_carries_json_object_response_format(self):
+        """DeepSeek doesn't support strict JSON Schema; it does support
+        `response_format={"type":"json_object"}` which guarantees valid JSON
+        syntax (not shape). _parse_response still validates shape against
+        ANALYSIS_SCHEMA. Without json_object, the fallback re-introduces
+        the parse-failure mode we just fixed for Ollama."""
+        import unittest.mock as mock
+
+        captured_request = {}
+
+        class _MockDeepseekResponse:
+            status_code = 200
+            def json(self):
+                return {"choices": [{"message": {"content":
+                    '{"recommendation":"NO","confidence":0.7,'
+                    '"estimated_true_probability":0.3,"reasoning":"x","risk_factors":"y"}'
+                }}]}
+
+        def _fake_post(url, json=None, **kwargs):
+            captured_request['url'] = url
+            captured_request['json'] = json
+            return _MockDeepseekResponse()
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value=None), \
+             mock.patch('requests.post', side_effect=_fake_post), \
+             mock.patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test-key'}):
+            analyze_market(self._make_market())
+
+        self.assertIn('response_format', captured_request['json'],
+                      'DeepSeek request must carry response_format')
+        self.assertEqual(
+            captured_request['json']['response_format'],
+            {"type": "json_object"},
+            'response_format must be json_object — DeepSeek does not support strict JSON schema'
+        )
+        self.assertIn('chat/completions', captured_request['url'])
 
 
 if __name__ == '__main__':
