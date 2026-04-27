@@ -267,6 +267,58 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
         self.assertFalse(captured.get('fallback_to_deepseek_used'))
         self.assertFalse(captured.get('deepseek_saved_a_parse_failure'))
 
+    def test_deepseek_key_read_at_call_time_not_import_time(self):
+        """Regression: ai_analyzer used to capture DEEPSEEK_API_KEY in a
+        module-level constant at import time, which silently broke the
+        DeepSeek fallback whenever ai_analyzer was imported before config.py
+        loaded .env (e.g. an isolated unit test, or a future entry point
+        that doesn't go through manifold_api first).
+
+        The fix reads os.environ.get("DEEPSEEK_API_KEY", "") inside
+        _call_deepseek_api at call time. This test simulates the broken
+        path: env starts empty when ai_analyzer is imported (already done),
+        we set the key AFTER import, and verify the call still picks it up."""
+        import os
+        import unittest.mock as mock
+        import manifold_bot.ai_analyzer as ai_mod
+
+        # Make sure module-level constant doesn't exist anymore (the fix)
+        self.assertFalse(hasattr(ai_mod, 'DEEPSEEK_API_KEY'),
+                         "Module-level DEEPSEEK_API_KEY constant must be gone — "
+                         "it created an import-order ordering contract that "
+                         "silently broke fallback when ai_analyzer imported "
+                         "first.")
+
+        original = os.environ.get("DEEPSEEK_API_KEY", "")
+        try:
+            # Simulate "key is set in env after ai_analyzer was already imported"
+            os.environ["DEEPSEEK_API_KEY"] = "test-key-set-after-import"
+            self.assertEqual(ai_mod._get_deepseek_api_key(), "test-key-set-after-import")
+
+            os.environ["DEEPSEEK_API_KEY"] = ""
+            self.assertEqual(ai_mod._get_deepseek_api_key(), "")
+        finally:
+            if original:
+                os.environ["DEEPSEEK_API_KEY"] = original
+            else:
+                os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_deepseek_call_returns_none_when_key_missing_at_call_time(self):
+        """Behavioral test of the lazy-read: with the env var explicitly
+        empty at call time, _call_deepseek_api short-circuits to None."""
+        import os
+        import manifold_bot.ai_analyzer as ai_mod
+
+        original = os.environ.get("DEEPSEEK_API_KEY", "")
+        try:
+            os.environ["DEEPSEEK_API_KEY"] = ""
+            self.assertIsNone(ai_mod._call_deepseek_api("any prompt"))
+        finally:
+            if original:
+                os.environ["DEEPSEEK_API_KEY"] = original
+            else:
+                os.environ.pop("DEEPSEEK_API_KEY", None)
+
 
 class TestConfidenceBlending(unittest.TestCase):
     """
