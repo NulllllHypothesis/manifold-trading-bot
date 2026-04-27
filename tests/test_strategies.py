@@ -337,6 +337,74 @@ class TestCategoryV2(unittest.TestCase):
     def test_v1_sports(self):
         self.assertEqual(_infer_market_category("Will the Lakers win the NBA championship?"), "sports")
 
+    # ── Team-name catches (added 2026-04-25 after audit) ──────────────────────
+    # Team-vs-team market questions used to fall through to 'other' because the
+    # keyword list only had acronyms (NBA, NFL) and generic tokens. Now the bare
+    # team names are matched.
+
+    def test_sports_nba_team_vs_team_cavs_raptors(self):
+        self.assertEqual(
+            _infer_market_category("Cavaliers vs Raptors, April 23rd"),
+            "sports",
+        )
+
+    def test_sports_nba_team_vs_team_nuggets_wolves(self):
+        self.assertEqual(
+            _infer_market_category("Nuggets vs Timberwolves, April 23rd"),
+            "sports",
+        )
+
+    def test_sports_nba_team_vs_team_spurs_blazers(self):
+        self.assertEqual(
+            _infer_market_category("Spurs vs Trailblazers, April 26th"),
+            "sports",
+        )
+
+    def test_sports_nba_team_vs_team_with_space(self):
+        """Trail Blazers (with space) is the official spelling — must match
+        even though the canonical team-name list also has 'trailblazers'."""
+        self.assertEqual(
+            _infer_market_category("Spurs vs Trail Blazers, April 26th"),
+            "sports",
+        )
+
+    def test_sports_nfl_team_steelers(self):
+        self.assertEqual(
+            _infer_market_category("Will the Steelers make the playoffs?"),
+            "sports",
+        )
+
+    def test_sports_mlb_team_yankees(self):
+        self.assertEqual(
+            _infer_market_category("Will the Yankees beat the Mets in the Subway Series?"),
+            "sports",
+        )
+
+    def test_sports_nhl_team_canadiens(self):
+        self.assertEqual(
+            _infer_market_category("Will the Canadiens make the Stanley Cup playoffs?"),
+            "sports",
+        )
+
+    # ── False-positive guard rails ────────────────────────────────────────────
+
+    def test_high_collision_terms_NOT_classified_as_sports(self):
+        """High-collision team names like Giants/Lions/Eagles/Saints/Cardinals
+        were deliberately omitted from the sports list. These should NOT be
+        bucketed as sports just because the word appears."""
+        non_sports_questions = [
+            ("Will tech giants like Apple report record earnings?", "business"),  # ' apple ' wins
+            ("Will Eagles album sales hit 10M?",                    "entertainment"),  # 'album' wins
+            # Bare 'lions' / 'cardinals' / 'saints' should fall through to 'other',
+            # not get falsely tagged as sports.
+            ("Will the lions roar on Sunday?",                      "other"),
+            ("Will cardinals migrate north early?",                 "other"),
+            ("Will saints be canonized faster than usual?",         "other"),
+        ]
+        for q, expected in non_sports_questions:
+            with self.subTest(q=q):
+                self.assertEqual(_infer_market_category(q), expected)
+
     def test_v1_economics(self):
         self.assertEqual(
             _infer_market_category("Will inflation hit 5% by Q3?"),
