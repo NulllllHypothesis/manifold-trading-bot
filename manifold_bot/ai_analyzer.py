@@ -35,6 +35,56 @@ DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
+# JSON Schema for the structured market-analysis output. Passed to Ollama
+# via `format=<schema>` to enable constrained decoding (Ollama 0.5+) —
+# the model literally cannot emit non-JSON or non-conforming JSON, including
+# unexpected fields (additionalProperties: False).
+#
+# Note on DeepSeek: this schema is NOT passed to DeepSeek and is NOT used
+# to validate DeepSeek output. DeepSeek only supports
+# `response_format={"type":"json_object"}` (syntax-only). The DeepSeek leg
+# relies on `_parse_response`'s manual per-field extraction-with-clamps to
+# accept the response — the existing logic tolerates missing/wrong-typed
+# fields by clamping or defaulting (e.g. invalid `recommendation` → SKIP,
+# `confidence` clamped to [0, 1]). That manual path is the de-facto safety
+# net; this schema constant is the source of truth for what shape we ASK
+# for, not what we enforce on DeepSeek's reply.
+#
+# Source for Ollama format: https://docs.ollama.com/capabilities/structured-outputs
+# Source for DeepSeek json_object: https://api-docs.deepseek.com/api/create-chat-completion
+ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recommendation": {
+            "type": "string",
+            "enum": ["YES", "NO", "SKIP"],
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+        "estimated_true_probability": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+        "reasoning": {"type": "string"},
+        "risk_factors": {"type": "string"},
+    },
+    "required": [
+        "recommendation",
+        "confidence",
+        "estimated_true_probability",
+        "reasoning",
+        "risk_factors",
+    ],
+    # Reject extra keys outright. Constrained decoding then can't even
+    # generate them, eliminating any noise from chatty model outputs.
+    "additionalProperties": False,
+}
+
+
 def _get_deepseek_api_key() -> str:
     """Read DEEPSEEK_API_KEY from os.environ at CALL time, not import time.
 
@@ -338,11 +388,18 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
     PER_CHUNK_TIMEOUT   = 60   # seconds per subsequent chunk — 3b finishes in ~35s at 9 tok/s
     try:
         import requests
+        # `format=ANALYSIS_SCHEMA` enables Ollama's FSM-based constrained
+        # decoding: the model is forced to emit JSON conforming exactly to
+        # the schema. Pre-PR-30 we relied on prompt wording + regex extraction
+        # in _parse_response, which produced a 78% null-output rate on
+        # llama3.2:3b. With format= the model literally cannot emit non-JSON.
+        # Requires Ollama >= 0.5; sandbox runs 0.18.3.
         response = requests.post(
             f"{OLLAMA_BASE}/api/generate",
             json={
                 "model": OLLAMA_MODEL,
                 "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
+                "format": ANALYSIS_SCHEMA,
                 "stream": True,
                 "keep_alive": "4h",  # keep model resident; 4h covers gaps between hourly cron runs
                 "options": {"temperature": 0.3}
@@ -401,7 +458,16 @@ def _call_deepseek_api(prompt: str) -> Optional[str]:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
-                "max_tokens": 400
+                "max_tokens": 400,
+                # DeepSeek json_object mode = guarantee valid JSON syntax.
+                # NOT a strict-schema mode (DeepSeek doesn't expose one), so
+                # _parse_response's manual per-field extraction-with-clamps is
+                # what tolerates missing/wrong-typed fields here (e.g. unknown
+                # recommendation → SKIP, confidence clamped to [0, 1]). The
+                # ANALYSIS_SCHEMA constant is the source of truth for what we
+                # ASK for, but it's not enforced on this reply.
+                # Source: https://api-docs.deepseek.com/api/create-chat-completion
+                "response_format": {"type": "json_object"},
             },
             timeout=30
         )
