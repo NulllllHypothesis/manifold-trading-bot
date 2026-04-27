@@ -146,6 +146,127 @@ class TestAnalyzeMarketGracefulDegradation(unittest.TestCase):
         for key in ('recommendation', 'confidence', 'estimated_true_probability', 'reasoning', 'risk_factors', 'source', 'market_id'):
             self.assertIn(key, result, f"Missing key: {key}")
 
+    # ── PR #29: parse-failure fallback ────────────────────────────────────────
+    # Pre-PR bug: when Ollama returned text that _parse_response couldn't
+    # extract JSON from, analyze_market returned None WITHOUT trying DeepSeek.
+    # 24h log audit pre-fix: ~78% of calls had parsed_output=null, all on
+    # Ollama, all silently giving up.
+
+    def test_falls_back_to_deepseek_on_ollama_PARSE_failure(self):
+        """The bug PR #29 fixes: Ollama returns text that won't parse, but
+        DeepSeek can. Must try DeepSeek and use its result."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+        ollama_garbage = "I'm sorry, but I can't analyze this market right now."  # no JSON
+        deepseek_good = ('{"recommendation":"YES","confidence":0.71,'
+                         '"estimated_true_probability":0.65,'
+                         '"reasoning":"Real reasoning.","risk_factors":"Minor."}')
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value=ollama_garbage), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value=deepseek_good):
+            result = analyze_market(market)
+
+        self.assertIsNotNone(result, "DeepSeek should have rescued the parse failure")
+        self.assertEqual(result['source'], 'deepseek_api')
+        self.assertEqual(result['recommendation'], 'YES')
+
+    def test_returns_none_when_both_ollama_AND_deepseek_parse_fail(self):
+        """Both back-ends produce unparseable output → return None.
+        Pre-PR this would short-circuit on Ollama; post-PR we still try
+        DeepSeek but accept None when both fail."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value="garbage"), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value="more garbage"):
+            result = analyze_market(market)
+
+        self.assertIsNone(result)
+
+    def test_log_record_carries_observability_flags(self):
+        """The new log fields (ollama_parse_failed, fallback_to_deepseek_used,
+        deepseek_saved_a_parse_failure) are what PR #29's 24h validation
+        keys off. Test that the headline metric is True when DeepSeek
+        actually saves an Ollama parse failure."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+        ollama_garbage = "no json here"
+        deepseek_good = ('{"recommendation":"NO","confidence":0.69,'
+                         '"estimated_true_probability":0.30,'
+                         '"reasoning":"X.","risk_factors":"Y."}')
+
+        captured = {}
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value=ollama_garbage), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value=deepseek_good), \
+             mock.patch('manifold_bot.ai_analyzer._log_llm_call', side_effect=_capture):
+            result = analyze_market(market)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(captured.get('ollama_parse_failed'),
+                        "ollama_parse_failed must be True when Ollama returned garbage")
+        self.assertTrue(captured.get('fallback_to_deepseek_used'),
+                        "fallback_to_deepseek_used must be True when we reached DeepSeek")
+        self.assertTrue(captured.get('deepseek_saved_a_parse_failure'),
+                        "deepseek_saved_a_parse_failure must be True — that's the headline metric")
+        self.assertFalse(captured.get('ollama_returned_none'),
+                         "ollama_returned_none must be False — Ollama did return something")
+
+    def test_log_record_when_ollama_returns_none_and_deepseek_succeeds(self):
+        """Pre-PR behavior preserved: transport-level Ollama failure → DeepSeek
+        fallback. Distinguishes ollama_returned_none from ollama_parse_failed
+        in the log so 24h analytics can split the two failure modes."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+        deepseek_good = ('{"recommendation":"YES","confidence":0.72,'
+                         '"estimated_true_probability":0.70,'
+                         '"reasoning":"X.","risk_factors":"Y."}')
+
+        captured = {}
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value=None), \
+             mock.patch('manifold_bot.ai_analyzer._call_deepseek_api', return_value=deepseek_good), \
+             mock.patch('manifold_bot.ai_analyzer._log_llm_call', side_effect=_capture):
+            analyze_market(market)
+
+        self.assertTrue(captured.get('ollama_returned_none'))
+        self.assertFalse(captured.get('ollama_parse_failed'),
+                         "Parse never ran — Ollama returned None, not garbage")
+        self.assertTrue(captured.get('fallback_to_deepseek_used'))
+        self.assertFalse(captured.get('deepseek_saved_a_parse_failure'),
+                         "deepseek_saved_a_parse_failure is specifically the parse-fail-rescue case")
+
+    def test_log_record_when_only_ollama_used(self):
+        """Happy path: Ollama returns parseable JSON. None of the failure
+        flags should be set."""
+        import unittest.mock as mock
+
+        market = self._make_market()
+        ollama_good = ('{"recommendation":"YES","confidence":0.80,'
+                       '"estimated_true_probability":0.82,'
+                       '"reasoning":"X.","risk_factors":"Y."}')
+
+        captured = {}
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+
+        with mock.patch('manifold_bot.ai_analyzer._call_ollama', return_value=ollama_good), \
+             mock.patch('manifold_bot.ai_analyzer._log_llm_call', side_effect=_capture):
+            analyze_market(market)
+
+        self.assertFalse(captured.get('ollama_returned_none'))
+        self.assertFalse(captured.get('ollama_parse_failed'))
+        self.assertFalse(captured.get('fallback_to_deepseek_used'))
+        self.assertFalse(captured.get('deepseek_saved_a_parse_failure'))
+
 
 class TestConfidenceBlending(unittest.TestCase):
     """

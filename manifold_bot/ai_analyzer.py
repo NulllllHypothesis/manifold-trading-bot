@@ -209,6 +209,10 @@ def _log_llm_call(
     source: str = "unknown",
     latency_ms: Optional[float] = None,
     ollama_timed_out: bool = False,
+    ollama_returned_none: bool = False,
+    ollama_parse_failed: bool = False,
+    fallback_to_deepseek_used: bool = False,
+    deepseek_saved_a_parse_failure: bool = False,
 ) -> None:
     """Append a JSONL record for every LLM call (for future distillation).
 
@@ -243,6 +247,19 @@ def _log_llm_call(
             "source": source,                        # "ollama" or "deepseek_api"
             "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
             "ollama_timed_out": ollama_timed_out,    # True = stuck runner detected
+            # PR #29 fallback observability — counted in 24h audits to validate
+            # the parse-failure-fallback fix actually moves the parsed_output
+            # success rate. ollama_returned_none = transport failure (existed
+            # pre-PR); ollama_parse_failed = Ollama returned text but couldn't
+            # be parsed (was the silent-failure mode pre-PR);
+            # fallback_to_deepseek_used = we reached the DeepSeek path;
+            # deepseek_saved_a_parse_failure = headline metric — DeepSeek
+            # produced parseable output specifically after Ollama's parse
+            # failure (the new path this PR added).
+            "ollama_returned_none": ollama_returned_none,
+            "ollama_parse_failed": ollama_parse_failed,
+            "fallback_to_deepseek_used": fallback_to_deepseek_used,
+            "deepseek_saved_a_parse_failure": deepseek_saved_a_parse_failure,
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
             # raw_response and chain_of_thought are intentionally excluded
@@ -477,23 +494,41 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
     )
 
     # Try Ollama first (free), then DeepSeek API.
-    # Track latency and whether Ollama timed out (stuck runner vs just down).
+    # Two distinct Ollama failure modes both trigger the DeepSeek fallback:
+    #   1. Transport-level: _call_ollama returned None (connection failed,
+    #      timeout, HTTP non-200). Original code already handled this.
+    #   2. Parse-level: Ollama returned text but _parse_response couldn't
+    #      extract a valid JSON object. Original code returned None here
+    #      WITHOUT trying DeepSeek — that's the bug PR #29 fixes.
+    # 24h log audit pre-fix: 21/27 calls (~78%) had parsed_output=null,
+    # all on Ollama, and DeepSeek never got a chance to save them.
     ollama_meta: dict = {}
     t0 = time.monotonic()
+
     raw = _call_ollama(prompt, meta=ollama_meta)
     source = "ollama"
     ollama_timed_out = ollama_meta.get('timed_out', False)
+    ollama_returned_none = (raw is None)
 
-    if raw is None:
-        raw = _call_deepseek_api(prompt)
-        source = "deepseek_api"
+    # Try parsing whatever Ollama returned (None gives None back trivially).
+    result = _parse_response(raw) if raw is not None else None
+    ollama_parse_failed = (raw is not None and result is None)
+
+    # Fall back to DeepSeek on EITHER transport-failure (raw is None) or
+    # parse-failure (result is None despite raw being non-empty).
+    fallback_to_deepseek_used = False
+    if result is None:
+        ds_raw = _call_deepseek_api(prompt)
+        if ds_raw is not None:
+            fallback_to_deepseek_used = True
+            source = "deepseek_api"
+            result = _parse_response(ds_raw)
+
+    deepseek_saved_a_parse_failure = (
+        ollama_parse_failed and fallback_to_deepseek_used and result is not None
+    )
 
     latency_ms = (time.monotonic() - t0) * 1000
-
-    if raw is None:
-        return None
-
-    result = _parse_response(raw)
 
     # Log after parsing so parsed_output is available.
     # raw_response is intentionally not forwarded to _log_llm_call — see
@@ -505,6 +540,10 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
         source=source,
         latency_ms=latency_ms,
         ollama_timed_out=ollama_timed_out,
+        ollama_returned_none=ollama_returned_none,
+        ollama_parse_failed=ollama_parse_failed,
+        fallback_to_deepseek_used=fallback_to_deepseek_used,
+        deepseek_saved_a_parse_failure=deepseek_saved_a_parse_failure,
     )
 
     if result:
