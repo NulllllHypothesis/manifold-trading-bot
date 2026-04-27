@@ -24,7 +24,15 @@ LLM_LOG_DIR = Path(os.environ.get('LLM_LOG_DIR', Path(__file__).resolve().parent
 OLLAMA_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "llama3.2:3b"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"
+# Switched from "deepseek-chat" to "deepseek-v4-flash" on 2026-04-27.
+# Per https://api-docs.deepseek.com/quick_start/pricing the older
+# "deepseek-chat" alias "will be deprecated in the future" and now
+# "corresponds to non-thinking mode of deepseek-v4-flash" — i.e. they map
+# to the same backend today, but only "deepseek-v4-flash" is guaranteed to
+# keep working when the alias is retired. Same auth, same endpoint, no
+# breaking changes. Use "deepseek-v4-pro" (thinking mode) only for offline
+# backfill where extra reasoning latency is acceptable.
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
 def _get_deepseek_api_key() -> str:
