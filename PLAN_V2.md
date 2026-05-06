@@ -859,6 +859,23 @@ This is the "if I could only do one thing at a time, what order?" list:
 AI is generating real signal — most recent research had `ai_status=agree` on 2 of 17 candidates and `disagree` on 1 — but those candidates still die in the gate stack. Top two AI-agree recommendations were both `category=other, resolvability=low` (rejected by `position_class_full` because the 3 remaining OPEN are all `long_or_uncertain`).
 
 The defensive filters (PRs #22/#25) were correct in design but over-fitted to the pre-AI-reliability era. Specific suggestion: make `solo_momentum_low_res` NOT fire when `ai_status=agree` (AI confirmation upgrades the signal beyond "solo weak"). Reconsider `long_or_uncertain` cap=2 when bucket has stale OPEN positions blocking new ones.
+### 2026-05-06 daily entry — PRs #31 / #32 / #33 + capital top-up
+
+- **PR #31 — silent-skip counters + capital-epoch script + weekly proposal-counter rotation.** Wired `kelly_no_edge`, `size_too_small`, `market_state_changed` counters that previously vanished. New `scripts/start_new_capital_epoch.py`. New `manifold_bot/proposal_archive.py` rotates pending_closes / swaps / abandons weekly so IDs stay fresh.
+- **Operational top-up.** Ran `start_new_capital_epoch.py --target 100` on sandbox at 07:56 UTC. Balance reset $16.76 → $100. Second epoch entry recorded.
+- **PR #32 — Polymarket read-only ingestion + `markets_normalized` schema** (Tier-2 first brick). New `data/markets_normalized.db` (separate file, clean boundary from calibration.db / market_snapshots.db). Cron `:15` installed on sandbox. First ingest run pulled 20 markets, all populated. **Tier-2 of the strategic pivot is now writing real data.**
+- **PR #33 — `solo_no_ai_confirmation` gate.** Triggered immediately by post-topup audit: bot fired one trade in 0.4h that was the textbook losing pattern (solo `probability_direction`, `ai_status=not_run`, confidence=0.65 floor, resolvability=medium so PR #25 didn't fire). New gate blocks solo `probability_direction` when `ai_status` ∈ {`not_run`, `no_result`}. +8 truth-table tests. **867/867 passing.**
+
+### 24h checkpoint — Kalshi go/no-go on 2026-05-07
+
+Polymarket ingest just went live. Before adding another platform (more API surface, more cron interference risk, more schema decisions), validate one full day of Polymarket data:
+- Row growth pattern (target: a few hundred markets per cycle, deduped via PK)
+- Missing-field rate (currently 0/20)
+- Cron runtime (no slowdowns / collisions with `:20` trader)
+- API rate-limit behavior (no 429s)
+
+Decision rule: if all four checks pass cleanly, ship Kalshi. If any are messy, fix Polymarket-ingest first.
+
 24. **Multi-platform ingestion** (Tier-2 per strategic pivot) — `markets_normalized` unified schema + read-only Polymarket fetcher + Kalshi fetcher + cross-platform market matching. Replaces "Polymarket integration (Phase 4.1)" as the next major architectural step.
 25. **AI backfill cron** (Tier-3) — analyze held positions and resolved-but-not-traded markets to grow fine-tune corpus. Memory: `project_ai_backfill_idea.md`. Promoted from "deferred" to Tier-3 after the strategic pivot.
 26. **Swap checker migration to position_score** (Phase 2.3b) — deferred per pivot
