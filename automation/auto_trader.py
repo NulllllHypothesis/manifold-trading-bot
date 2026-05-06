@@ -55,6 +55,7 @@ def _new_trader_counters() -> dict:
             "market_unverifiable":  0,
             "negative_ev":          0,      # estimated_ev ≤ MIN_ESTIMATED_EV_FLOOR
             "solo_momentum_low_res": 0,     # solo probability_direction in low-resolvability
+            "solo_no_ai_confirmation": 0,   # solo probability_direction + ai_status in (not_run, no_result)
             "market_state_changed":  0,     # market resolved/closed between :00 research and :20 trade,
                                             # or API fetch failed in execute_trade
         },
@@ -501,6 +502,45 @@ class AutoTrader:
                 f"skipping (signal too weak to overcome resolution uncertainty)"
             )
             return "solo_momentum_low_res"
+
+        # Block solo `probability_direction` when AI didn't see this market.
+        #
+        # Empirical pattern (post-PR-30 audit, 2026-05-06): with AI parsing now
+        # at 100%, the bot fired one trade in 0.4h that was solo
+        # probability_direction at confidence=0.65 (the floor) on a
+        # geopolitical market AI never analyzed (ai_status=not_run). The gate
+        # stack accepted it because every threshold was at-or-above the
+        # minimum — but every threshold was at the bare minimum, which is
+        # exactly the failure pattern we kept losing on pre-PR-30.
+        #
+        # Rule: if the only voting signal is probability_direction (the
+        # weakest base-confidence-0.65 strategy) AND AI didn't return a
+        # usable result for this market (`not_run` = AI never tried it,
+        # `no_result` = AI tried and failed), reject. The trader has no
+        # business taking the weakest possible signal blind to AI.
+        #
+        # NOT blocked:
+        #   - probability_direction with another voting strategy (multi-signal
+        #     trades have at least the corroboration of two independent reads)
+        #   - probability_direction with ai_status='agree' (AI saw and agreed)
+        #   - probability_direction with ai_status='disagree' (the existing
+        #     blended-confidence path scales confidence DOWN, and either
+        #     low_confidence or negative_ev gates take it from there)
+        #   - any non-prob_direction strategy as the solo signal
+        #
+        # `thin_market` is excluded from voter-count as before — it's a
+        # +0.03 confirmation boost, not a vote.
+        ai_status = recommendation.get('ai_status')
+        if (
+            voting_strats == ['probability_direction']
+            and ai_status in ('not_run', 'no_result')
+        ):
+            print(
+                f"  Solo probability_direction with no AI confirmation "
+                f"(ai_status={ai_status}) — skipping (AI must vote on the "
+                f"weakest single signal)"
+            )
+            return "solo_no_ai_confirmation"
 
         # Negative-EV invariant: don't knowingly trade what the stat model
         # expects to lose money on. Prefer estimated_ev_exec (honest stake-

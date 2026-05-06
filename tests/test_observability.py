@@ -178,7 +178,7 @@ class TestTraderCountersShape(unittest.TestCase):
             "ai_veto", "low_confidence", "existing_open", "max_positions",
             "category_cap", "position_class_full", "liquidity", "kelly_no_edge",
             "size_too_small", "market_unverifiable", "negative_ev",
-            "solo_momentum_low_res", "market_state_changed",
+            "solo_momentum_low_res", "solo_no_ai_confirmation", "market_state_changed",
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():
@@ -456,7 +456,12 @@ class TestTradeRejectionReason(unittest.TestCase):
         self.assertEqual(reason, "ai_veto")
 
     def test_ai_status_no_result_does_not_veto(self):
-        """AI failure (no_result) must NOT veto — falls back to stat-only trading."""
+        """AI failure (no_result) must NOT trigger an ai_veto (the
+        original PR-29 invariant). Multi-strategy rec is used to bypass
+        the post-2026-05-06 solo_no_ai_confirmation gate, which is a
+        different rejection — this test specifically locks the "no_result
+        ≠ ai_veto" rule, not the broader "stat-only allowed" claim that
+        was retired when the solo_no_ai_confirmation gate shipped."""
         trader = self._make_trader_with_empty_book()
         reason = trader._trade_rejection_reason(
             "mkt_test",
@@ -464,12 +469,16 @@ class TestTradeRejectionReason(unittest.TestCase):
                 ai_status="no_result",
                 ai_recommendation=None,
                 ai_returned_skip=False,
+                strategies=["probability_direction", "probability_bias"],  # multi-signal
             ),
         )
         self.assertIsNone(reason)
 
     def test_ai_status_not_run_does_not_veto(self):
-        """Markets not sent to AI should trade on stat alone."""
+        """Markets not sent to AI must NOT trigger an ai_veto. Same as
+        no_result — the original PR-29 invariant is locked here, with
+        a multi-strategy rec to bypass the solo_no_ai_confirmation gate
+        that's a separate rejection (covered by its own tests below)."""
         trader = self._make_trader_with_empty_book()
         reason = trader._trade_rejection_reason(
             "mkt_test",
@@ -477,6 +486,7 @@ class TestTradeRejectionReason(unittest.TestCase):
                 ai_status="not_run",
                 ai_recommendation=None,
                 ai_returned_skip=False,
+                strategies=["probability_direction", "probability_bias"],  # multi-signal
             ),
         )
         self.assertIsNone(reason)
@@ -529,8 +539,12 @@ class TestTradeRejectionReason(unittest.TestCase):
         self.assertEqual(reason, "ai_veto")
 
     def test_new_no_result_record_does_not_veto(self):
-        """After this PR, new producer writes ai_status='no_result' + ai_recommendation=None
-        for AI failures. Trader must NOT veto these — they fall through to stat-only."""
+        """After PR #29 the producer writes ai_status='no_result' +
+        ai_recommendation=None for AI failures. Trader must NOT trigger
+        ai_veto on these (the PR-29 invariant). Multi-strategy rec is
+        used to bypass the post-2026-05-06 solo_no_ai_confirmation gate
+        which is a separate rejection — this test specifically locks
+        the 'no_result ≠ ai_veto' rule."""
         trader = self._make_trader_with_empty_book()
         reason = trader._trade_rejection_reason(
             "mkt_test",
@@ -539,6 +553,7 @@ class TestTradeRejectionReason(unittest.TestCase):
                 ai_recommendation=None,
                 ai_returned_skip=False,
                 ai_confidence=0.0,
+                strategies=["probability_direction", "probability_bias"],  # multi-signal
             ),
         )
         self.assertIsNone(reason)
@@ -636,12 +651,154 @@ class TestTradeRejectionReason(unittest.TestCase):
 
     def test_missing_resolvability_does_not_trigger(self):
         """A recommendation without resolvability (legacy or pre-classify)
-        falls through this gate — None is not 'low'."""
+        falls through the low-res gate — None is not 'low'. ai_status
+        defaults to None which also falls through the new
+        solo_no_ai_confirmation gate."""
         trader = self._make_trader_with_empty_book()
         rec = self._make_rec(strategies=["probability_direction"])
         rec.pop('resolvability', None)
         reason = trader._trade_rejection_reason("mkt_test", rec)
         self.assertIsNone(reason)
+
+    # ── solo probability_direction + AI didn't vote (PR-after-PR-32) ─────────
+    # Empirical pattern: post-PR-30 the bot fired one trade in 0.4h that was
+    # solo prob_direction at conf=0.65 with ai_status=not_run. Every gate
+    # threshold was at the bare minimum. This test class locks in that the
+    # new gate blocks that exact combination.
+
+    def test_solo_prob_direction_with_not_run_blocked(self):
+        """The exact pattern from the post-topup audit: solo prob_direction,
+        AI never analyzed the market (top-3 budget didn't reach it)."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                ai_status="not_run",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+                resolvability="medium",  # so solo_momentum_low_res doesn't fire
+            ),
+        )
+        self.assertEqual(reason, "solo_no_ai_confirmation")
+
+    def test_solo_prob_direction_with_no_result_blocked(self):
+        """Same gate fires when AI tried but failed (parse error, transport
+        failure)."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                ai_status="no_result",
+                ai_recommendation=None,
+                ai_returned_skip=False,
+                resolvability="medium",
+            ),
+        )
+        self.assertEqual(reason, "solo_no_ai_confirmation")
+
+    def test_solo_prob_direction_with_agree_passes(self):
+        """AI explicitly agreed → trade proceeds even if solo strategy."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                ai_status="agree",
+                ai_recommendation="YES",
+                resolvability="medium",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_solo_prob_direction_with_disagree_does_not_trigger_this_gate(self):
+        """ai_status='disagree' is handled by the existing blended-confidence
+        path (research scales confidence DOWN). The trader sees whatever
+        confidence survived blending — if it's still ≥ MIN_CONFIDENCE the
+        trade proceeds. The new gate is specifically for the 'no AI vote'
+        case, NOT the 'AI voted against' case."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                ai_status="disagree",
+                ai_recommendation="NO",  # AI says NO, we recommend YES
+                resolvability="medium",
+            ),
+        )
+        # This specific gate doesn't fire on 'disagree'. (Other gates
+        # like negative_ev or low_confidence may catch it, but those are
+        # separate concerns.)
+        self.assertNotEqual(reason, "solo_no_ai_confirmation")
+
+    def test_multi_strategy_with_not_run_passes(self):
+        """If a second voting strategy fired, the gate doesn't trigger —
+        we have stat-corroboration even without AI. thin_market is
+        excluded from voter count (still counts as solo)."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction", "probability_bias"],
+                ai_status="not_run",
+                ai_recommendation=None,
+                resolvability="medium",
+            ),
+        )
+        self.assertIsNone(reason)
+
+    def test_thin_market_with_solo_prob_direction_still_blocked(self):
+        """thin_market is a confirmation boost, not a vote. Solo
+        prob_direction + thin_market with ai_status='not_run' still
+        counts as solo and is blocked — same convention as PR #25."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction", "thin_market"],
+                ai_status="not_run",
+                resolvability="medium",
+            ),
+        )
+        self.assertEqual(reason, "solo_no_ai_confirmation")
+
+    def test_solo_probability_bias_with_not_run_does_not_trigger(self):
+        """Scope guard: this gate ONLY fires on solo probability_direction.
+        Solo probability_bias may or may not deserve the same treatment
+        but is out of scope for this PR (locked in by test until we have
+        Phase 3 data on probability_bias accuracy)."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_bias"],
+                ai_status="not_run",
+                ai_recommendation=None,
+                resolvability="medium",
+            ),
+        )
+        self.assertNotEqual(reason, "solo_no_ai_confirmation")
+
+    def test_low_res_gate_takes_precedence_over_no_ai_gate(self):
+        """When both gates would fire (solo prob_direction, low resolvability,
+        not_run), the low-res gate wins because it's checked first. The
+        ordering doesn't change the outcome — both reject — but the
+        specific reason recorded matters for 24h audits."""
+        trader = self._make_trader_with_empty_book()
+        reason = trader._trade_rejection_reason(
+            "mkt_test",
+            self._make_rec(
+                strategies=["probability_direction"],
+                ai_status="not_run",
+                resolvability="low",  # would also fail solo_momentum_low_res
+            ),
+        )
+        # Currently solo_momentum_low_res is checked before
+        # solo_no_ai_confirmation. If that ordering changes, this test
+        # is a tripwire so we re-think the audit semantics.
+        self.assertEqual(reason, "solo_momentum_low_res")
 
     def test_existing_open_reason(self):
         trader = self._make_trader_with_empty_book()
