@@ -50,6 +50,7 @@ sys.path.insert(0, str(_ROOT))
 
 from manifold_bot.config import STALE_GRACE_HOURS, STALE_ABANDON_DAYS
 from manifold_bot.manifold_api import api_client
+from manifold_bot.proposal_archive import rotate_if_new_week
 from automation.send_telegram import send_telegram_message
 
 
@@ -279,6 +280,11 @@ def run_detector(
 
     pending = _load_pending_abandons()
     if _auto_expire_old_abandons(pending):
+        _save_pending_abandons(pending)
+    # Weekly ID rotation — same convention as evaluate_positions / swap checker.
+    rotated = rotate_if_new_week(pending, _ROOT / "data", "pending_abandons")
+    if rotated is not pending:
+        pending = rotated
         _save_pending_abandons(pending)
     already_proposed = _existing_pending_abandon_ids(pending)
     next_id = max((p.get('id', 0) for p in pending), default=0) + 1

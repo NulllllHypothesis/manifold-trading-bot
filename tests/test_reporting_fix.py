@@ -329,5 +329,63 @@ class TestPositionsTelegram(unittest.TestCase):
         self.assertNotIn("· AI ", msg)
 
 
+class TestStartNewCapitalEpoch(unittest.TestCase):
+    """scripts/start_new_capital_epoch.py — operational reset used when
+    the bot is in capital starvation. Locks in: balance reset to target,
+    epoch entry appended (not replacing prior epochs), reason persisted,
+    dry-run path doesn't mutate."""
+
+    def _write_state(self, balance: float, epochs: list = None) -> str:
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        state = {
+            "balance": balance,
+            "positions": {},
+            "trade_history": [],
+            "capital_epochs": epochs or [],
+        }
+        with open(path, "w") as f:
+            json.dump(state, f)
+        return path
+
+    def test_resets_balance_and_appends_epoch(self):
+        from scripts.start_new_capital_epoch import main
+        path = self._write_state(balance=16.76, epochs=[
+            {"started_at": "2026-04-20", "topup_from": 34.76, "topup_to": 100.00},
+        ])
+        try:
+            rc = main(path, target=100.0, reason="post-PR-30 unfreeze test", dry_run=False)
+            self.assertEqual(rc, 0)
+            with open(path) as f:
+                state = json.load(f)
+            self.assertEqual(state["balance"], 100.0)
+            self.assertEqual(len(state["capital_epochs"]), 2)  # prior + new
+            new_epoch = state["capital_epochs"][-1]
+            self.assertEqual(new_epoch["topup_from"], 16.76)
+            self.assertEqual(new_epoch["topup_to"], 100.0)
+            self.assertEqual(new_epoch["reason"], "post-PR-30 unfreeze test")
+        finally:
+            os.unlink(path)
+
+    def test_dry_run_does_not_mutate(self):
+        from scripts.start_new_capital_epoch import main
+        path = self._write_state(balance=16.76, epochs=[])
+        try:
+            rc = main(path, target=100.0, reason="dry test", dry_run=True)
+            self.assertEqual(rc, 0)
+            with open(path) as f:
+                state = json.load(f)
+            self.assertEqual(state["balance"], 16.76)  # unchanged
+            self.assertEqual(state["capital_epochs"], [])  # unchanged
+        finally:
+            os.unlink(path)
+
+    def test_missing_state_file_returns_nonzero(self):
+        from scripts.start_new_capital_epoch import main
+        rc = main("/nonexistent/path.json", target=100.0, reason="x", dry_run=False)
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
