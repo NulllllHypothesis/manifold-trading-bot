@@ -69,6 +69,9 @@ OpenClaw `agentTurn` cron jobs route through an LLM agent that has a Telegram se
 # Hourly :10 — position resolution
 10 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py >> /tmp/resolution.log 2>&1
 
+# Hourly :15 — Polymarket ingestion (multi-platform pivot, write-only)
+15 * * * *  cd $WORKSPACE && git pull origin main -q && python3 scripts/ingest_polymarket.py >> /tmp/polymarket_ingest.log 2>&1
+
 # Hourly :20 — auto trading
 20 * * * *  cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py >> /tmp/trader.log 2>&1
 
