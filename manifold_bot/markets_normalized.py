@@ -195,15 +195,25 @@ def normalize_polymarket_market(raw: Dict[str, Any], fetched_at: Optional[str] =
 
     # Tags: events is a nested array of event objects, each potentially with
     # its own tags array. Flatten to a single list of unique tag strings.
+    # Guard every level — Gamma sometimes returns events as strings, None,
+    # or with `tags` as a non-list. Reviewer caught a single malformed
+    # event raising AttributeError and crashing the whole ingest run.
     tags_set = set()
-    for event in (raw.get("events") or []):
-        for t in (event.get("tags") or []):
-            if isinstance(t, dict):
-                label = t.get("label") or t.get("slug")
-                if label:
-                    tags_set.add(label)
-            elif isinstance(t, str):
-                tags_set.add(t)
+    events = raw.get("events")
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_tags = event.get("tags")
+            if not isinstance(event_tags, list):
+                continue
+            for t in event_tags:
+                if isinstance(t, dict):
+                    label = t.get("label") or t.get("slug")
+                    if label:
+                        tags_set.add(label)
+                elif isinstance(t, str):
+                    tags_set.add(t)
     tags_json = json.dumps(sorted(tags_set))
 
     if fetched_at is None:

@@ -312,6 +312,29 @@ class TestNormalizePolymarket(unittest.TestCase):
         row = normalize_polymarket_market(raw)
         self.assertIsNone(row["probability"])
 
+    def test_malformed_events_does_not_raise(self):
+        """Reviewer regression: events array with non-dict entries
+        previously raised AttributeError on event.get('tags').
+        Helper must now handle string events, None events, events with
+        non-list tags, and tags with mixed shapes — all without raising."""
+        for bad_events in [
+            ["string-event"],
+            [None],
+            [{"tags": "not-a-list"}],
+            [{}],                                 # event with no tags key
+            [{"tags": None}],
+            [{"tags": [None, 123, {"label": "OK"}]}],  # mixed tag shapes
+        ]:
+            with self.subTest(events=bad_events):
+                raw = _sample_market(events=bad_events)
+                # Must not raise:
+                row = normalize_polymarket_market(raw)
+                self.assertIsNotNone(row)
+                # tags is JSON-encoded list; "OK" should appear when the
+                # last fixture is exercised, others should produce []
+                tags = json.loads(row["tags"])
+                self.assertIsInstance(tags, list)
+
 
 # ── 3. End-to-end ingest smoke ───────────────────────────────────────────────
 
@@ -347,6 +370,57 @@ class TestIngestSmoke(unittest.TestCase):
         finally:
             conn.close()
             os.unlink(db_path)
+
+    def test_ingest_bad_market_in_middle_does_not_stop_run(self):
+        """Reviewer regression: pre-fix, a single non-dict `events` entry
+        raised AttributeError inside normalize_polymarket_market and
+        crashed the outer loop, truncating the rest of the run. Now the
+        per-market try/except inside the loop catches it and the run
+        continues. Both good markets must end up in the DB."""
+        from scripts import ingest_polymarket
+
+        good_a = _sample_market("good-A")
+        # Force normalize to raise on this one — events is a malformed shape
+        # that bypasses the now-guarded paths AND triggers a raise inside
+        # the helper. We use a custom side_effect on normalize itself so we
+        # don't have to keep crafting fragile fixtures as guards tighten.
+        bad   = _sample_market("bad-mkt")
+        good_b = _sample_market("good-B")
+
+        from manifold_bot import markets_normalized as mn
+        original_normalize = mn.normalize_polymarket_market
+        def _normalize_or_explode(raw, fetched_at=None):
+            if raw.get("id") == "bad-mkt":
+                raise AttributeError("simulated normalize failure")
+            return original_normalize(raw, fetched_at=fetched_at)
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        db_path = Path(path)
+
+        try:
+            with mock.patch.object(ingest_polymarket.polymarket_api,
+                                   "iter_all_active_markets",
+                                   return_value=iter([good_a, bad, good_b])), \
+                 mock.patch.object(ingest_polymarket, "normalize_polymarket_market",
+                                   side_effect=_normalize_or_explode), \
+                 mock.patch.object(ingest_polymarket, "_DB_PATH", db_path):
+                rc = ingest_polymarket.main(max_pages=1, dry_run=False, page_size=100)
+            self.assertEqual(rc, 0)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = list(conn.execute(
+                    "SELECT market_id FROM markets_normalized ORDER BY market_id"
+                ))
+            finally:
+                conn.close()
+            # Both good markets present, bad-mkt skipped — NOT truncated
+            self.assertEqual({r[0] for r in rows}, {"good-A", "good-B"})
+        finally:
+            if db_path.exists():
+                os.unlink(db_path)
 
     def test_ingest_dry_run_does_not_write(self):
         from scripts import ingest_polymarket

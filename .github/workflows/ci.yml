@@ -22,11 +22,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run automation tests
-        run: python3 tests/test_automation.py
-
-      - name: Run manifold API tests
-        run: python3 tests/test_manifold.py
+      # Discover-mode runs every tests/test_*.py file, so adding a new
+      # test module (like tests/test_polymarket_ingestion.py) doesn't
+      # require also editing this workflow. Reviewer caught that the
+      # explicit per-file invocations meant new test files passed CI
+      # green even when locally broken.
+      - name: Run full unittest suite
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
         env:
           MANIFOLD_API_KEY: ${{ secrets.MANIFOLD_API_KEY }}
-        continue-on-error: true

@@ -115,6 +115,7 @@ def main():
     print("  :00 hourly   — market research (swap check runs inside)")
     print("  :05 hourly   — position repricing (measure-only)")
     print("  :10 hourly   — position resolution")
+    print("  :15 hourly   — Polymarket ingestion (multi-platform pivot, write-only)")
     print("  :20 hourly   — auto trading")
     print("  :30 hourly   — position evaluator (propose-only, human-approved closes)")
     print("  13:00 daily  — stale detection (auto STRANDED, propose ABANDONED)")

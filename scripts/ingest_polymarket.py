@@ -53,20 +53,34 @@ def main(*, max_pages: int | None, dry_run: bool, page_size: int = 100) -> int:
     rows_to_write: list[dict] = []
 
     print(f"[{fetched_at}] starting Polymarket ingest (dry_run={dry_run}, max_pages={max_pages})")
+    skipped_normalize_error = 0
     try:
+        # The OUTER try only catches API/network/iteration failures —
+        # those genuinely should bail out of the loop. Per-market
+        # normalize errors are caught INSIDE the loop so one malformed
+        # market can't truncate the rest of the run (reviewer-caught bug:
+        # a single non-dict event entry raised AttributeError and killed
+        # ~all subsequent markets in a run).
         for raw in polymarket_api.iter_all_active_markets(page_size=page_size, max_pages=max_pages):
             fetched += 1
-            row = normalize_polymarket_market(raw, fetched_at=fetched_at)
+            try:
+                row = normalize_polymarket_market(raw, fetched_at=fetched_at)
+            except Exception as e:
+                skipped_normalize_error += 1
+                mid = (raw.get("id") if isinstance(raw, dict) else "?") if raw else "?"
+                print(f"  warning: normalize failed for market {mid} ({type(e).__name__}: {e}); skipping")
+                continue
             if row is None:
                 skipped_malformed += 1
                 continue
             rows_to_write.append(row)
     except Exception as e:
-        # API failure: log and proceed to write whatever we successfully
-        # collected. Better partial data than no data.
+        # API/iteration failure: log and proceed to write whatever we
+        # successfully collected. Better partial data than no data.
         print(f"  warning: polymarket fetch interrupted ({type(e).__name__}: {e})")
 
-    print(f"  fetched: {fetched}, normalized: {len(rows_to_write)}, skipped: {skipped_malformed}")
+    print(f"  fetched: {fetched}, normalized: {len(rows_to_write)}, "
+          f"skipped_malformed: {skipped_malformed}, skipped_normalize_error: {skipped_normalize_error}")
 
     if dry_run:
         print(f"  [dry-run] would write {len(rows_to_write)} rows to {_DB_PATH}")
