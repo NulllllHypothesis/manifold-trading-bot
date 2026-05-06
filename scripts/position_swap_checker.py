@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.config import MIN_CONFIDENCE, MIN_LIQUIDITY
+from manifold_bot.proposal_archive import rotate_if_new_week
 from automation.send_telegram import send_telegram_message
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -382,6 +383,13 @@ def run_swap_check() -> int:
     # auto-dismissing at the start of each check, a stale 4h+ swap gets
     # cleaned up and the loop can propose fresh swaps immediately.
     _auto_dismiss_expired_swaps()
+
+    # Weekly ID rotation — keeps swap-proposal numbers fresh each week
+    # rather than accumulating since system start.
+    swaps = load_pending_swaps()
+    rotated = rotate_if_new_week(swaps, WORKSPACE / "data", "pending_swaps")
+    if rotated is not swaps:
+        save_pending_swaps(rotated)
 
     if has_active_pending_swaps():
         print("Active pending swaps already exist — skipping.")

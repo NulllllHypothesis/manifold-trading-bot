@@ -167,16 +167,231 @@ class TestTraderCountersShape(unittest.TestCase):
         self.assertEqual(set(self.c.keys()), expected)
 
     def test_rejection_reasons_present(self):
-        """Every gate in _trade_rejection_reason() must have a counter slot."""
+        """Every gate in _trade_rejection_reason() AND every silent-skip path
+        in calculate_position_size + execute_trade's market validation must
+        have a counter slot. Pre-PR-32 the kelly_no_edge / size_too_small
+        slots existed but nothing incremented them; market_state_changed
+        didn't exist at all. The whole point of this set is that any new
+        rejection reason in code must be added here too — drift breaks
+        24h audits silently."""
         expected = {
             "ai_veto", "low_confidence", "existing_open", "max_positions",
             "category_cap", "position_class_full", "liquidity", "kelly_no_edge",
             "size_too_small", "market_unverifiable", "negative_ev",
-            "solo_momentum_low_res",
+            "solo_momentum_low_res", "market_state_changed",
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():
             self.assertEqual(v, 0)
+
+
+# ── Silent-skip counter wiring (PR #32) ──────────────────────────────────────
+
+class TestPositionSizeSilentSkipCounters(unittest.TestCase):
+    """The 7.6-day post-PR-30 audit found 210 recommendations passed
+    pre-flight and zero executed, with no breakdown of why. Root cause:
+    calculate_position_size had four silent-skip paths (return 0.0) that
+    didn't increment any rejection counter. This test class locks in the
+    new counter wiring so we never lose that visibility again."""
+
+    def _make_trader(self, balance: float = 100.0) -> AutoTrader:
+        with patch("automation.auto_trader.PaperTrader") as MockTrader:
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            mock_instance.balance = balance
+            MockTrader.return_value = mock_instance
+            trader = AutoTrader()
+        return trader
+
+    def _new_counters(self):
+        return {"rejected": {}}
+
+    def test_kelly_no_edge_path_increments_counter(self):
+        """AI estimates a probability that gives Kelly fraction ≤ 0
+        (we'd be wrong-sided). calculate_position_size must return 0.0
+        AND increment counters['rejected']['kelly_no_edge']."""
+        trader = self._make_trader(balance=100.0)
+        rec = {
+            "confidence": 0.70,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.40,  # we bet YES, AI says only 40% YES → negative edge
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        counters = self._new_counters()
+        amount = trader.calculate_position_size(rec, "YES", counters=counters)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(counters["rejected"].get("kelly_no_edge"), 1)
+        self.assertNotIn("size_too_small", counters["rejected"])
+
+    def test_raw_size_below_minimum_increments_size_too_small(self):
+        """Capital starvation: balance × half-Kelly produces an amount
+        below MIN_BET_AMOUNT BEFORE clamping. This is the dominant
+        failure mode at the current sandbox balance ($16.76)."""
+        trader = self._make_trader(balance=5.0)  # very low balance
+        rec = {
+            "confidence": 0.70,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.55,  # tiny edge
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        # raw size = 5 * kelly(0.55, 1.0) * 0.5 * weight_1.0 = 5 * 0.05 = $0.25 < $1
+        counters = self._new_counters()
+        amount = trader.calculate_position_size(rec, "YES", counters=counters)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(counters["rejected"].get("size_too_small"), 1)
+        self.assertNotIn("kelly_no_edge", counters["rejected"])
+
+    def test_rounded_to_zero_with_ai_increments_kelly_no_edge(self):
+        """Position size > MIN_BET_AMOUNT but small enough that
+        round-to-nearest-$5 collapses it to $0. With ai_estimated_prob
+        present this is treated as kelly_no_edge (Kelly drove the
+        small size)."""
+        trader = self._make_trader(balance=20.0)
+        rec = {
+            "confidence": 0.70,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.60,
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        # raw size = 20 * kelly(0.60, 1.0) * 0.5 = 20 * 0.10 = $2 > $1, round($2/5)*5 = 0
+        counters = self._new_counters()
+        amount = trader.calculate_position_size(rec, "YES", counters=counters)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(counters["rejected"].get("kelly_no_edge"), 1)
+
+    def test_post_rounding_below_minimum_increments_size_too_small(self):
+        """Confidence-scaled fallback (no ai_estimated_probability) where
+        rounded size collapses to 0 — attributed to size_too_small,
+        because there's no Kelly fraction to blame."""
+        trader = self._make_trader(balance=10.0)
+        rec = {
+            "confidence": 0.65,
+            "probability": 0.50,
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        # base = 10 * 0.10 = $1.0; conf_mult = 0.65/0.65 = 1.0; raw = $1.0
+        # NOT < MIN_BET_AMOUNT (path 2 doesn't fire — it's $1.0 == $1.0).
+        # rounded = round(1/5)*5 = 0; ai_estimated_prob is None so path 3 skipped.
+        # position_size = 0 < MIN_BET_AMOUNT → path 4 fires.
+        counters = self._new_counters()
+        amount = trader.calculate_position_size(rec, "YES", counters=counters)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(counters["rejected"].get("size_too_small"), 1)
+
+    def test_successful_sizing_increments_no_counter(self):
+        """Happy path: real edge, healthy balance. None of the silent-skip
+        counters should be touched."""
+        trader = self._make_trader(balance=100.0)
+        rec = {
+            "confidence": 0.75,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.65,
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        counters = self._new_counters()
+        amount = trader.calculate_position_size(rec, "YES", counters=counters)
+        self.assertGreater(amount, 0.0)
+        self.assertEqual(counters["rejected"], {})
+
+    def test_counters_param_is_optional(self):
+        """All silent-skip paths must work without a counters dict —
+        unit tests of calculate_position_size shouldn't be required to
+        synthesise the full counters shape just to call it."""
+        trader = self._make_trader(balance=5.0)
+        rec = {
+            "confidence": 0.70,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.55,
+            "recommendation": "YES",
+            "strategies": [],
+            "category": "other",
+            "question": "test",
+        }
+        # Should not raise even though counters=None
+        amount = trader.calculate_position_size(rec, "YES")
+        self.assertEqual(amount, 0.0)
+
+
+class TestExecuteTradeMarketStateChangedCounter(unittest.TestCase):
+    """execute_trade has three silent-skip paths in its market-validation
+    block: market resolved, market closed, API fetch failed. All three
+    are now attributed to market_state_changed so 24h audits can spot
+    when the :00 research → :20 trade gap is too long."""
+
+    def _make_trader(self, balance: float = 100.0) -> AutoTrader:
+        with patch("automation.auto_trader.PaperTrader") as MockTrader:
+            mock_instance = MagicMock()
+            mock_instance.positions = {}
+            mock_instance.balance = balance
+            mock_instance.place_paper_bet = MagicMock(return_value=True)
+            MockTrader.return_value = mock_instance
+            trader = AutoTrader()
+        return trader
+
+    def _make_rec(self):
+        return {
+            "market_id": "mkt_test",
+            "question": "test market",
+            "recommendation": "YES",
+            "confidence": 0.75,
+            "probability": 0.50,
+            "ai_estimated_probability": 0.65,
+            "strategies": [],
+            "category": "other",
+        }
+
+    def test_resolved_market_increments_counter(self):
+        trader = self._make_trader()
+        counters = {"rejected": {}}
+        with patch("automation.auto_trader.api_client") as mock_api:
+            mock_api.get_market.return_value = {
+                "isResolved": True, "probability": 0.5, "closeTime": 9e12,
+            }
+            ok = trader.execute_trade(self._make_rec(), counters=counters)
+        self.assertFalse(ok)
+        self.assertEqual(counters["rejected"].get("market_state_changed"), 1)
+
+    def test_closed_market_increments_counter(self):
+        trader = self._make_trader()
+        counters = {"rejected": {}}
+        with patch("automation.auto_trader.api_client") as mock_api, \
+             patch("automation.auto_trader.time.time", return_value=10**12):
+            # closeTime in the past
+            mock_api.get_market.return_value = {
+                "isResolved": False, "probability": 0.5, "closeTime": 10**14,
+            }
+            # Make closeTime check fail by patching time.time to be huge
+            with patch("automation.auto_trader.time.time", return_value=10**11):
+                mock_api.get_market.return_value = {
+                    "isResolved": False, "probability": 0.5, "closeTime": 1000,
+                }
+                ok = trader.execute_trade(self._make_rec(), counters=counters)
+        self.assertFalse(ok)
+        self.assertEqual(counters["rejected"].get("market_state_changed"), 1)
+
+    def test_api_exception_increments_counter(self):
+        trader = self._make_trader()
+        counters = {"rejected": {}}
+        with patch("automation.auto_trader.api_client") as mock_api:
+            mock_api.get_market.side_effect = RuntimeError("network down")
+            ok = trader.execute_trade(self._make_rec(), counters=counters)
+        self.assertFalse(ok)
+        self.assertEqual(counters["rejected"].get("market_state_changed"), 1)
 
 
 # ── _trade_rejection_reason wiring ───────────────────────────────────────────

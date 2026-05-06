@@ -52,6 +52,7 @@ from automation.send_telegram import send_telegram_message
 # Single source of truth for the 4-bucket → 3-bucket migration map. Importing
 # rather than duplicating so a future change in one place propagates here.
 from automation.auto_trader import _normalize_position_class
+from manifold_bot.proposal_archive import rotate_if_new_week
 
 
 _STATE_PATH         = _ROOT / "manifold_bot" / "paper_trading_state.json"
@@ -668,6 +669,14 @@ def run_evaluator(
 
     pending = _load_pending_closes()
     if _auto_expire_old_closes(pending):
+        _save_pending_closes(pending)
+
+    # Weekly ID rotation: if the latest proposed_at is in a prior ISO week,
+    # archive the full file and renumber active entries from 1. Operator
+    # asked for this after IDs hit #152 (cumulative since system start).
+    rotated = rotate_if_new_week(pending, _ROOT / "data", "pending_closes")
+    if rotated is not pending:
+        pending = rotated
         _save_pending_closes(pending)
 
     already_proposed = _existing_pending_ids(pending)

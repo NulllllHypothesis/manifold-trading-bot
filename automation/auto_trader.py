@@ -55,6 +55,8 @@ def _new_trader_counters() -> dict:
             "market_unverifiable":  0,
             "negative_ev":          0,      # estimated_ev ≤ MIN_ESTIMATED_EV_FLOOR
             "solo_momentum_low_res": 0,     # solo probability_direction in low-resolvability
+            "market_state_changed":  0,     # market resolved/closed between :00 research and :20 trade,
+                                            # or API fetch failed in execute_trade
         },
         "passed_filter":            0,      # survived should_trade_market
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
@@ -199,6 +201,19 @@ def _append_trader_counters(counters: dict) -> None:
             f.write(json.dumps(counters) + "\n")
     except Exception as e:
         print(f"  Warning: could not append trader counters ({e})")
+
+
+def _inc_rejection(counters: Optional[Dict], key: str) -> None:
+    """Increment counters['rejected'][key] when counters is provided.
+
+    Lets calculate_position_size and other helpers attribute their silent-
+    skip paths (return 0.0) to a specific rejection reason without forcing
+    every test/call site to synthesise a full counters dict.
+    """
+    if counters is None:
+        return
+    counters.setdefault("rejected", {})
+    counters["rejected"][key] = counters["rejected"].get(key, 0) + 1
 
 
 def _load_weights_file(root: str) -> tuple[dict, dict, int, int]:
@@ -580,7 +595,8 @@ class AutoTrader:
         """
         return self._trade_rejection_reason(market_id, recommendation) is None
 
-    def calculate_position_size(self, recommendation: Dict, outcome: str) -> float:
+    def calculate_position_size(self, recommendation: Dict, outcome: str,
+                                counters: Optional[Dict] = None) -> float:
         """
         Calculate position size using Kelly Criterion when AI probability estimate is available,
         falling back to confidence-scaled sizing otherwise.
@@ -589,6 +605,12 @@ class AutoTrader:
             recommendation: Dict containing market recommendation data including 'confidence',
                             'probability', and optionally 'ai_estimated_probability'.
             outcome: The trade direction, either 'YES' or 'NO'.
+            counters: optional trader_counters dict from the caller. When supplied,
+                      silent-skip paths (return 0.0) increment the matching key in
+                      `counters["rejected"]` so 24h audits can distinguish "Kelly
+                      had no edge" from "size fell below MIN_BET_AMOUNT" — both
+                      previously showed up as `passed_filter - trades_executed`
+                      with no breakdown.
 
         Kelly logic:
           - net_odds for YES at market prob m = (1-m)/m
@@ -633,6 +655,7 @@ class AutoTrader:
             # Return 0.0 so execute_trade can skip this trade entirely.
             if kelly_fraction <= 0:
                 print(f"  Sizing: kelly(ai_prob={ai_estimated_prob:.2f}, net_odds={net_odds:.2f}) → no edge (k={kelly_fraction:.3f}), skipping")
+                _inc_rejection(counters, "kelly_no_edge")
                 return 0.0
 
             # Phase B: scale half-Kelly by strategy reliability weight.
@@ -659,6 +682,7 @@ class AutoTrader:
         # so a genuinely tiny Kelly size below MIN_BET_AMOUNT is treated as no trade.
         if position_size < MIN_BET_AMOUNT:
             print(f"  Sizing: {sizing_method} → ${position_size:.2f} below MIN_BET_AMOUNT, skipping")
+            _inc_rejection(counters, "size_too_small")
             return 0.0
 
         position_size = min(position_size, MAX_BET_AMOUNT)
@@ -672,6 +696,7 @@ class AutoTrader:
         # falling back to MIN_BET_AMOUNT on a near-zero-edge market.
         if rounded_size == 0 and ai_estimated_prob is not None:
             print(f"  Sizing: {sizing_method} → rounded to $0, skipping (Kelly near-zero edge)")
+            _inc_rejection(counters, "kelly_no_edge")
             return 0.0
 
         position_size = rounded_size
@@ -679,6 +704,7 @@ class AutoTrader:
         # After rounding, re-check the minimum (rounding down could push below minimum)
         if position_size < MIN_BET_AMOUNT:
             print(f"  Sizing: {sizing_method} → ${position_size:.2f} below MIN_BET_AMOUNT after rounding, skipping")
+            _inc_rejection(counters, "size_too_small")
             return 0.0
 
         print(f"  Sizing: {sizing_method} → ${position_size:.2f}")
@@ -709,22 +735,31 @@ class AutoTrader:
 
         # Verify market exists, is open, and get current probability.
         # If the market can't be fetched, abort — never bet on an unverifiable market.
+        # All three skip paths attribute to `market_state_changed` so 24h audits
+        # can spot when the :00 research → :20 trade window is too long for
+        # fast-resolving markets (vs other rejection causes).
         try:
             market = api_client.get_market(market_id)
             if market.get('isResolved'):
                 print(f"  Market is already resolved — skipping")
+                _inc_rejection(counters, "market_state_changed")
                 return False
             close_time_ms = market.get('closeTime', 9e12)
             if close_time_ms < time.time() * 1000:
                 print(f"  Market is closed — skipping")
+                _inc_rejection(counters, "market_state_changed")
                 return False
             current_prob = market.get('probability', recommendation['probability'])
         except Exception as e:
             print(f"  Could not verify market exists ({e}) — skipping to avoid phantom bet")
+            _inc_rejection(counters, "market_state_changed")
             return False
 
-        # Calculate position size (Kelly when AI estimate available, else confidence-scaled)
-        amount = self.calculate_position_size(recommendation, outcome)
+        # Calculate position size (Kelly when AI estimate available, else confidence-scaled).
+        # Pass counters so silent-skip paths inside calculate_position_size attribute
+        # the skip to kelly_no_edge or size_too_small instead of vanishing as
+        # `passed_filter - trades_executed`.
+        amount = self.calculate_position_size(recommendation, outcome, counters=counters)
 
         # A return value of 0.0 means no edge or size too small — skip the trade entirely
         # rather than placing a minimum bet that contradicts the model's signal.
