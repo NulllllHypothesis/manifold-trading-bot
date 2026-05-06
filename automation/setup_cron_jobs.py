@@ -52,6 +52,13 @@ WORKSPACE={WORKSPACE}
 # Position resolution — hourly :10
 10 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/resolve_positions.py >> /tmp/resolution.log 2>&1
 
+# Polymarket market-data ingestion — hourly :15 (Tier-2 multi-platform pivot)
+# Read-only fetcher that writes to data/markets_normalized.db. No part of the
+# existing trader/research pipeline reads from this table yet — it accumulates
+# while we plan cross-platform matching. Slot :15 is between resolve (:10) and
+# trade (:20), and is otherwise unused.
+15 * * * * cd $WORKSPACE && git pull origin main -q && python3 scripts/ingest_polymarket.py >> /tmp/polymarket_ingest.log 2>&1
+
 # Auto trading — hourly :20
 20 * * * * cd $WORKSPACE && git pull origin main -q && python3 automation/auto_trader.py >> /tmp/trader.log 2>&1
 
