@@ -1,1 +1,1 @@
-@AGENTS.md
+@meta/AGENTS.md
