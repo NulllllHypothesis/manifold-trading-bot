@@ -1,6 +1,8 @@
-# Manifold Trading Bot — Project Plan (V1)
+# Manifold Trading Bot, Project Plan (V1)
 
-> **V2 is active.** This document (V1) is the archive of work completed through April 2026: core trading engine, automation, calibration, dashboard. For the forward roadmap (active portfolio management, learning unlock, multi-source data, real-time dashboard), see [PLAN_V2.md](PLAN_V2.md).
+> **Project Status: parked, May 2026.** This is a historical planning document, not a current roadmap. Active development on the project ended in May 2026; the README explains the rationale for parking. PLAN.md captures the V1 buildout (March to mid-April 2026); PLAN_V2.md captures the second phase of work that immediately preceded the freeze. Both are preserved as engineering artefacts, not as forward plans. For the live state of the codebase, start at the README.
+
+> **V1 vs V2.** This document (V1) records the work completed through April 2026: core trading engine, automation, calibration, dashboard. The follow-on program of work (active portfolio management, learning unlock, multi-source data) lives in [PLAN_V2.md](PLAN_V2.md).
 
 ---
 
@@ -45,7 +47,7 @@ git checkout -b feature/your-task-name
 git push origin feature/your-task-name
 # open PR on GitHub → humans review → merge to main
 ```
-Full rules in `AGENTS.md`.
+Full rules in `meta/AGENTS.md`.
 
 ---
 
@@ -299,7 +301,7 @@ No external library needed — uses plain HTTP to the Telegram Bot API.
   - Run: `python3 automation/telegram_bot.py portfolio|positions|scan|autotrader-on|autotrader-off`
 - [x] `manifold_bot/config.py` — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_GROUP_ID` read from `.env`
 - [x] `automation/daily_summary.py` — sends directly to Telegram via Bot API
-- [x] OpenClaw skills registered: `skills/portfolio/`, `skills/positions/`, `skills/scan/`, `skills/autotrader-on/`, `skills/autotrader-off/`
+- [x] OpenClaw skills registered: `meta/skills/portfolio/`, `meta/skills/positions/`, `meta/skills/scan/`, `meta/skills/autotrader-on/`, `meta/skills/autotrader-off/`
 - [x] `manifold_bot/paper_trader.py` — `_notify_resolution()` sends Telegram on every resolution; never raises
 - [x] `automation/auto_trader.py` — checks `autotrader_disabled.flag` at startup; exits cleanly if present
 
@@ -801,8 +803,8 @@ See [dashboard/README.md](dashboard/README.md) for full setup, architecture, and
 | Auto-trader | ✅ Done | Running via cron, 65% confidence threshold |
 | Market research | ✅ Done | Hourly, saves to JSON |
 | Daily summary | ✅ Done | Cron at 19:00 UTC |
-| Project structure | ✅ Done | automation/, tests/, scripts/, docs/, memory/ |
-| Git workflow rules | ✅ Done | AGENTS.md enforces branch rules |
+| Project structure | ✅ Done | automation/, tests/, scripts/, docs/, meta/memory/ |
+| Git workflow rules | ✅ Done | meta/AGENTS.md enforces branch rules |
 | AI integration | ✅ Done | `ai_analyzer.py` + wired into research, merged |
 | Auto-fixing review agent | ✅ Done | Commits fixes directly to PR branch |
 | Fix `per_market_timeout` bug | ✅ Done | `concurrent.futures` timeout enforcement in `batch_analyze()` |
