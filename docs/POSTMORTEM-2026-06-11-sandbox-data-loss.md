@@ -66,8 +66,25 @@ figure; the actual final ledger is gone.
 
 ## Root cause
 
-**The bot stored all live state inside its own repository directory, which sat in
-the container's ephemeral writable layer — never on a persistent mount or volume.**
+**The bot was deployed in the wrong directory — outside the one persistent
+mount the container already had — so all its state sat in the container's
+ephemeral writable layer.**
+
+A persistent bind mount *did* exist the whole time: host
+`/srv/hackathon/workspaces` → container `/home/hackathon/workspace`. But the bot
+ran from `/home/hackathon/.openclaw/workspace` (hardcoded as `WORKSPACE` in
+`automation/setup_cron_jobs.py`) — a sibling path **not** under the mount. So the
+durable storage was there; the bot simply wasn't using it. Everything it wrote
+landed in the ephemeral layer and died with the container.
+
+The original "store on a volume" framing was incomplete in a second way: the
+bot's runtime state is **scattered across the whole repo tree**, not just
+`data/` — repo root (`auto_trades.json`, `market_research.json`,
+`autotrader_disabled.flag`, `pending_*.json`, several `*_report.json`), `data/`
+(`calibration.db`, `market_snapshots.db`, `markets_normalized.db`, caches,
+`.jsonl` counters), and `manifold_bot/paper_trading_state.json`. The correct fix
+is therefore to deploy the **entire repo** under the persistent mount (all paths
+are derived relative to the repo root), not to mount a single subdirectory.
 
 Confirmed in code:
 - `manifold_bot/paper_trader.py`: `_DB_PATH = _PROJECT_ROOT / "data" / "calibration.db"`; `state_file = manifold_bot/paper_trading_state.json`
