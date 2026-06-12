@@ -134,12 +134,22 @@ def _write_bet_outcome(
          era='early_close' so the weekly EV audit can segment close-at-AMM
          outcomes from true-resolution outcomes. Existing pre-fix rows are
          backfilled to 'pre_ev_fix' in _init_bet_outcomes_db().
+
+    resolved_at: taken from the trade record when present — the resolve paths
+         stamp the authoritative ISO-8601 UTC resolution time (Manifold's
+         resolutionTime when the caller has it) onto the trade *before*
+         calling here, so bet_outcomes and trade_history agree. Falls back
+         to detection time (now, UTC) for records without the field
+         (early close, abandonment write-off, external callers).
     """
     try:
         estimated_ev   = trade.get("estimated_ev")
         ai_est_prob    = trade.get("ai_estimated_probability")
         ev_error       = (estimated_ev - actual_pnl) if estimated_ev is not None else None
         strategies_json = json.dumps(trade.get("strategies") or [])
+        # Authoritative resolution time stamped on the trade by the resolve
+        # paths (PR #42); detection time (now, UTC) only as fallback.
+        resolved_at    = trade.get("resolved_at") or datetime.now(timezone.utc).isoformat()
 
         conn = sqlite3.connect(_DB_PATH)
         conn.execute("""
@@ -161,7 +171,7 @@ def _write_bet_outcome(
             actual_pnl,
             ev_error,
             era,
-            datetime.now().isoformat(),
+            resolved_at,
             trade.get("category"),
         ))
         conn.commit()
