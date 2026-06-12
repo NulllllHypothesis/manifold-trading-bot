@@ -1811,5 +1811,119 @@ class TestComputeWeightsByCategory(unittest.TestCase):
         self.assertIn("by_category", data, "strategy_weights.json missing 'by_category' field")
 
 
+class TestFetchOutcomesUtcCutoff(unittest.TestCase):
+    """_fetch_outcomes(days=N) must build its cutoff from UTC, not naive-local time.
+
+    bet_outcomes.resolved_at is stamped tz-aware UTC ("...+00:00") since the
+    explicit resolved_at work (PR #42/#43), but the table still holds legacy
+    naive-local rows from before the changeover. The N-day window filter is an
+    ISO-8601 string comparison in SQLite, so it must (a) never crash on either
+    row form, and (b) place the boundary at UTC-now minus N days — a
+    naive-local cutoff shifts the boundary by the host's UTC offset.
+    """
+
+    def _make_db(self, rows):
+        """Create a temp calibration DB containing `rows` of (resolved_at, market_id)."""
+        tmpdir = tempfile.mkdtemp()
+        db_path = os.path.join(tmpdir, "calibration.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE bet_outcomes (
+                id INTEGER PRIMARY KEY,
+                market_id TEXT, our_recommendation TEXT, amount REAL,
+                probability REAL, estimated_ev REAL, ai_confidence REAL,
+                ai_estimated_probability REAL, strategies TEXT,
+                market_resolution TEXT, actual_pnl REAL, ev_error REAL,
+                era TEXT, resolved_at TEXT, category TEXT
+            )
+        """)
+        for resolved_at, market_id in rows:
+            conn.execute("""
+                INSERT INTO bet_outcomes
+                (market_id, our_recommendation, amount, probability,
+                 estimated_ev, ai_confidence, ai_estimated_probability,
+                 strategies, market_resolution, actual_pnl, ev_error,
+                 era, resolved_at, category)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (market_id, 'YES', 10, 0.4, 1.0, 0.8, 0.6, '[]', 'YES',
+                  5.0, -4.0, 'post_ev_fix', resolved_at, 'other'))
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def _fetch_ids(self, db_path, days=7):
+        from scripts.weekly_ev_report import _fetch_outcomes
+        with patch("scripts.weekly_ev_report.DB_PATH", db_path):
+            return {r["market_id"] for r in _fetch_outcomes(days=days, era=None)}
+
+    def test_utc_rows_filtered_by_seven_day_window(self):
+        """New-form '+00:00' rows: inside-window kept, outside-window dropped."""
+        from datetime import datetime, timedelta, timezone
+        now_utc = datetime.now(timezone.utc)
+        db = self._make_db([
+            ((now_utc - timedelta(days=2)).isoformat(),  "utc_recent"),
+            ((now_utc - timedelta(days=10)).isoformat(), "utc_old"),
+        ])
+        ids = self._fetch_ids(db)
+        self.assertIn("utc_recent", ids)
+        self.assertNotIn("utc_old", ids)
+
+    def test_legacy_naive_rows_do_not_crash_and_filter_sanely(self):
+        """Pre-changeover naive-local rows must not crash the filter; rows
+        well inside / well outside the window (beyond any plausible UTC-offset
+        slack) must be kept / dropped respectively."""
+        from datetime import datetime, timedelta
+        now_local_naive = datetime.now()  # legacy stamps were naive local
+        db = self._make_db([
+            ((now_local_naive - timedelta(days=2)).isoformat(),  "naive_recent"),
+            ((now_local_naive - timedelta(days=30)).isoformat(), "naive_old"),
+        ])
+        ids = self._fetch_ids(db)
+        self.assertIn("naive_recent", ids)
+        self.assertNotIn("naive_old", ids)
+
+    def test_mixed_row_forms_in_one_table(self):
+        """The documented mixed-row reality: both forms coexist in one query."""
+        from datetime import datetime, timedelta, timezone
+        now_utc = datetime.now(timezone.utc)
+        now_local_naive = datetime.now()
+        db = self._make_db([
+            ((now_utc - timedelta(days=1)).isoformat(),          "utc_in"),
+            ((now_utc - timedelta(days=20)).isoformat(),         "utc_out"),
+            ((now_local_naive - timedelta(days=1)).isoformat(),  "naive_in"),
+            ((now_local_naive - timedelta(days=20)).isoformat(), "naive_out"),
+        ])
+        ids = self._fetch_ids(db)
+        self.assertEqual(ids, {"utc_in", "naive_in"})
+
+    @unittest.skipUnless(hasattr(__import__("time"), "tzset"),
+                         "requires POSIX time.tzset to fake the host timezone")
+    def test_cutoff_is_utc_even_on_far_ahead_host(self):
+        """Regression for the naive-local cutoff bug: on a UTC+14 host, a UTC
+        row 6 hours *inside* the 7-day window was wrongly excluded because the
+        naive-local cutoff ran ~14 hours ahead of UTC. The UTC cutoff keeps it."""
+        import time
+        from datetime import datetime, timedelta, timezone
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14, no DST
+        time.tzset()
+        try:
+            now_utc = datetime.now(timezone.utc)
+            inside = (now_utc - timedelta(days=7) + timedelta(hours=6)).isoformat()
+            db = self._make_db([(inside, "edge_inside")])
+            ids = self._fetch_ids(db)
+            self.assertIn(
+                "edge_inside", ids,
+                "UTC row 6h inside the 7-day window must survive the cutoff "
+                "regardless of the host timezone",
+            )
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+
 if __name__ == "__main__":
     unittest.main()
