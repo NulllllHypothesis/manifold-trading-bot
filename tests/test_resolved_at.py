@@ -20,10 +20,12 @@ approximate resolved_at from that lag. These tests pin the new contract:
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -281,6 +283,102 @@ class TestAutoResolvePassesResolutionTime(_PaperTraderTestBase):
         self.assertEqual(count, 1)
         stamped = datetime.fromisoformat(pos["resolved_at"])
         self.assertGreaterEqual(stamped, before)
+
+
+class TestBetOutcomesAgreesWithTradeHistory(_PaperTraderTestBase):
+    """
+    workbench-hu1x — the bet_outcomes SQLite row must carry the SAME
+    authoritative resolved_at as the trade_history record, not a separate
+    naive-local detection timestamp taken inside _write_bet_outcome.
+
+    Unlike the other classes here, this one runs the REAL _write_bet_outcome
+    and _init_bet_outcomes_db against a temp SQLite DB.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Base class stubs out the DB layer; this class needs the real thing.
+        self.write_patch.stop()
+        self.db_patch.stop()
+        fd, self.tmp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.dbpath_patch = patch(
+            "manifold_bot.paper_trader._DB_PATH", Path(self.tmp_db)
+        )
+        self.dbpath_patch.start()
+
+    def tearDown(self):
+        self.dbpath_patch.stop()
+        # Restart the base patches so super().tearDown()'s stop() calls
+        # operate on started patchers.
+        self.write_patch.start()
+        self.db_patch.start()
+        super().tearDown()
+        if os.path.exists(self.tmp_db):
+            os.unlink(self.tmp_db)
+
+    def _bet_outcome_resolved_ats(self):
+        conn = sqlite3.connect(self.tmp_db)
+        rows = conn.execute(
+            "SELECT market_id, resolved_at FROM bet_outcomes"
+        ).fetchall()
+        conn.close()
+        return dict(rows)
+
+    def test_yes_no_resolution_writes_authoritative_time_to_bet_outcomes(self):
+        ts = "2026-06-10T12:00:00+00:00"
+        pos = self._position(trade_id=1, market_id="m_agree", outcome="YES")
+        trader = self._make_trader(
+            positions={"m_agree": [pos]}, trade_history=[dict(pos)]
+        )
+
+        trader.resolve_market("m_agree", "YES", resolved_at=ts)
+
+        self.assertEqual(trader.trade_history[0]["resolved_at"], ts)
+        self.assertEqual(self._bet_outcome_resolved_ats()["m_agree"], ts)
+
+    def test_mkt_resolution_writes_authoritative_time_to_bet_outcomes(self):
+        ts = "2026-06-11T03:30:00+00:00"
+        pos = self._position(trade_id=2, market_id="m_mkt", outcome="YES")
+        trader = self._make_trader(
+            positions={"m_mkt": [pos]}, trade_history=[dict(pos)]
+        )
+
+        trader.resolve_market_mkt("m_mkt", 0.42, resolved_at=ts)
+
+        self.assertEqual(trader.trade_history[0]["resolved_at"], ts)
+        self.assertEqual(self._bet_outcome_resolved_ats()["m_mkt"], ts)
+
+    def test_cancel_resolution_writes_authoritative_time_to_bet_outcomes(self):
+        ts = "2026-06-11T18:45:00+00:00"
+        pos = self._position(trade_id=3, market_id="m_cancel", outcome="NO")
+        trader = self._make_trader(
+            positions={"m_cancel": [pos]}, trade_history=[dict(pos)]
+        )
+
+        trader.resolve_market_cancel("m_cancel", resolved_at=ts)
+
+        self.assertEqual(trader.trade_history[0]["resolved_at"], ts)
+        self.assertEqual(self._bet_outcome_resolved_ats()["m_cancel"], ts)
+
+    def test_default_detection_time_is_utc_aware_in_both_stores(self):
+        """No resolved_at passed → both stores get the SAME now-UTC default
+        (stamped once in resolve_market, passed through to bet_outcomes)."""
+        pos = self._position(trade_id=4, market_id="m_default", outcome="YES")
+        trader = self._make_trader(
+            positions={"m_default": [pos]}, trade_history=[dict(pos)]
+        )
+
+        before = datetime.now(timezone.utc)
+        trader.resolve_market("m_default", "NO")
+        after = datetime.now(timezone.utc)
+
+        th_ts = trader.trade_history[0]["resolved_at"]
+        db_ts = self._bet_outcome_resolved_ats()["m_default"]
+        self.assertEqual(th_ts, db_ts)
+        stamped = datetime.fromisoformat(db_ts)
+        self.assertIsNotNone(stamped.tzinfo)
+        self.assertTrue(before <= stamped <= after)
 
 
 if __name__ == "__main__":

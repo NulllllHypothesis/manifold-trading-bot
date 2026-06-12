@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -380,6 +381,69 @@ class TestWriteBetOutcome(unittest.TestCase):
         try:
             with patch("manifold_bot.paper_trader._DB_PATH", tmp):
                 _write_bet_outcome({}, "YES", 0.0)   # must not raise
+        finally:
+            os.unlink(tmp)
+
+    def test_resolved_at_taken_from_trade_record(self):
+        """When the trade carries an authoritative resolved_at (stamped by the
+        resolve paths from Manifold's resolutionTime, PR #42), the bet_outcomes
+        row must store it verbatim — not detection time."""
+        tmp = self._create_db()
+        try:
+            authoritative = "2026-06-10T08:15:30+00:00"
+            trade = {
+                "market_id": "mkt_resolved_at", "outcome": "YES",
+                "amount": 10.0, "probability": 0.55,
+                "estimated_ev": 1.0, "ai_confidence": 0.6, "strategies": None,
+                "resolved_at": authoritative,
+            }
+            with patch("manifold_bot.paper_trader._DB_PATH", tmp):
+                _write_bet_outcome(trade, "YES", 4.0)
+
+            rows = self._read_rows(tmp)
+            self.assertEqual(rows[0]["resolved_at"], authoritative)
+        finally:
+            os.unlink(tmp)
+
+    def test_resolved_at_falls_back_to_detection_time_utc(self):
+        """Trades without resolved_at (early close, write-off, pre-#42 records)
+        fall back to detection time — now, UTC, timezone-aware ISO-8601."""
+        tmp = self._create_db()
+        try:
+            trade = {
+                "market_id": "mkt_no_resolved_at", "outcome": "NO",
+                "amount": 12.0, "probability": 0.40,
+                "estimated_ev": None, "ai_confidence": None, "strategies": None,
+            }
+            before = datetime.now(timezone.utc)
+            with patch("manifold_bot.paper_trader._DB_PATH", tmp):
+                _write_bet_outcome(trade, "NO", -12.0)
+            after = datetime.now(timezone.utc)
+
+            rows = self._read_rows(tmp)
+            stamped = datetime.fromisoformat(rows[0]["resolved_at"])
+            self.assertIsNotNone(stamped.tzinfo, "fallback must be timezone-aware UTC")
+            self.assertTrue(before <= stamped <= after)
+        finally:
+            os.unlink(tmp)
+
+    def test_resolved_at_empty_string_falls_back(self):
+        """A falsy resolved_at on the trade ('' / None) must not be written
+        through — fallback to detection time applies."""
+        tmp = self._create_db()
+        try:
+            trade = {
+                "market_id": "mkt_empty_resolved_at", "outcome": "YES",
+                "amount": 5.0, "probability": 0.50,
+                "estimated_ev": None, "ai_confidence": None, "strategies": None,
+                "resolved_at": "",
+            }
+            with patch("manifold_bot.paper_trader._DB_PATH", tmp):
+                _write_bet_outcome(trade, "YES", 5.0)
+
+            rows = self._read_rows(tmp)
+            stamped = datetime.fromisoformat(rows[0]["resolved_at"])
+            self.assertIsNotNone(stamped.tzinfo)
         finally:
             os.unlink(tmp)
 
