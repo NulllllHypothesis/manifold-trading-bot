@@ -76,11 +76,14 @@ Keep this in your head. Everything else hangs off it.
     data/calibration.db: position_snapshots ←── P&L trajectory over time
                  │
                  ▼
-    :30  scripts/evaluate_positions.py      ←── AUTO-CLOSE (if score < -0.50)
-                 │ writes                        Telegram = notification of action;
-                 ▼                               --propose-only restores the old gate
-         pending_closes.json          ←── audit trail of executed/failed closes
-                                          (+ proposals when in --propose-only)
+    :30  scripts/evaluate_positions.py      ←── AUTO-CLOSE (score < -0.50, then
+                 │ writes                        RE-VALIDATED on a fresh live fetch:
+                 ▼                               clear 2× breach → close same run;
+         pending_closes.json                     borderline → confirm next cycle.
+                                                 Telegram = notification of action;
+                                                 --propose-only restores the old gate)
+              ←── audit trail of executed / failed / recovered closes
+                  (+ proposals when in --propose-only)
                  │
                  ▼
     :10  scripts/resolve_positions.py       (every hour)
@@ -151,7 +154,11 @@ Each leg has: `trade_id`, `status` (`OPEN` / `WIN` / `LOSE` / `CLOSED_EARLY` / `
 
 ### 2.3 `pending_closes.json` / `pending_abandons.json` (evaluator writes, `execute_*.py` reads)
 
-For closes (since the auto-execute change): an audit trail of the evaluator's own close decisions. Each entry: `id`, `market_id`, `reason`, `score_breakdown`, `proposed_at`, `status` (`executed` / `failed` / `skipped_resolved` / `noop` / `superseded`, plus legacy `pending` / `approved` / `dismissed` / `expired`), `position_score`, etc. Abandons (and closes under `--propose-only`) still await human approval via:
+For closes (since Phase 2.3b auto-execute): an audit trail of the evaluator's own close decisions. Each entry: `id`, `market_id`, `reason`, `score_breakdown`, `revalidation` (the fresh-fetch evidence: `fresh_probability`, `fresh_score`, and which rule fired — `immediate_clear_margin` or `persisted_next_cycle`), `proposed_at`, `status` (`executed` / `failed` / `skipped_resolved` / `recovered` / `noop` / `superseded`, plus legacy `pending` / `approved` / `dismissed` / `expired`), `position_score`, etc.
+
+Two statuses deserve a note. A `pending` entry in execute mode means "borderline breach awaiting persistence" — the snapshot score breached the threshold but the fresh live refetch landed between the threshold and the 2× clear margin, so the evaluator waits one cycle and executes only if a fresh refetch still breaches on the next run. A `recovered` entry means the breach didn't survive re-validation (or the snapshot itself recovered): the one-tick-noise filter worked, nothing was closed, and a future breach has to re-prove itself from scratch.
+
+Abandons (and closes under `--propose-only`) still await human approval via:
 
 ```bash
 python3 scripts/execute_close.py --id 7
@@ -301,7 +308,9 @@ Applied **per OPEN market aggregate**. Reason string lands in the Telegram CTA t
 | `stale_reprice` | Last reprice > `REPRICE_STALE_HOURS` (2h) — old data, don't score | HOLD |
 | `too_new` | Youngest leg < `MIN_HOLD_HOURS` (2h) — let it settle first (PR #21) | HOLD |
 | `score_above_threshold` | position_score ≥ -0.50 | HOLD |
-| `pnl=..., age=..., [long_horizon_penalty]` | position_score < -0.50 | **CLOSE** |
+| `pnl=..., age=..., [long_horizon_penalty]` | position_score < -0.50 | **CLOSE** (goes to re-validation) |
+
+A CLOSE classification doesn't sell anything by itself. Phase 2.3b's re-validation step is the approver (replacing the Phase 2.3 human gate): the evaluator refetches the live probability — not the :05 snapshot — and recomputes the score fresh. A fresh score ≤ 2× the threshold (`CLOSE_CONFIRM_MARGIN_FACTOR`) executes in the same run (`immediate_clear_margin`); a borderline fresh breach waits one cycle and executes on the next :30 run only if it still breaches (`persisted_next_cycle`); a fresh score back above the threshold marks the proposal `recovered`; a failed refetch defers — the evaluator never executes on stale data. Threshold tuning has its own tool: `scripts/backtest_close_thresholds.py` replays `position_snapshots` history against a threshold/decay grid (re-run it weekly as data accumulates — with days of history it's directional, not authoritative).
 
 ### Stale-detector transitions (`13:00` daily, `scripts/detect_stale_positions.py:classify_stale`)
 
@@ -384,7 +393,7 @@ This is a really interesting one to trace. Let me walk you through what happened
 | **Did AI approve, skip, timeout, or cache-hit?** | Not run. Wasn't in the top-3 AI candidates this hour — so no AI signal at all. `ai_status='not_run'`. |
 | **Why did the trader accept it?** | Confidence cleared 0.65 floor, no higher-ranked rec blocked it, caps weren't full, no veto. |
 | **What position class did it get?** | `medium` — closeTime is Apr 30, ~9 days away, so term=medium. Combined with resolvability inferred from category → `medium` position_class. |
-| **What would make us close it?** | The Phase 2.3 evaluator will score it hourly: `score = unrealised_pnl − days_held × 0.05 − (medium → no long penalty)`. If it drops below -$0.50 for more than 2h (MIN_HOLD_HOURS, PR #21), we get a CLOSE proposal. |
+| **What would make us close it?** | The evaluator scores it hourly: `score = unrealised_pnl − days_held × 0.05 − (medium → no long penalty)`. If it drops below -$0.50 (and the position is past MIN_HOLD_HOURS, PR #21), Phase 2.3b re-validates on a fresh live fetch and auto-closes — same run if the fresh score breaches by 2×, next run if a borderline breach persists. Telegram tells us it happened and why. |
 | **When does it become learning data?** | Either at market resolution (Apr 30, goes into `bet_outcomes` with `era='post_ev_fix'` and counts toward weight updates on Monday 2026-05-04) or if closed early (`era='early_close'`, audit-only, doesn't drive weights). |
 
 #### The uncomfortable fact (historical — fixed by PR #22 and PR #26)
@@ -674,23 +683,28 @@ Once you've done the walkthrough, this is the sheet to keep open.
 ```
 :00 → look at /pipeline for research counters
 :20 → look at /overview for whether new trades were placed
-:30 → check Telegram for CLOSE proposals; approve or dismiss
+:30 → check Telegram for auto-close notifications (action already taken)
 13:00 (daily) → check Telegram for ABANDON proposals
 19:00 → daily summary — spot-check balance vs. yesterday
 ```
 
-### Deciding on a close proposal (Phase 2.3)
+### Reading an auto-close notification (Phase 2.3b)
 
 ```
-Reply to the Telegram message:
-  approve close N  → realises P&L at live AMM price
-  dismiss close N  → lets it run
+The bot already acted — the message is the receipt, not a question:
+  🤖 Auto-closed #N ... Why: score -1.45 < threshold -0.50 (...)
+     Re-validated live: immediate_clear_margin | persisted_next_cycle
 
-Rules of thumb:
-  - pnl > +$0.20 and long_or_uncertain     → approve (realise + free slot)
-  - pnl < -$1.00 and old (>10d)            → approve (stop the bleed)
-  - pnl ≈ 0.00 and <2h old                 → dismiss (post-PR #21 this won't fire)
-  - pnl > 0, short/medium, score > -0.50   → evaluator won't propose these anyway
+If you disagree with a close, that's tuning feedback, not an approval miss:
+  - check the entry in pending_closes.json (full score_breakdown +
+    revalidation evidence) and the close_context on the trade record
+  - re-run scripts/backtest_close_thresholds.py against accumulated history
+  - adjust CLOSE_SCORE_THRESHOLD / DAILY_DECAY_COST /
+    CLOSE_CONFIRM_MARGIN_FACTOR in config.py via PR
+
+Manual path still exists for debugging: evaluate_positions.py --propose-only
+emits the old "approve close N" CTAs, approved via execute_close.py --id N.
+A recent human dismissal suppresses that market for 48h in both modes.
 ```
 
 ### Deciding on an abandon proposal (Phase 2.4)

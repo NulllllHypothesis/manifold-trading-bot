@@ -2,10 +2,11 @@
 """
 Execute or dismiss a pending early-close proposal by ID.
 
-NOTE: since the autonomy change, `evaluate_positions.py` executes its own
-close decisions by default, calling `execute_close()` below as a library
-function. This CLI remains the manual path — it's used when the evaluator
-runs in `--propose-only` mode, or to act on a leftover proposal by hand.
+NOTE: since Phase 2.3b, `evaluate_positions.py` executes its own close
+decisions by default — re-validated against a fresh live probability rather
+than human-approved — calling `execute_close()` below as a library function.
+This CLI remains the manual path — it's used when the evaluator runs in
+`--propose-only` mode, or to act on a leftover proposal by hand.
 
 Reads pending_closes.json, finds the entry with the given ID, then:
   approve:  closes the position at current AMM price, marks status="approved"
@@ -168,12 +169,18 @@ def execute_close(proposal: dict, trader: PaperTrader, *,
 
     # Stamp WHY onto the closed trade records so the learning loop can later
     # compare close-time reasoning against the market's eventual resolution.
+    # 'revalidation' records which Phase 2.3b approval rule fired
+    # ('immediate_clear_margin' | 'persisted_next_cycle'); None for manual
+    # approvals and pre-revalidation proposals.
+    revalidation = proposal.get('revalidation') or {}
     close_context = {
         'close_type': 'auto' if auto else 'manual_approval',
         'position_score': proposal.get('position_score'),
         'close_reason': proposal.get('reason'),
         'score_breakdown': proposal.get('score_breakdown'),
         'closed_at_probability': current_prob,
+        'revalidation': revalidation.get('rule'),
+        'revalidation_fresh_score': revalidation.get('fresh_score'),
     }
     pnl = trader.close_position_early(market_id, current_prob,
                                       close_context=close_context)
@@ -188,6 +195,10 @@ def execute_close(proposal: dict, trader: PaperTrader, *,
         header = f"🤖 Auto-closed #{proposal['id']}"
         why = (f"  Why: score {score_str} < threshold {CLOSE_SCORE_THRESHOLD:+.2f} "
                f"({proposal.get('reason', '')})\n")
+        if revalidation.get('rule'):
+            fs = revalidation.get('fresh_score')
+            fs_str = f"{fs:+.2f}" if isinstance(fs, (int, float)) else "?"
+            why += f"  Re-validated live: {revalidation['rule']} (fresh score {fs_str})\n"
     else:
         header = f"✅ Close #{proposal['id']} executed"
         why = f"  Score: {score_str}  ({proposal.get('reason', '')})\n"

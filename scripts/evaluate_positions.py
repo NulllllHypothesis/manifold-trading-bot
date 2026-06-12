@@ -1,41 +1,70 @@
 #!/usr/bin/env python3
 """
-V2 Phase 2.3 — position evaluator (autonomous since the auto-execute change).
+V2 Phase 2.3b — position evaluator with an autonomous, re-validating approver.
 
 For every OPEN position in paper_trading_state.json, compute a position_score
 using the Phase 2.2 repricing data, then classify the position as HOLD or
-CLOSE. By default the evaluator now EXECUTES its own CLOSE decisions in the
-same run (via `scripts.execute_close.execute_close`, the same code path the
-human-approval CLI uses) and sends a Telegram NOTIFICATION of what was done
-and why — Telegram is no longer a request for permission.
+CLOSE. The two-stage propose→approve shape from Phase 2.3 (PR #15) survives,
+but the approver is now a machine step in the same cron run instead of a
+human glance at Telegram:
 
-Why the approval gate was removed
----------------------------------
-The propose-only phase existed to collect data before letting the machine
-act. In practice the gate left positions with NO exit path: proposals expired
-unapproved after CLOSE_EXPIRY_HOURS (and on the live box never even reached
-Telegram), so losing positions sat open indefinitely. A human in the loop
-defeats the purpose of an automated bot — the scorekeeper and bet_outcomes
-trail now provide the outcome data the gate was waiting for, and the bot
-learns from its own wins and losses instead of waiting on a human.
+1. PROPOSE — when a market's snapshot score first breaches
+   CLOSE_SCORE_THRESHOLD, record the proposal in pending_closes.json (as the
+   approval era did).
+2. RE-VALIDATE (the approver) — refetch the LIVE market probability straight
+   from the API (not the :05 reprice snapshot, which is up to ~25 min old by
+   the :30 run) and recompute the score on the fresh number. Then:
+     - fresh score breaches by a CLEAR margin (<= threshold ×
+       CLOSE_CONFIRM_MARGIN_FACTOR, i.e. <= -1.00 with defaults)
+         → execute IMMEDIATELY in the same run ('immediate_clear_margin').
+     - fresh score breaches but is borderline (between threshold and the
+       clear margin) → hold the proposal one cycle; execute on the NEXT
+       :30 run if a fresh refetch still breaches ('persisted_next_cycle').
+       Filters one-tick AMM noise.
+     - fresh score back above the threshold → 'recovered', no close.
+     - refetch FAILS → defer to the next cycle. The evaluator NEVER
+       executes a close on the stale snapshot alone.
+   The rule that fired is stamped into close_context on the closed trade
+   records, alongside the full score breakdown.
+3. EXECUTE — via `scripts.execute_close.execute_close`, the same code path
+   the human-approval CLI uses. Telegram is a NOTIFICATION of action taken
+   (with the score breakdown and re-validation evidence), never a request
+   for permission.
+
+Why the human approval step was replaced
+----------------------------------------
+PR #15 shipped Phase 2.3 propose-only to collect evidence before letting the
+machine act, explicitly planning that "after ~1 week of proposals +
+approvals, Phase 2.3b can flip a flag to auto-approve". That observation
+week structurally never happened: proposals expired unapproved after
+CLOSE_EXPIRY_HOURS, and on the live box never even reached Telegram, so
+losing positions sat open indefinitely. The human glance was only ever a
+stand-in for missing evidence — Phase 2.3b replaces it with evidence: live
+re-validation here, threshold backtesting in
+scripts/backtest_close_thresholds.py, and the bet_outcomes / close_context /
+scorekeeper trail for tuning.
 
 Safety lives in code, not in human review:
   - MIN_HOLD_HOURS / staleness / awaiting-resolve guards in classify_position
     are unchanged and still gate every close.
+  - Every execution is preceded by a fresh live refetch; a failed refetch
+    defers the close rather than trusting stale data.
   - Closes are idempotent: executed legs become CLOSED_EARLY, so a re-run has
     nothing left to close.
   - A close failure on one market is logged + notified and never aborts the
     cron cycle or the remaining markets.
   - Markets that resolved between scoring and execution are skipped
     (MarketResolvedError) and left to resolve_positions.py at :10.
+  - Recent human dismissals are honoured for DISMISS_COOLDOWN_HOURS.
 
 `--propose-only` restores the old behavior (Telegram "approve close N" CTA,
 human approves via `python3 scripts/execute_close.py --id N`).
 
 Run hourly from cron at :30. Produces:
 
-1. `pending_closes.json` — audit trail of close decisions (executed /
-   failed / skipped), plus unresolved proposals when in --propose-only mode
+1. `pending_closes.json` — audit trail of close decisions (executed / failed /
+   skipped_resolved / recovered / superseded / pending-awaiting-persistence),
+   plus unresolved proposals when in --propose-only mode
 2. Telegram message per executed close (or per proposal in --propose-only)
 
 Exit codes:
@@ -57,6 +86,7 @@ from manifold_bot.config import (
     DAILY_DECAY_COST,
     LONG_HORIZON_PENALTY,
     CLOSE_SCORE_THRESHOLD,
+    CLOSE_CONFIRM_MARGIN_FACTOR,
     MIN_HOLD_HOURS,
 )
 from manifold_bot.paper_trader import PaperTrader
@@ -67,8 +97,12 @@ from automation.auto_trader import _normalize_position_class
 from manifold_bot.proposal_archive import rotate_if_new_week
 # Reuse the exact close-execution path the human-approval CLI uses (resolved-
 # market guard, AMM refetch, close_context stamping, notification) as a
-# library call — never shelled out.
-from scripts.execute_close import execute_close, MarketResolvedError
+# library call — never shelled out. _fetch_market is shared so re-validation
+# and execution hit the API through one code path.
+from scripts.execute_close import execute_close, MarketResolvedError, _fetch_market
+# Same AMM mark-to-market formula the :05 repricer uses — re-validation must
+# recompute P&L with identical math, only on a fresher probability.
+from scripts.position_swap_checker import compute_unrealised_pnl
 
 
 _STATE_PATH         = _ROOT / "manifold_bot" / "paper_trading_state.json"
@@ -624,6 +658,118 @@ def _supersede_pending(pending: List[Dict], market_id: str) -> None:
             p['superseded_at'] = datetime.now().isoformat()
 
 
+def _find_active_pending(pending: List[Dict], market_id: str) -> Optional[Dict]:
+    """First still-'pending' proposal for market_id, or None.
+
+    _auto_expire_old_closes has already run by the time this is called, so
+    anything still 'pending' was proposed within CLOSE_EXPIRY_HOURS — i.e. a
+    recent evaluator cycle. Its existence IS the persistence signal: the
+    score breached the threshold on a previous cycle too. (Approval-era and
+    --propose-only leftovers qualify as well — they were the same breach
+    signal, just waiting on a human who never came.)
+    """
+    for p in pending:
+        if p.get('market_id') == market_id and p.get('status') == 'pending':
+            return p
+    return None
+
+
+def _mark_recovered_pending(pending: List[Dict], market_id: str, note: str) -> bool:
+    """Mark active pending proposal(s) for market_id as 'recovered'.
+
+    Called when the signal that created the proposal no longer breaches the
+    threshold — the noise filter worked, the position stays open. 'recovered'
+    is terminal, like 'expired': a future breach starts a fresh proposal and
+    must pass re-validation from scratch (we deliberately do NOT let an old
+    breach + a new breach straddle a recovery and count as 'persistence').
+    Returns True if anything was mutated.
+    """
+    changed = False
+    for p in pending:
+        if p.get('market_id') == market_id and p.get('status') == 'pending':
+            p['status'] = 'recovered'
+            p['recovered_at'] = datetime.now().isoformat()
+            p['note'] = note
+            changed = True
+    return changed
+
+
+def _revalidate_close(
+    aggregate: Dict,
+    legs: List[Dict],
+    *,
+    threshold: float = CLOSE_SCORE_THRESHOLD,
+    confirm_factor: float = CLOSE_CONFIRM_MARGIN_FACTOR,
+) -> Dict:
+    """Stage-two approver: refetch the live market and re-score on fresh data.
+
+    The :05 reprice snapshot that produced the CLOSE classification is ~25
+    minutes old by the :30 evaluator run (and up to REPRICE_STALE_HOURS in
+    the worst accepted case). Before any close executes, fetch the CURRENT
+    probability straight from the API and recompute the position score on it
+    with the same AMM P&L math the repricer uses. Returns a re-validation
+    record for the audit trail:
+
+      status:
+        'clear_breach'        — fresh score breaches the threshold by at
+                                least CLOSE_CONFIRM_MARGIN_FACTOR× —
+                                unambiguous, eligible for same-run execution
+        'borderline_breach'   — fresh score breaches, but inside the margin —
+                                wait one cycle and confirm persistence
+        'recovered'           — fresh score back at/above the threshold; the
+                                snapshot breach was one-tick noise
+        'refetch_failed'      — fetch failed or returned no usable
+                                probability; the caller must DEFER — never
+                                act on the stale snapshot alone
+        'resolved_on_refetch' — market resolved since the snapshot; the
+                                resolver at :10 owns it
+      rule: None here; the caller stamps 'immediate_clear_margin' or
+            'persisted_next_cycle' when an execution rule actually fires
+      fresh_probability / fresh_score / checked_at: the evidence, persisted
+            on the audit record and (via close_context) on closed trades
+    """
+    out = {
+        'rule': None,
+        'status': 'refetch_failed',
+        'fresh_probability': None,
+        'fresh_score': None,
+        'checked_at': datetime.now().isoformat(),
+    }
+
+    market = _fetch_market(aggregate['market_id'])
+    if market is None:
+        return out
+    if market.get('isResolved'):
+        out['status'] = 'resolved_on_refetch'
+        return out
+    prob = market.get('probability')
+    if prob is None:
+        # A market payload without a probability (multi-choice, malformed…)
+        # gives us nothing to re-score on — same handling as a failed fetch.
+        return out
+
+    fresh_prob = float(prob)
+    out['fresh_probability'] = fresh_prob
+    fresh_pnl = sum(compute_unrealised_pnl(leg, fresh_prob) for leg in legs)
+    fresh_score = position_score(
+        fresh_pnl,
+        _days_held_from_position(aggregate),
+        aggregate.get('position_class'),
+    )
+    if fresh_score is None:
+        # Can't honestly re-score → defer, exactly like a failed fetch.
+        return out
+    out['fresh_score'] = fresh_score
+
+    if fresh_score >= threshold:
+        out['status'] = 'recovered'
+    elif fresh_score <= threshold * confirm_factor:
+        out['status'] = 'clear_breach'
+    else:
+        out['status'] = 'borderline_breach'
+    return out
+
+
 def _auto_expire_old_closes(pending: List[Dict]) -> bool:
     """Mark any pending proposal past its expiry as 'expired'. Returns True if mutated."""
     cutoff = datetime.now() - timedelta(hours=CLOSE_EXPIRY_HOURS)
@@ -785,13 +931,16 @@ def run_evaluator(
         pending = rotated
         _save_pending_closes(pending)
 
-    # In execute mode a leftover 'pending' proposal (from the approval era or
-    # a --propose-only run) must not block the close — it gets superseded at
-    # execution time instead. Recent human dismissals suppress in both modes.
+    # In execute mode a leftover 'pending' proposal (from the approval era, a
+    # --propose-only run, or last cycle's borderline breach) must not BLOCK
+    # anything — it is the persistence signal the re-validation step consumes
+    # (and it gets superseded at execution time so execute_close.py --id N
+    # can't double-close). Recent human dismissals suppress in both modes.
     suppressed = _existing_pending_ids(pending, include_pending=not execute)
     next_id = max((p.get('id', 0) for p in pending), default=0) + 1
 
     new_records: List[Dict] = []
+    pending_dirty = False  # in-place mutations of existing records
     n_hold = 0
     n_close = 0
     n_actioned = 0
@@ -804,12 +953,21 @@ def run_evaluator(
     for market_id, legs in _iter_open_markets(state):
         aggregate = _aggregate_market_legs(market_id, legs)
         action, score, reason = classify_position(aggregate)
+        legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
 
         if action == 'HOLD':
             n_hold += 1
+            # A pending proposal whose market is now scoring above the
+            # threshold has recovered — terminate it so a later breach has
+            # to re-prove itself from scratch. Only the score-based HOLD
+            # counts; guard HOLDs (stale_reprice, too_new, …) say "can't
+            # judge right now", not "the signal went away".
+            if execute and reason == 'score_above_threshold':
+                if _mark_recovered_pending(pending, market_id,
+                                           'snapshot score back above threshold'):
+                    pending_dirty = True
             if verbose:
                 s = f"{score:+.2f}" if isinstance(score, (int, float)) else "?"
-                legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
                 print(f"  [{market_id[:12]}] HOLD  score={s}  ({reason}){legs_tag}")
             continue
 
@@ -821,39 +979,124 @@ def run_evaluator(
                 print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — {why}, skipping")
             continue
 
-        record = _build_proposal(next_id, market_id, aggregate, score, reason)
-        next_id += 1
-        legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
-
         if not execute:
+            record = _build_proposal(next_id, market_id, aggregate, score, reason)
+            next_id += 1
             new_records.append(record)
             n_actioned += 1
             if verbose:
                 print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{record['id']}{legs_tag}")
             continue
 
-        # Execute mode: act on our own decision, then notify (inside
-        # execute_close) with the score breakdown. Any stale pending ask for
-        # this market is now moot — supersede it so execute_close.py --id N
-        # can't double-close later.
+        # ── Execute mode: re-validation is the approver (Phase 2.3b) ────────
+        # The snapshot score breached. Before any money moves, refetch the
+        # live probability and re-score on fresh data. `prior` is last
+        # cycle's still-pending proposal for this market — its existence
+        # means the breach already survived at least one full cycle.
+        prior = _find_active_pending(pending, market_id)
+        reval = _revalidate_close(aggregate, legs)
+
+        if reval['status'] == 'refetch_failed':
+            # Never execute on stale data. Keep (or create) the pending
+            # record so the next cycle picks it up as a persistence check.
+            if prior is None:
+                record = _build_proposal(next_id, market_id, aggregate, score, reason)
+                next_id += 1
+                record['revalidation'] = reval
+                new_records.append(record)
+            else:
+                prior['revalidation'] = reval
+                pending_dirty = True
+            if verbose:
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — "
+                      f"refetch failed, deferred to next cycle{legs_tag}")
+            continue
+
+        if reval['status'] == 'resolved_on_refetch':
+            record = prior
+            if record is None:
+                record = _build_proposal(next_id, market_id, aggregate, score, reason)
+                next_id += 1
+                new_records.append(record)
+            else:
+                pending_dirty = True
+            record['revalidation'] = reval
+            record['status'] = 'skipped_resolved'
+            record['note'] = ('market resolved on re-validation refetch — '
+                              'resolve_positions.py at :10 owns it')
+            if verbose:
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — "
+                      f"skipped, market already resolved{legs_tag}")
+            continue
+
+        if reval['status'] == 'recovered':
+            # The fresh number doesn't breach — the snapshot was one-tick
+            # noise. Terminal: a future breach starts over.
+            record = prior
+            if record is None:
+                record = _build_proposal(next_id, market_id, aggregate, score, reason)
+                next_id += 1
+                new_records.append(record)
+            else:
+                pending_dirty = True
+            record['revalidation'] = reval
+            record['status'] = 'recovered'
+            record['recovered_at'] = datetime.now().isoformat()
+            record['note'] = 'fresh refetch no longer breaches threshold'
+            if verbose:
+                fs = reval['fresh_score']
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — recovered "
+                      f"on fresh refetch (fresh {fs:+.2f}), no close{legs_tag}")
+            continue
+
+        # Fresh data still breaches. Decide which execution rule (if any)
+        # fires this cycle:
+        #   - a prior pending proposal means the signal PERSISTED across
+        #     cycles → execute now, whatever the breach size;
+        #   - no prior + clear margin → unambiguous, execute immediately;
+        #   - no prior + borderline → record it and wait one cycle.
+        if prior is not None:
+            reval['rule'] = 'persisted_next_cycle'
+        elif reval['status'] == 'clear_breach':
+            reval['rule'] = 'immediate_clear_margin'
+        else:  # first crossing, borderline breach
+            record = _build_proposal(next_id, market_id, aggregate, score, reason)
+            next_id += 1
+            record['revalidation'] = reval
+            new_records.append(record)
+            if verbose:
+                fs = reval['fresh_score']
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — borderline "
+                      f"(fresh {fs:+.2f}), awaiting persistence next cycle{legs_tag}")
+            continue
+
+        record = _build_proposal(next_id, market_id, aggregate, score, reason)
+        next_id += 1
+        record['revalidation'] = reval
+        # Any open ask for this market (approval-era leftover or last cycle's
+        # borderline proposal) is moot once we act — supersede it so
+        # execute_close.py --id N can't double-close later.
         _supersede_pending(pending, market_id)
+        pending_dirty = True
         if trader is None:
             trader = trader_factory()
         if _execute_record(record, trader, notify):
             n_actioned += 1
         if verbose:
-            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — {record['status']}{legs_tag}")
+            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — "
+                  f"{record['status']} ({reval['rule']}){legs_tag}")
         new_records.append(record)
 
     if new_records:
         pending.extend(new_records)
+    if new_records or pending_dirty:
         _save_pending_closes(pending)
-        if not execute:
-            for p in new_records:
-                try:
-                    notify(_format_telegram_message(p))
-                except Exception as e:
-                    print(f"[evaluate_positions] warning: telegram send failed: {e}", file=sys.stderr)
+    if new_records and not execute:
+        for p in new_records:
+            try:
+                notify(_format_telegram_message(p))
+            except Exception as e:
+                print(f"[evaluate_positions] warning: telegram send failed: {e}", file=sys.stderr)
 
     return (n_hold, n_close, n_actioned)
 

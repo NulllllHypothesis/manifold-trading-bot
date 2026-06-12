@@ -1348,6 +1348,247 @@ class TestRunEvaluatorAutoExecute(unittest.TestCase):
         self.assertEqual(self._read_pending()[0]['status'], 'skipped_resolved')
 
 
+# ── Phase 2.3b: re-validation is the approver ────────────────────────────────
+
+class TestRevalidationApprover(unittest.TestCase):
+    """The two-stage propose→approve shape from PR #15 survives, but the
+    approver is a machine step: a fresh live refetch (not the :05 snapshot)
+    must confirm the breach before any close executes.
+
+      - clear-margin breach (fresh score <= threshold ×
+        CLOSE_CONFIRM_MARGIN_FACTOR) → executes in the same run
+      - borderline breach → recorded, waits one cycle, executes next run
+        only if a fresh refetch still breaches
+      - recovery on fresh data → no close, ever
+      - failed refetch → defer; the evaluator NEVER executes on the stale
+        snapshot alone
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.state_path = tmp / 'paper_trading_state.json'
+        self.pending_path = tmp / 'pending_closes.json'
+        self._patchers = [
+            patch.object(evaluate_positions, '_STATE_PATH', self.state_path),
+            patch.object(evaluate_positions, '_PENDING_CLOSES_PATH', self.pending_path),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.telegram_sent = []
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def _notify(self, msg):
+        self.telegram_sent.append(msg)
+
+    def _write_state(self, state):
+        with open(self.state_path, 'w') as f:
+            json.dump(state, f)
+
+    def _read_pending(self):
+        if not self.pending_path.exists():
+            return []
+        with open(self.pending_path) as f:
+            return json.load(f)
+
+    def _forbidden_trader_factory(self):
+        self.fail('trader must not be instantiated in this scenario')
+
+    @staticmethod
+    def _market(prob, resolved=False):
+        return {'probability': prob, 'isResolved': resolved}
+
+    def _patch_prob(self, prob):
+        """Patch the shared api_client so the re-validation refetch (and
+        execute_close's own pre-close refetch) sees a live probability."""
+        return patch.object(execute_close_mod.api_client, 'get_market',
+                            return_value=self._market(prob))
+
+    # Snapshot setup used throughout: YES @ entry 0.5, $10, 5 days old,
+    # class 'short' → decay 5 × 0.05 = 0.25.
+    #   snapshot unrealised -3.00 → snapshot score -3.25 (deep breach)
+    #   snapshot unrealised -0.50 → snapshot score -0.75 (breach, not deep)
+    # Fresh refetch at probability p → fresh pnl = 10·p/0.5 − 10 = 20p − 10:
+    #   p=0.300 → pnl −4.00 → fresh score −4.25  (clear margin, ≤ −1.00)
+    #   p=0.475 → pnl −0.50 → fresh score −0.75  (borderline: −1.00 < s < −0.50)
+    #   p=0.550 → pnl +1.00 → fresh score +0.75  (recovered)
+
+    def _write_losing_state(self, unrealised=-0.5):
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=unrealised, days_ago=5,
+                           question='Will Foo happen?')],
+        }))
+
+    # ── immediate clear-margin path ──────────────────────────────────────────
+
+    def test_clear_margin_breach_executes_in_same_run(self):
+        self._write_losing_state(unrealised=-3.0)
+        trader = _FakeExecTrader(state_path=self.state_path)
+        with self._patch_prob(0.3):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=lambda: trader)
+        self.assertEqual((h, c, n), (0, 1, 1))
+        self.assertEqual(len(trader.calls), 1)
+
+        record = self._read_pending()[0]
+        self.assertEqual(record['status'], 'executed')
+        self.assertEqual(record['revalidation']['rule'], 'immediate_clear_margin')
+        self.assertAlmostEqual(record['revalidation']['fresh_probability'], 0.3)
+        self.assertAlmostEqual(record['revalidation']['fresh_score'], -4.25, places=2)
+
+        # The rule that fired is stamped through to the closed trade records.
+        _, _, ctx = trader.calls[0]
+        self.assertEqual(ctx['revalidation'], 'immediate_clear_margin')
+        self.assertAlmostEqual(ctx['revalidation_fresh_score'], -4.25, places=2)
+
+        # Notification carries the re-validation evidence.
+        self.assertEqual(len(self.telegram_sent), 1)
+        self.assertIn('Re-validated live: immediate_clear_margin', self.telegram_sent[0])
+
+    # ── borderline: wait one cycle, then persistence decides ─────────────────
+
+    def test_borderline_first_crossing_waits_one_cycle(self):
+        self._write_losing_state(unrealised=-0.5)
+        with self._patch_prob(0.475):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (0, 1, 0))
+
+        pending = self._read_pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['status'], 'pending')
+        self.assertEqual(pending[0]['revalidation']['status'], 'borderline_breach')
+        self.assertIsNone(pending[0]['revalidation']['rule'])
+        # No Telegram noise for "will confirm next cycle".
+        self.assertEqual(self.telegram_sent, [])
+
+    def test_borderline_persists_and_executes_next_cycle(self):
+        self._write_losing_state(unrealised=-0.5)
+        with self._patch_prob(0.475):
+            run_evaluator(notify=self._notify, execute=True,
+                          trader_factory=self._forbidden_trader_factory)
+
+        trader = _FakeExecTrader(state_path=self.state_path)
+        with self._patch_prob(0.475):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=lambda: trader)
+        self.assertEqual(n, 1)
+        self.assertEqual(len(trader.calls), 1)
+
+        by_status = {}
+        for p in self._read_pending():
+            by_status.setdefault(p['status'], []).append(p)
+        # The cycle-1 proposal is superseded by the cycle-2 execution record.
+        self.assertEqual(len(by_status.get('superseded', [])), 1)
+        executed = by_status.get('executed', [])
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]['revalidation']['rule'], 'persisted_next_cycle')
+        self.assertTrue(any('persisted_next_cycle' in m for m in self.telegram_sent))
+
+    def test_borderline_recovers_on_fresh_refetch_no_close(self):
+        self._write_losing_state(unrealised=-0.5)
+        with self._patch_prob(0.475):
+            run_evaluator(notify=self._notify, execute=True,
+                          trader_factory=self._forbidden_trader_factory)
+
+        # Next cycle: snapshot still says CLOSE (state unchanged), but the
+        # live market has moved back in our favour → no close, proposal ends
+        # 'recovered' (terminal — a future breach must re-prove itself).
+        with self._patch_prob(0.55):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual(n, 0)
+
+        pending = self._read_pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['status'], 'recovered')
+        self.assertEqual(pending[0]['revalidation']['status'], 'recovered')
+        self.assertEqual(self.telegram_sent, [])
+
+    def test_snapshot_recovery_marks_pending_recovered(self):
+        # Variant: the recovery shows up in the :05 snapshot itself (HOLD
+        # with score_above_threshold) — the waiting proposal is terminated
+        # without any refetch.
+        self._write_losing_state(unrealised=-0.5)
+        with self._patch_prob(0.475):
+            run_evaluator(notify=self._notify, execute=True,
+                          trader_factory=self._forbidden_trader_factory)
+
+        self._write_losing_state(unrealised=+1.0)
+        with self._patch_prob(0.475):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (1, 0, 0))
+        record = self._read_pending()[0]
+        self.assertEqual(record['status'], 'recovered')
+        self.assertIn('above threshold', record['note'])
+
+    # ── refetch failure: defer, never execute on stale data ──────────────────
+
+    def test_refetch_failure_defers_and_never_executes_on_stale_data(self):
+        self._write_losing_state(unrealised=-3.0)  # deep breach on the snapshot
+
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          side_effect=ConnectionError('api down')):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (0, 1, 0))
+        pending = self._read_pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['status'], 'pending')
+        self.assertEqual(pending[0]['revalidation']['status'], 'refetch_failed')
+
+        # Still failing next cycle: defer again on the SAME record — no
+        # duplicate proposals, still no execution.
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          side_effect=ConnectionError('api still down')):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual(n, 0)
+        pending = self._read_pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['status'], 'pending')
+
+        # API back: the prior pending acts as the persistence signal and the
+        # close finally executes — on FRESH data.
+        trader = _FakeExecTrader(state_path=self.state_path)
+        with self._patch_prob(0.3):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=lambda: trader)
+        self.assertEqual(n, 1)
+        self.assertEqual(len(trader.calls), 1)
+        executed = [p for p in self._read_pending() if p['status'] == 'executed']
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]['revalidation']['rule'], 'persisted_next_cycle')
+
+    def test_market_payload_without_probability_defers(self):
+        # A fetch that "succeeds" but has no usable probability is the same
+        # as a failed fetch: defer, don't act.
+        self._write_losing_state(unrealised=-3.0)
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'isResolved': False}):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual(n, 0)
+        self.assertEqual(self._read_pending()[0]['revalidation']['status'],
+                         'refetch_failed')
+
+    # ── propose-only mode never refetches ────────────────────────────────────
+
+    def test_propose_only_mode_does_not_refetch(self):
+        self._write_losing_state(unrealised=-3.0)
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          side_effect=AssertionError('propose-only must not hit the API')):
+            h, c, n = run_evaluator(notify=self._notify, execute=False,
+                                    trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (0, 1, 1))
+        self.assertEqual(self._read_pending()[0]['status'], 'pending')
+
+
 class TestCloseContextStamping(unittest.TestCase):
     """PaperTrader.close_position_early stamps close_context onto the closed
     trade records so the learning loop can study close-time reasoning."""
