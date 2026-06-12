@@ -20,7 +20,7 @@ import os
 import sqlite3
 import json
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -91,7 +91,16 @@ def _fetch_outcomes(days: int = None, era: str = "post_ev_fix") -> list[dict]:
         params.extend([era, era])
 
     if days:
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        # resolved_at is stamped tz-aware UTC ("...+00:00") since the explicit
+        # resolved_at work (PR #42/#43), so the cutoff must be built from UTC
+        # "now" too — a naive-local cutoff shifts the window boundary by the
+        # host's UTC offset. The filter is an ISO-8601 *string* comparison in
+        # SQLite, which is chronologically correct for same-form timestamps
+        # and never crashes on either form. Legacy pre-#42 rows are naive
+        # *local* strings, so for those the boundary is approximate (off by
+        # up to the host's UTC offset) during the changeover week — an
+        # accepted limitation for a weekly report.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         conditions.append("resolved_at >= ?")
         params.append(cutoff)
 
@@ -344,7 +353,7 @@ def generate_report(days: int = 7, telegram: bool = False) -> str:
     lines = [
         sep,
         f"WEEKLY EV ACCURACY REPORT ({period})",
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         sep,
     ]
 
