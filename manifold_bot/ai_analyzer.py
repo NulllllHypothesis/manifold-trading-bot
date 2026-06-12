@@ -34,6 +34,86 @@ DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 # backfill where extra reasoning latency is acceptable.
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
+# DeepSeek pricing in USD per 1M tokens, keyed by model id.
+# Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-06-12).
+# DeepSeek's usage payload splits prompt tokens into cache-hit and cache-miss
+# (prompt_tokens == prompt_cache_hit_tokens + prompt_cache_miss_tokens), and
+# the two are billed at very different rates, so we price them separately.
+# The deprecated aliases "deepseek-chat"/"deepseek-reasoner" map to the
+# v4-flash backend until their retirement (2026-07-24) and are priced the same.
+DEEPSEEK_PRICING_USD_PER_MTOK = {
+    "deepseek-v4-flash": {
+        "input_cache_hit": 0.0028,
+        "input_cache_miss": 0.14,
+        "output": 0.28,
+    },
+    "deepseek-v4-pro": {
+        "input_cache_hit": 0.003625,
+        "input_cache_miss": 0.435,
+        "output": 0.87,
+    },
+    "deepseek-chat": {           # alias of v4-flash non-thinking
+        "input_cache_hit": 0.0028,
+        "input_cache_miss": 0.14,
+        "output": 0.28,
+    },
+    "deepseek-reasoner": {       # alias of v4-flash thinking
+        "input_cache_hit": 0.0028,
+        "input_cache_miss": 0.14,
+        "output": 0.28,
+    },
+}
+
+
+def _compute_deepseek_cost_usd(usage: Optional[Dict], model: str = DEEPSEEK_MODEL) -> Optional[float]:
+    """Compute the USD cost of one DeepSeek call from its API-reported usage.
+
+    Args:
+        usage: the ``usage`` object from a DeepSeek chat-completion response.
+               Expected fields (https://api-docs.deepseek.com/api/create-chat-completion):
+                 prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                 prompt_tokens, completion_tokens
+        model: DeepSeek model id used for the call (pricing lookup key).
+
+    Returns:
+        Cost in USD (float, >= 0), or None when the cost cannot be computed
+        honestly — usage missing/malformed or unknown model. Callers should
+        OMIT the inference_cost field in that case rather than guess, so the
+        scorekeeper's flat-estimate fallback applies
+        (see workbench scorekeeper.adapters.manifold_bot: an explicit
+        inference_cost on a trade record wins over --inference-cost-per-ai-call).
+    """
+    if not isinstance(usage, dict):
+        return None
+    pricing = DEEPSEEK_PRICING_USD_PER_MTOK.get(model)
+    if pricing is None:
+        return None
+    try:
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        if hit is None and miss is None:
+            # No cache breakdown (older payload shape): bill all prompt
+            # tokens at the cache-miss rate — a conservative upper bound.
+            hit = 0
+            miss = usage.get("prompt_tokens")
+        if miss is None:
+            return None
+        completion = usage.get("completion_tokens", 0) or 0
+        hit = int(hit or 0)
+        miss = int(miss)
+        completion = int(completion)
+        if hit < 0 or miss < 0 or completion < 0:
+            return None
+        cost = (
+            hit * pricing["input_cache_hit"]
+            + miss * pricing["input_cache_miss"]
+            + completion * pricing["output"]
+        ) / 1_000_000
+        # Round to 8 decimals: sub-cent costs stay meaningful, JSON stays tidy.
+        return round(cost, 8)
+    except (TypeError, ValueError):
+        return None
+
 
 # JSON Schema for the structured market-analysis output. Passed to Ollama
 # via `format=<schema>` to enable constrained decoding (Ollama 0.5+) —
@@ -289,6 +369,8 @@ def _log_llm_call(
     deepseek_attempted: bool = False,
     deepseek_returned_value: bool = False,
     deepseek_saved_a_parse_failure: bool = False,
+    usage: Optional[Dict] = None,
+    inference_cost_usd: Optional[float] = None,
 ) -> None:
     """Append a JSONL record for every LLM call (for future distillation).
 
@@ -344,6 +426,14 @@ def _log_llm_call(
             "deepseek_attempted": deepseek_attempted,
             "deepseek_returned_value": deepseek_returned_value,
             "deepseek_saved_a_parse_failure": deepseek_saved_a_parse_failure,
+            # Cost accounting (additive fields, 2026-06). `usage` is the raw
+            # token-usage object DeepSeek reported (None for Ollama calls —
+            # local inference has no billing meter); inference_cost_usd is the
+            # computed USD spend (0.0 for Ollama, None when unknowable).
+            # Token counts are billing metadata, not market data, so they are
+            # safe to log under the compliance constraints described above.
+            "usage": usage,
+            "inference_cost_usd": inference_cost_usd,
             "system_prompt_sha256": system_prompt_hash,
             "market_id": market_id,
             # raw_response and chain_of_thought are intentionally excluded
@@ -438,8 +528,15 @@ def _call_ollama(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
     return None
 
 
-def _call_deepseek_api(prompt: str) -> Optional[str]:
-    """Call DeepSeek API."""
+def _call_deepseek_api(prompt: str, meta: Optional[dict] = None) -> Optional[str]:
+    """Call DeepSeek API.
+
+    meta: optional dict (same pattern as _call_ollama). When provided and the
+    call succeeds, meta['usage'] is set to the API-reported ``usage`` object
+    (prompt_cache_hit_tokens / prompt_cache_miss_tokens / completion_tokens…)
+    so the caller can compute the real USD cost of the call via
+    _compute_deepseek_cost_usd(). Return type is unchanged for existing callers.
+    """
     api_key = _get_deepseek_api_key()
     if not api_key:
         return None
@@ -472,7 +569,14 @@ def _call_deepseek_api(prompt: str) -> Optional[str]:
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            if meta is not None:
+                # Capture token usage for cost accounting. Guarded so a
+                # missing/odd usage object can never break the analysis path.
+                usage = body.get("usage")
+                if isinstance(usage, dict):
+                    meta["usage"] = usage
+            return body["choices"][0]["message"]["content"]
     except Exception:
         pass
     return None
@@ -626,9 +730,10 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
     # was conflating these — name said "tried", behavior was "returned a value".
     deepseek_attempted = False
     deepseek_returned_value = False
+    deepseek_meta: dict = {}
     if result is None:
         deepseek_attempted = True
-        ds_raw = _call_deepseek_api(prompt)
+        ds_raw = _call_deepseek_api(prompt, meta=deepseek_meta)
         if ds_raw is not None:
             deepseek_returned_value = True
             source = "deepseek_api"
@@ -637,6 +742,23 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
     deepseek_saved_a_parse_failure = (
         ollama_parse_failed and deepseek_returned_value and result is not None
     )
+
+    # Per-call inference cost in USD, from API-reported token usage.
+    # Semantics (consumed downstream by the scorekeeper's manifold_bot adapter,
+    # which prefers an explicit per-trade inference_cost over its flat
+    # --inference-cost-per-ai-call estimate):
+    #   ollama       → 0.0 (local inference, zero marginal API spend)
+    #   deepseek_api → real cost from usage x published per-token pricing
+    #   unknown      → None (usage missing or unpriceable model). Callers must
+    #                  then OMIT the field so the flat-estimate fallback applies.
+    inference_cost: Optional[float] = None
+    if result is not None:
+        if source == "ollama":
+            inference_cost = 0.0
+        else:
+            inference_cost = _compute_deepseek_cost_usd(
+                deepseek_meta.get("usage"), DEEPSEEK_MODEL
+            )
 
     latency_ms = (time.monotonic() - t0) * 1000
 
@@ -655,11 +777,17 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
         deepseek_attempted=deepseek_attempted,
         deepseek_returned_value=deepseek_returned_value,
         deepseek_saved_a_parse_failure=deepseek_saved_a_parse_failure,
+        usage=deepseek_meta.get("usage"),
+        inference_cost_usd=inference_cost,
     )
 
     if result:
         result["source"] = source
         result["market_id"] = market_id
+        # Only attach when known — absent field means "cost unknown", which
+        # downstream consumers (scorekeeper adapter) treat as "use estimate".
+        if inference_cost is not None:
+            result["inference_cost"] = inference_cost
     return result
 
 
