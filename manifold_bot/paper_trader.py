@@ -234,7 +234,8 @@ class PaperTrader:
                        position_class: Optional[str] = None,
                        close_time_ms: Optional[int] = None,
                        confidence: Optional[float] = None,
-                       ai_status: Optional[str] = None) -> bool:
+                       ai_status: Optional[str] = None,
+                       inference_cost: Optional[float] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
@@ -257,6 +258,15 @@ class PaperTrader:
             close_time_ms:           V2 Phase 2.1: Manifold closeTime in unix ms.
                                      Persisted so legacy positions can be re-classified
                                      if position_class is missing.
+            inference_cost:          Real LLM spend (USD) for the AI analysis that
+                                     backed this trade, computed from API-reported
+                                     token usage x DeepSeek pricing (0.0 for local
+                                     Ollama analyses). None when no AI ran or the
+                                     cost is unknown. Additive/optional: the
+                                     scorekeeper's manifold_bot adapter prefers
+                                     this explicit field and falls back to a flat
+                                     --inference-cost-per-ai-call estimate when
+                                     it is None/absent.
 
         Returns:
             bool: True if trade successful
@@ -317,6 +327,10 @@ class PaperTrader:
             # "AI confidence was 0", and post-hoc audits can tell which trades
             # the AI actually weighed in on.
             'ai_status': ai_status,
+            # Real per-trade LLM spend in USD (see docstring). Stored even when
+            # None so trade rows have a consistent shape; consumers must treat
+            # None as "unknown — use an estimate", NOT as zero.
+            'inference_cost': inference_cost,
             'strategies': strategies,
             # Category and question stored for exposure-cap counting and daily summary
             'category': category or 'other',

@@ -1144,6 +1144,18 @@ class MarketResearcher:
                     rec['ai_reasoning'] = ai_reasoning
                     rec['ai_source'] = ai['source']
                     rec['ai_estimated_probability'] = ai['estimated_true_probability']
+                    # Real per-call LLM spend in USD (0.0 for local Ollama,
+                    # API-usage-derived for DeepSeek). Set only when the
+                    # analyzer could compute it — an absent/None field tells
+                    # the scorekeeper adapter to fall back to its flat
+                    # --inference-cost-per-ai-call estimate. Flows via the
+                    # trader into paper_trading_state.json trade records.
+                    # Note: a cache-hit AI result carries the cost of the
+                    # original analysis call; since the bot skips markets it
+                    # already holds, the same analysis almost never backs two
+                    # trades, so per-trade attribution stays ~exact.
+                    if ai.get('inference_cost') is not None:
+                        rec['inference_cost'] = ai['inference_cost']
 
                     # Blend statistical + AI confidence
                     stat_conf = rec['confidence']

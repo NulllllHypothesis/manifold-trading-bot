@@ -894,6 +894,12 @@ class AutoTrader:
             close_time_ms=recommendation.get('close_time_ms'),
             confidence=confidence,
             ai_status=recommendation.get('ai_status'),
+            # Real LLM spend (USD) for the AI analysis backing this trade,
+            # measured from API-reported token usage (0.0 when the analysis
+            # ran on local Ollama). None/absent when no AI ran or the cost
+            # couldn't be computed — the scorekeeper adapter then falls back
+            # to its flat --inference-cost-per-ai-call estimate.
+            inference_cost=recommendation.get('inference_cost'),
         )
 
         if success:
