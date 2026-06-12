@@ -6,7 +6,7 @@ Simulates trading without using real play money.
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .manifold_api import api_client
@@ -30,6 +30,25 @@ def _notify_resolution(market_id: str, question: str, outcome: str, our_bet: str
         send_message(msg)
     except Exception:
         pass  # never block resolution
+
+def _market_resolved_at_iso(market: Dict) -> Optional[str]:
+    """Manifold's authoritative resolution time as ISO-8601 UTC, or None.
+
+    The API reports ``resolutionTime`` in epoch **milliseconds** on resolved
+    markets. Returns None when the field is missing or unparseable so the
+    caller can fall back to detection time (now). Never raises — resolution
+    must not fail because of a malformed timestamp.
+    """
+    try:
+        ts_ms = market.get('resolutionTime')
+        if ts_ms is None:
+            return None
+        return datetime.fromtimestamp(
+            float(ts_ms) / 1000.0, tz=timezone.utc
+        ).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
 
 # SQLite database — shared with calibration scripts
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -360,14 +379,23 @@ class PaperTrader:
         self.save_state()
         return True
     
-    def resolve_market(self, market_id: str, outcome: str, question: str = ""):
+    def resolve_market(self, market_id: str, outcome: str, question: str = "",
+                       resolved_at: Optional[str] = None):
         """
         Resolve a market and calculate P&L.
 
         Args:
-            market_id: Market to resolve
-            outcome:   Actual outcome ("YES" or "NO")
-            question:  Human-readable question text for Telegram notification (optional)
+            market_id:   Market to resolve
+            outcome:     Actual outcome ("YES" or "NO")
+            question:    Human-readable question text for Telegram notification (optional)
+            resolved_at: ISO-8601 timestamp of when the market actually resolved
+                         (Manifold's ``resolutionTime`` when the caller has it).
+                         Defaults to now (UTC) — i.e. detection time.
+
+        Every position that closes here gets an explicit ``resolved_at`` stamped
+        on both the position record and its trade_history twin, so downstream
+        consumers (e.g. the workbench scorekeeper adapter) no longer have to
+        approximate resolution time from position-snapshot detection lag.
 
         Side-effect: appends one row per resolved position to the bet_outcomes
         SQLite table in data/calibration.db for EV calibration tracking.
@@ -378,6 +406,9 @@ class PaperTrader:
             return
 
         _init_bet_outcomes_db()   # no-op if table already exists
+
+        if resolved_at is None:
+            resolved_at = datetime.now(timezone.utc).isoformat()
 
         positions = self.positions[market_id]
         total_pnl = 0
@@ -408,11 +439,13 @@ class PaperTrader:
                 total_pnl += profit
                 print(f"Trade {trade['trade_id']}: LOSE ${profit:.2f}")
 
+            trade['resolved_at'] = resolved_at
+
             # Write outcome to SQLite for EV calibration tracking
             _write_bet_outcome(trade, market_resolution=outcome, actual_pnl=trade['profit'])
 
             updated_trade_ids.append(trade['trade_id'])
-        
+
         # Also update trade_history to stay consistent
         for trade in self.trade_history:
             if trade['trade_id'] in updated_trade_ids:
@@ -424,6 +457,8 @@ class PaperTrader:
                             trade['actual_outcome'] = pos['actual_outcome']
                         if 'profit' in pos:
                             trade['profit'] = pos['profit']
+                        if 'resolved_at' in pos:
+                            trade['resolved_at'] = pos['resolved_at']
                         break
         
         # Update balance
@@ -451,7 +486,8 @@ class PaperTrader:
         self.save_state()
     
 
-    def resolve_market_mkt(self, market_id: str, resolution_prob: float, question: str = ""):
+    def resolve_market_mkt(self, market_id: str, resolution_prob: float, question: str = "",
+                           resolved_at: Optional[str] = None):
         """
         Resolve a market that settled as MKT (to a specific probability).
 
@@ -461,12 +497,19 @@ class PaperTrader:
           - NO bettors get:  amount × (1 − resolutionProb) / (1 − entryProb)
 
         P&L = payout − amount (can be positive or negative).
+
+        resolved_at: ISO-8601 timestamp of the actual resolution (Manifold's
+        ``resolutionTime`` when available); defaults to now (UTC). Stamped on
+        each closing position and its trade_history twin.
         """
         if market_id not in self.positions:
             print(f"No positions in market {market_id}")
             return
 
         _init_bet_outcomes_db()
+
+        if resolved_at is None:
+            resolved_at = datetime.now(timezone.utc).isoformat()
 
         positions = self.positions[market_id]
         total_pnl = 0
@@ -493,6 +536,7 @@ class PaperTrader:
             trade['status'] = 'WIN' if profit >= 0 else 'LOSE'
             trade['actual_outcome'] = 'MKT'
             trade['profit'] = profit
+            trade['resolved_at'] = resolved_at
             total_pnl += profit
             updated_trade_ids.append(trade['trade_id'])
             print(f"Trade {trade['trade_id']}: MKT@{resolution_prob:.0%} → ${profit:+.2f}")
@@ -506,6 +550,7 @@ class PaperTrader:
                         trade['status'] = pos['status']
                         trade['actual_outcome'] = pos.get('actual_outcome')
                         trade['profit'] = pos.get('profit')
+                        trade['resolved_at'] = pos.get('resolved_at')
                         break
 
         self.balance += total_pnl
@@ -527,18 +572,26 @@ class PaperTrader:
 
         self.save_state()
 
-    def resolve_market_cancel(self, market_id: str, question: str = ""):
+    def resolve_market_cancel(self, market_id: str, question: str = "",
+                              resolved_at: Optional[str] = None):
         """
         Resolve a cancelled market — full refund of the bet amount.
 
         On Manifold, CANCEL means the market was voided and all bets are
         returned at face value. P&L = 0 for every position.
+
+        resolved_at: ISO-8601 timestamp of the actual cancellation (Manifold's
+        ``resolutionTime`` when available); defaults to now (UTC). Stamped on
+        each closing position and its trade_history twin.
         """
         if market_id not in self.positions:
             print(f"No positions in market {market_id}")
             return
 
         _init_bet_outcomes_db()
+
+        if resolved_at is None:
+            resolved_at = datetime.now(timezone.utc).isoformat()
 
         positions = self.positions[market_id]
         updated_trade_ids = []
@@ -554,6 +607,7 @@ class PaperTrader:
             trade['status'] = 'CANCELLED'
             trade['actual_outcome'] = 'CANCEL'
             trade['profit'] = 0.0
+            trade['resolved_at'] = resolved_at
             updated_trade_ids.append(trade['trade_id'])
             print(f"Trade {trade['trade_id']}: CANCELLED (refund ${trade.get('amount', 0):.2f})")
 
@@ -566,6 +620,7 @@ class PaperTrader:
                         trade['status'] = pos['status']
                         trade['actual_outcome'] = pos.get('actual_outcome')
                         trade['profit'] = 0.0
+                        trade['resolved_at'] = pos.get('resolved_at')
                         break
 
         # Balance unchanged — the original amount was already deducted at bet time,
@@ -755,6 +810,12 @@ class PaperTrader:
           YES / NO  → binary win/loss (resolve_market)
           MKT       → proportional payout at resolutionProbability (resolve_market_mkt)
           CANCEL    → full refund (resolve_market_cancel)
+
+        Passes the market's authoritative ``resolutionTime`` (epoch ms from the
+        Manifold API) down as ``resolved_at`` so trade records carry the TRUE
+        resolution time, not the time this monitor happened to notice it.
+        Falls back to detection time inside resolve_market* when the API
+        doesn't report one.
         """
         resolved_count = 0
         for market_id in list(self.positions.keys()):
@@ -776,24 +837,28 @@ class PaperTrader:
 
                 resolution = market.get('resolution', '')
                 q = market.get('question', market_id)
+                resolved_at = _market_resolved_at_iso(market)
 
                 if resolution in ('YES', 'NO'):
                     print(f"Auto-resolving {q[:50]}... as {resolution}")
-                    self.resolve_market(market_id, resolution, question=q)
+                    self.resolve_market(market_id, resolution, question=q,
+                                        resolved_at=resolved_at)
                     resolved_count += 1
 
                 elif resolution == 'MKT':
                     res_prob = market.get('resolutionProbability')
                     if res_prob is not None:
                         print(f"Auto-resolving {q[:50]}... as MKT@{res_prob:.0%}")
-                        self.resolve_market_mkt(market_id, float(res_prob), question=q)
+                        self.resolve_market_mkt(market_id, float(res_prob), question=q,
+                                                resolved_at=resolved_at)
                         resolved_count += 1
                     else:
                         print(f"MKT resolution for {market_id} but no resolutionProbability — skipping")
 
                 elif resolution == 'CANCEL':
                     print(f"Auto-resolving {q[:50]}... as CANCEL (refund)")
-                    self.resolve_market_cancel(market_id, question=q)
+                    self.resolve_market_cancel(market_id, question=q,
+                                               resolved_at=resolved_at)
                     resolved_count += 1
 
                 else:
