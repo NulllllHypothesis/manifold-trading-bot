@@ -900,6 +900,11 @@ class AutoTrader:
             # couldn't be computed — the scorekeeper adapter then falls back
             # to its flat --inference-cost-per-ai-call estimate.
             inference_cost=recommendation.get('inference_cost'),
+            # Learning loop (workbench-s7fo): persist the AI's reasoning as the
+            # entry thesis so the retro written at close time records WHY we
+            # entered. Empty string → None so stat-only trades fall back to the
+            # strategy-list thesis in the lessons store.
+            thesis=recommendation.get('ai_reasoning') or None,
         )
 
         if success:

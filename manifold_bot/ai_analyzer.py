@@ -310,7 +310,7 @@ Close date: {close_date}
 Additional context:
 {context}
 
-{news_note}{calibration_note}
+{news_note}{history_note}{calibration_note}{lessons_note}
 
 Respond with this exact JSON structure:
 {{
@@ -642,6 +642,96 @@ def _build_news_note(news_context: list) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _build_history_note(market: Dict) -> str:
+    """
+    Format the market's probability history for the AI prompt.
+
+    Reads market['prob_history'] — a list of {"t": <unix ms>, "p": <prob>}
+    points oldest-first, attached by auto_research via
+    api_client.get_market_prob_history() for the candidates it sends to AI.
+    No network I/O happens here (mirrors the news_note pattern), so unit
+    tests and non-enriched callers are unaffected.
+
+    Returns "" when there is no usable history (fewer than 2 points), so the
+    prompt placeholder collapses cleanly. Never raises.
+    """
+    points = market.get("prob_history") or []
+    if len(points) < 2:
+        return ""
+    try:
+        now_ms = time.time() * 1000
+        pts = [p for p in points if p.get("t") is not None and p.get("p") is not None]
+        if len(pts) < 2:
+            return ""
+
+        latest = float(pts[-1]["p"])
+
+        def _at_or_before(cutoff_ms: float):
+            best = None
+            for pt in pts:
+                if pt["t"] <= cutoff_ms:
+                    best = pt
+                else:
+                    break
+            return best
+
+        day_ago = _at_or_before(now_ms - 24 * 3_600_000)
+        week_ago = _at_or_before(now_ms - 7 * 24 * 3_600_000)
+
+        segs = []
+        if week_ago is not None:
+            segs.append(f"7d ago: {float(week_ago['p']):.0%}")
+        if day_ago is not None and day_ago is not week_ago:
+            segs.append(f"24h ago: {float(day_ago['p']):.0%}")
+        if not segs:
+            # All points are within the last 24h — anchor on the earliest one.
+            first = pts[0]
+            age_h = max((now_ms - first["t"]) / 3_600_000, 0)
+            segs.append(f"{age_h:.0f}h ago: {float(first['p']):.0%}")
+        segs.append(f"latest trade: {latest:.0%}")
+
+        ref = day_ago or week_ago or pts[0]
+        delta_pp = (latest - float(ref["p"])) * 100
+        if delta_pp >= 3:
+            trend = " (rising)"
+        elif delta_pp <= -3:
+            trend = " (falling)"
+        else:
+            trend = " (stable)"
+
+        span_days = max((pts[-1]["t"] - pts[0]["t"]) / 86_400_000, 0)
+        lines = [
+            "Market probability history (from recent trades, oldest first):",
+            "  " + " → ".join(segs) + trend,
+            f"  Based on {len(pts)} trades over {span_days:.1f} days. A stable price "
+            f"reflects crowd consensus; a sharp recent move may reflect news you "
+            f"should account for before disagreeing with the market.",
+        ]
+        return "\n".join(lines) + "\n\n"
+    except Exception:
+        return ""
+
+
+def _build_lessons_note(question: str) -> str:
+    """
+    Build the bot's own track-record block (aggregate calibration stats +
+    most relevant recent lessons) for injection into the analysis prompt.
+
+    Reads data/lessons.db via manifold_bot.lessons — populated by the paper
+    trader at every position close/resolution (workbench-s7fo learning loop).
+    Returns "" when there is no history yet or anything fails: the learning
+    loop must never break the analysis path.
+    """
+    try:
+        from manifold_bot import lessons
+        from manifold_bot.strategies import _infer_market_category
+        category = _infer_market_category(question)
+        note = lessons.build_lessons_note(question=question, category=category)
+        return ("\n\n" + note) if note else ""
+    except Exception:
+        return ""
+
+
 def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optional[Dict]:
     """
     Run AI analysis on a single market.
@@ -695,7 +785,9 @@ def analyze_market(market: Dict, news_context: Optional[list] = None) -> Optiona
         close_date=close_date,
         context="\n".join(context_parts),
         news_note=_build_news_note(news_context or []),
+        history_note=_build_history_note(market),
         calibration_note=_build_query_calibration_note(question, probability),
+        lessons_note=_build_lessons_note(question),
     )
 
     # Try Ollama first (free), then DeepSeek API.
