@@ -394,6 +394,32 @@ def _record_ai_timeout(market_ids: list, cooldown: dict) -> None:
         entry["last_fail_at"] = now
 
 
+def _attach_prob_history(candidates: list, max_n: int) -> None:
+    """
+    Enrich up to max_n AI candidates in-place with their recent probability
+    trajectory (workbench-s7fo learning loop).
+
+    Sets mkt['prob_history'] = [{"t": <unix ms>, "p": <prob>}, ...] (oldest
+    first) via api_client.get_market_prob_history(). ai_analyzer's
+    _build_history_note() formats it into the prompt so the model sees how
+    the price moved (e.g. a sharp recent move it should explain before
+    disagreeing with the crowd).
+
+    max_n should match the max_markets passed to batch_analyze — fetching
+    history for markets the AI will never see wastes API calls. Per-market
+    failures are logged and skipped: history is an enrichment, never a
+    blocker for the analysis itself.
+    """
+    for mkt in candidates[:max_n]:
+        mid = mkt.get('id')
+        if not mid:
+            continue
+        try:
+            mkt['prob_history'] = api_client.get_market_prob_history(mid)
+        except Exception as e:
+            print(f"  Prob-history fetch failed for {mid}: {e}")
+
+
 def _write_market_snapshots(markets: list) -> None:
     """
     Write one snapshot row per non-resolved market to data/market_snapshots.db.
@@ -1010,6 +1036,13 @@ class MarketResearcher:
                 # scores that would be traded on in a future cycle with no indication
                 # which markets were AI-validated.
                 pre_ai_confidence = {r['market_id']: r['confidence'] for r in recommendations}
+
+                # Attach recent probability history to the candidates the AI
+                # will actually analyze (first 3 = max_markets below), so the
+                # prompt can show how the price has moved. Per-market failures
+                # degrade to "no history note" — never block the analysis.
+                if fresh_candidates:
+                    _attach_prob_history(fresh_candidates, max_n=3)
 
                 try:
                     # delay=2 makes the rate-limit intent explicit at the call site for both

@@ -83,8 +83,31 @@ class ManifoldAPI:
             params["contractId"] = market_id
         
         return self._make_request("GET", ENDPOINTS["bets"], params=params)
-    
-    def create_market(self, question: str, description: str, 
+
+    def get_market_prob_history(self, market_id: str, limit: int = 100) -> List[Dict]:
+        """
+        Recent probability trajectory of a market, derived from its bet feed.
+
+        Manifold has no dedicated price-history endpoint; each bet record
+        carries probAfter + createdTime, which together form the price path.
+        Returns a list of {"t": <unix ms>, "p": <prob 0-1>} points sorted
+        oldest-first (the /v0/bets endpoint returns newest-first), skipping
+        bets without a probAfter (e.g. cancelled limit orders).
+
+        Used by auto_research to attach `prob_history` to AI candidates so
+        ai_analyzer._build_history_note can show the model how the price has
+        moved (workbench-s7fo learning loop).
+        """
+        bets = self.get_user_bets(market_id=market_id, limit=limit)
+        points = [
+            {"t": b["createdTime"], "p": b["probAfter"]}
+            for b in bets
+            if b.get("probAfter") is not None and b.get("createdTime") is not None
+        ]
+        points.sort(key=lambda pt: pt["t"])
+        return points
+
+    def create_market(self, question: str, description: str,
                      outcome_type: str = "BINARY", close_time: Optional[int] = None,
                      tags: List[str] = None) -> Dict:
         """Create a new market"""

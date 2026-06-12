@@ -96,6 +96,7 @@ def _write_bet_outcome(
     market_resolution: str,
     actual_pnl: float,
     era: str = "post_ev_fix",
+    exit_probability: Optional[float] = None,
 ) -> None:
     """
     Append one resolved-trade record to bet_outcomes.
@@ -115,6 +116,13 @@ def _write_bet_outcome(
          era='early_close' so the weekly EV audit can segment close-at-AMM
          outcomes from true-resolution outcomes. Existing pre-fix rows are
          backfilled to 'pre_ev_fix' in _init_bet_outcomes_db().
+
+    exit_probability: realized probability-of-YES at close, for resolution
+         types where it is not implied by market_resolution itself —
+         MKT (resolutionProbability) and CLOSED_EARLY (AMM price at close).
+         Binary YES/NO resolutions are derived automatically (1.0 / 0.0);
+         CANCEL/ABANDONED have none. Forwarded to the lessons store so retro
+         calibration error can be computed.
     """
     try:
         estimated_ev   = trade.get("estimated_ev")
@@ -150,6 +158,24 @@ def _write_bet_outcome(
     except Exception as e:
         # Never let DB errors crash the paper trader
         print(f"[bet_outcomes] warning: could not write outcome for {trade.get('market_id')}: {e}")
+
+    # Learning loop (workbench-s7fo): every close also writes a structured
+    # retro (thesis, entry/exit prob, outcome, calibration error, one-line
+    # lesson) to the lessons store. The store lives NEXT TO calibration.db —
+    # derived from _DB_PATH at call time so tests that patch _DB_PATH to a
+    # temp file automatically redirect the lessons store too. Best-effort:
+    # a retro failure must never break a resolution path.
+    try:
+        from .lessons import write_retro
+        write_retro(
+            trade,
+            market_resolution=market_resolution,
+            actual_pnl=actual_pnl,
+            exit_probability=exit_probability,
+            db_path=Path(_DB_PATH).parent / "lessons.db",
+        )
+    except Exception as e:
+        print(f"[lessons] warning: could not write retro for {trade.get('market_id')}: {e}")
 
 
 class PaperTrader:
@@ -235,7 +261,8 @@ class PaperTrader:
                        close_time_ms: Optional[int] = None,
                        confidence: Optional[float] = None,
                        ai_status: Optional[str] = None,
-                       inference_cost: Optional[float] = None) -> bool:
+                       inference_cost: Optional[float] = None,
+                       thesis: Optional[str] = None) -> bool:
         """
         Place a paper trade (simulated bet).
 
@@ -327,6 +354,12 @@ class PaperTrader:
             # "AI confidence was 0", and post-hoc audits can tell which trades
             # the AI actually weighed in on.
             'ai_status': ai_status,
+            # Thesis at entry (workbench-s7fo learning loop): the AI reasoning
+            # string that justified this trade. Read back at close time by the
+            # lessons store so each retro records WHY we entered, not just the
+            # numbers. None for stat-only trades — lessons falls back to the
+            # strategy list.
+            'thesis': thesis,
             # Real per-trade LLM spend in USD (see docstring). Stored even when
             # None so trade rows have a consistent shape; consumers must treat
             # None as "unknown — use an estimate", NOT as zero.
@@ -497,7 +530,8 @@ class PaperTrader:
             updated_trade_ids.append(trade['trade_id'])
             print(f"Trade {trade['trade_id']}: MKT@{resolution_prob:.0%} → ${profit:+.2f}")
 
-            _write_bet_outcome(trade, market_resolution='MKT', actual_pnl=profit)
+            _write_bet_outcome(trade, market_resolution='MKT', actual_pnl=profit,
+                               exit_probability=resolution_prob)
 
         for trade in self.trade_history:
             if trade['trade_id'] in updated_trade_ids:
@@ -725,6 +759,7 @@ class PaperTrader:
                 market_resolution='CLOSED_EARLY',
                 actual_pnl=round(pnl, 4),
                 era='early_close',
+                exit_probability=current_prob,
             )
             print(f"Trade {trade['trade_id']}: CLOSED_EARLY {pnl:+.2f}")
 
