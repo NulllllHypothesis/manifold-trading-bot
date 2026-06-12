@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manifold_bot.manifold_api import api_client
 from manifold_bot.paper_trader import PaperTrader
+from manifold_bot.risk import assess_trade_risk
 from manifold_bot.strategies import TradingStrategies
 from manifold_bot.config import MIN_BET_AMOUNT, MAX_BET_AMOUNT, MIN_CONFIDENCE, MAX_POSITIONS, MAX_POSITIONS_PER_CATEGORY, MIN_LIQUIDITY, MIN_ESTIMATED_EV_FLOOR
 from manifold_bot.strategies import _infer_market_category
@@ -58,7 +59,12 @@ def _new_trader_counters() -> dict:
             "solo_no_ai_confirmation": 0,   # solo probability_direction + ai_status in (not_run, no_result)
             "market_state_changed":  0,     # market resolved/closed between :00 research and :20 trade,
                                             # or API fetch failed in execute_trade
+            "risk_guard":            0,     # workbench-g4wz: per-trade risk gate
+                                            # (size vs balance %, per-market exposure,
+                                            # total concurrent exposure)
         },
+        "drawdown_halted":          False,  # workbench-g4wz: circuit breaker tripped —
+                                            # the whole cycle was skipped, no recs evaluated
         "passed_filter":            0,      # survived should_trade_market
         "top_ev_at_exec": [],               # top 5 ranked (market_id, ev_exec)
         "trades_executed":          0,
@@ -809,6 +815,24 @@ class AutoTrader:
 
         print(f"  Position size: ${amount:.2f} ({amount/self.trader.balance*100:.1f}% of balance)")
 
+        # workbench-g4wz: per-trade risk gate, run here (in addition to the
+        # authoritative copy inside place_paper_bet) so a rejection is
+        # attributed to `risk_guard` in trader_counters instead of vanishing
+        # as a generic "Trade failed". Same pattern as the pre-flight vs
+        # live EV gate: observability up here, enforcement at the choke point.
+        risk_reason, _risk_fields = assess_trade_risk(
+            amount=amount,
+            balance=self.trader.balance,
+            positions=self.trader.positions,
+            market_id=market_id,
+        )
+        if risk_reason is not None:
+            print(f"  ⛔ Risk guard '{risk_reason}': ${amount:.2f} vs "
+                  f"balance ${self.trader.balance:.2f}, open exposure "
+                  f"${_risk_fields['open_exposure_before']:.2f} — skipping")
+            _inc_rejection(counters, "risk_guard")
+            return False
+
         # Compute estimated EV before placing the bet — it is deterministic given
         # current_prob, ai_estimated_probability (or stat fallback), outcome, and amount.
         # Passing it into place_paper_bet ensures the position record in
@@ -992,6 +1016,22 @@ class AutoTrader:
         open_positions = sum(1 for pos_list in self.trader.positions.values()
                                    for pos in pos_list if pos.get('status') == 'OPEN')
         print(f"Open positions: {open_positions}")
+
+        # workbench-g4wz: halt-on-drawdown circuit breaker. Checked once at
+        # cycle start (place_paper_bet re-checks per trade as defense in
+        # depth). When tripped, skip the whole cycle — no research load, no
+        # filtering — and say so loudly in the counters and the log.
+        if self.trader.check_circuit_breaker():
+            rs = getattr(self.trader, 'risk_state', None) or {}
+            print(f"🚨 TRADING HALTED: drawdown circuit breaker active — "
+                  f"equity ${self.trader.current_equity():.2f} is "
+                  f"{float(rs.get('last_drawdown_pct') or 0)*100:.1f}% below "
+                  f"peak ${float(rs.get('peak_equity') or 0):.2f}. "
+                  f"Resolutions/closes keep running; no new trades this cycle.")
+            counters["drawdown_halted"] = True
+            _print_trader_counters(counters)
+            _append_trader_counters(counters)
+            return 0
 
         # Load latest research
         research = self.load_latest_research()

@@ -163,6 +163,7 @@ class TestTraderCountersShape(unittest.TestCase):
             "timestamp", "recommendations_loaded",
             "rejected", "passed_filter",
             "top_ev_at_exec", "trades_executed",
+            "drawdown_halted",  # workbench-g4wz: circuit breaker skipped the cycle
         }
         self.assertEqual(set(self.c.keys()), expected)
 
@@ -179,6 +180,7 @@ class TestTraderCountersShape(unittest.TestCase):
             "category_cap", "position_class_full", "liquidity", "kelly_no_edge",
             "size_too_small", "market_unverifiable", "negative_ev",
             "solo_momentum_low_res", "solo_no_ai_confirmation", "market_state_changed",
+            "risk_guard",  # workbench-g4wz: per-trade risk gate (size %, exposure caps)
         }
         self.assertEqual(set(self.c["rejected"].keys()), expected)
         for v in self.c["rejected"].values():

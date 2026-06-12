@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .manifold_api import api_client
-from .config import INITIAL_BALANCE, MIN_BET_AMOUNT, MAX_BET_AMOUNT
+from .config import INITIAL_BALANCE, MIN_BET_AMOUNT, MAX_BET_AMOUNT, DRAWDOWN_HALT_PCT, DRAWDOWN_RESUME_PCT
+from .risk import assess_trade_risk, equity as _risk_equity, evaluate_circuit_breaker
 
 def _notify_resolution(market_id: str, question: str, outcome: str, our_bet: str, total_pnl: float, new_balance: float) -> None:
     """Send a Telegram notification when a market resolves. Never raises — resolution must not fail due to Telegram."""
@@ -30,6 +31,23 @@ def _notify_resolution(market_id: str, question: str, outcome: str, our_bet: str
         send_message(msg)
     except Exception:
         pass  # never block resolution
+
+def _notify_breaker(equity_now: float, peak_equity: float, drawdown: float) -> None:
+    """Telegram alert when the drawdown circuit breaker trips. Never raises —
+    risk enforcement must not fail because Telegram is down."""
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from automation.send_telegram import send_message
+        send_message(
+            "🚨 *Drawdown circuit breaker TRIPPED*\n"
+            f"Equity ${equity_now:.2f} is {drawdown*100:.1f}% below peak ${peak_equity:.2f}.\n"
+            "New trades halted until drawdown recovers "
+            "(resolutions/closes keep running)."
+        )
+    except Exception:
+        pass  # never block risk enforcement
+
 
 # SQLite database — shared with calibration scripts
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -169,6 +187,20 @@ class PaperTrader:
         # was made. Persisted across save_state / load_state.
         self.capital_epochs: List[Dict] = []
 
+        # Risk guardrail state (workbench-g4wz). Additive/optional key in the
+        # state file — old states without it work unchanged. Lazily initialized
+        # by check_circuit_breaker() on the first call:
+        #   {
+        #     "peak_equity":      float,  # high-water cost-basis equity this epoch
+        #     "epoch_count":      int,    # len(capital_epochs) when peak was set —
+        #                                 # a top-up/reset starts a fresh peak
+        #     "breaker_tripped":  bool,
+        #     "breaker_tripped_at":  iso8601 | None,
+        #     "breaker_cleared_at":  iso8601 | None,
+        #     "last_drawdown_pct":   float,
+        #   }
+        self.risk_state: Optional[Dict] = None
+
         # Load/save state
         self.state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_trading_state.json")
         self.load_state()
@@ -182,6 +214,7 @@ class PaperTrader:
                 self.positions = state.get('positions', {})
                 self.trade_history = state.get('trade_history', [])
                 self.capital_epochs = state.get('capital_epochs', [])
+                self.risk_state = state.get('risk_state')  # None for pre-guardrail states
                 print(f"Loaded state: Balance=${self.balance:.2f}, {len(self.positions)} positions")
         except FileNotFoundError:
             print("No saved state found, starting fresh")
@@ -195,6 +228,14 @@ class PaperTrader:
             'capital_epochs': self.capital_epochs,
             'saved_at': datetime.now().isoformat()
         }
+        # Additive key — omitted entirely until the first circuit-breaker
+        # evaluation initializes it, so the state file shape is unchanged
+        # for installations that never run the risk guardrails. getattr:
+        # several tests build PaperTrader with __init__ bypassed and only
+        # the classic attributes set.
+        risk_state = getattr(self, 'risk_state', None)
+        if risk_state is not None:
+            state['risk_state'] = risk_state
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
 
@@ -220,7 +261,99 @@ class PaperTrader:
         if epochs:
             return float(epochs[-1].get("topup_to", default))
         return float(default)
-    
+
+    def current_equity(self) -> float:
+        """Cost-basis equity: cash balance + stake locked in OPEN positions."""
+        return _risk_equity(self.balance, self.positions)
+
+    def check_circuit_breaker(self, save: bool = True) -> bool:
+        """
+        Evaluate the halt-on-drawdown circuit breaker. Returns True when new
+        trades must be refused.
+
+        Evaluated lazily at decision points (place_paper_bet, and
+        auto_trader's cycle start) rather than on every state mutation —
+        resolutions and closes are NEVER blocked, so there is nothing for
+        the breaker to do between trade decisions.
+
+        Lifecycle:
+          * First call ever: peak initializes to *current* equity (not the
+            capital-epoch baseline) so deploying this feature onto a book
+            that is already down doesn't instantly halt the bot — the
+            breaker protects against NEW drawdown from this point forward.
+          * Peak ratchets up with equity (high-water mark).
+          * A capital top-up/reset (len(capital_epochs) changed) resets the
+            peak to current equity and clears any trip — the team
+            deliberately re-staked; stale peaks from the old epoch would
+            otherwise halt trading forever.
+          * Trips when drawdown >= DRAWDOWN_HALT_PCT; clears when drawdown
+            recovers to <= DRAWDOWN_RESUME_PCT (hysteresis — see risk.py).
+
+        save=False lets read-only callers (status displays) peek without
+        touching the state file.
+        """
+        eq = self.current_equity()
+        # getattr: some test stubs bypass __init__ and don't set capital_epochs.
+        epoch_count = len(getattr(self, 'capital_epochs', None) or [])
+
+        # getattr: tests (and old pickled-style stubs) build PaperTrader with
+        # __init__ bypassed and only the classic attributes set; treat a
+        # missing attribute the same as a pre-guardrail state file.
+        rs = getattr(self, 'risk_state', None)
+        changed = False
+
+        if rs is None:
+            rs = {
+                'peak_equity': eq,
+                'epoch_count': epoch_count,
+                'breaker_tripped': False,
+                'breaker_tripped_at': None,
+                'breaker_cleared_at': None,
+                'last_drawdown_pct': 0.0,
+            }
+            changed = True
+        elif rs.get('epoch_count') != epoch_count:
+            # Capital epoch changed (deliberate top-up/reset) — fresh peak.
+            rs = dict(rs,
+                      peak_equity=eq,
+                      epoch_count=epoch_count,
+                      breaker_tripped=False,
+                      breaker_cleared_at=datetime.now().isoformat() if rs.get('breaker_tripped') else rs.get('breaker_cleared_at'),
+                      last_drawdown_pct=0.0)
+            changed = True
+
+        if eq > float(rs.get('peak_equity') or 0.0):
+            rs = dict(rs, peak_equity=eq)
+            changed = True
+
+        was_tripped = bool(rs.get('breaker_tripped'))
+        tripped, dd = evaluate_circuit_breaker(eq, rs['peak_equity'], was_tripped)
+        if tripped != was_tripped or abs(dd - float(rs.get('last_drawdown_pct') or 0.0)) > 1e-9:
+            rs = dict(rs, breaker_tripped=tripped, last_drawdown_pct=round(dd, 4))
+            if tripped and not was_tripped:
+                rs['breaker_tripped_at'] = datetime.now().isoformat()
+                print(f"🚨 CIRCUIT BREAKER TRIPPED: equity ${eq:.2f} is "
+                      f"{dd*100:.1f}% below peak ${rs['peak_equity']:.2f} "
+                      f"(halt threshold {DRAWDOWN_HALT_PCT*100:.0f}%). "
+                      f"New trades are halted until drawdown recovers to "
+                      f"≤{DRAWDOWN_RESUME_PCT*100:.0f}% or capital is reset.")
+                _notify_breaker(eq, rs['peak_equity'], dd)
+            elif was_tripped and not tripped:
+                rs['breaker_cleared_at'] = datetime.now().isoformat()
+                print(f"✅ Circuit breaker cleared: drawdown recovered to "
+                      f"{dd*100:.1f}% (resume threshold {DRAWDOWN_RESUME_PCT*100:.0f}%).")
+            changed = True
+
+        self.risk_state = rs
+        if changed and save:
+            try:
+                self.save_state()
+            except Exception as e:
+                # Persisting breaker state is best-effort; the in-memory
+                # decision still stands for this process.
+                print(f"[risk] warning: could not persist risk_state: {e}")
+        return bool(rs.get('breaker_tripped'))
+
     def place_paper_bet(self, market_id: str, outcome: str,
                        amount: float, probability: float,
                        estimated_ev: Optional[float] = None,
@@ -269,7 +402,11 @@ class PaperTrader:
                                      it is None/absent.
 
         Returns:
-            bool: True if trade successful
+            bool: True if trade successful. False on validation failure OR
+            when a risk guardrail refuses the trade (workbench-g4wz): the
+            drawdown circuit breaker, size-vs-balance %, per-market exposure,
+            or total concurrent exposure caps — see manifold_bot/risk.py.
+            Approved trades carry a 'risk' snapshot on the trade record.
         """
         # Validate inputs
         if amount < MIN_BET_AMOUNT:
@@ -287,7 +424,43 @@ class PaperTrader:
         if outcome not in ["YES", "NO"]:
             print(f"Invalid outcome: {outcome}. Must be 'YES' or 'NO'")
             return False
-        
+
+        # ── Risk guardrails (workbench-g4wz) ──────────────────────────────
+        # Enforced HERE, at the single choke point every entry path flows
+        # through (auto_trader, execute_swap, manual scripts), so no caller
+        # can place a bet the bot's own risk policy forbids.
+
+        # 1) Halt-on-drawdown circuit breaker — refuse all new risk while
+        #    equity is in deep drawdown from its per-epoch peak.
+        if self.check_circuit_breaker():
+            rs = getattr(self, 'risk_state', None) or {}
+            print(f"🚨 Trade refused: drawdown circuit breaker active "
+                  f"(drawdown {float(rs.get('last_drawdown_pct') or 0)*100:.1f}% "
+                  f"from peak ${float(rs.get('peak_equity') or 0):.2f})")
+            return False
+
+        # 2) Per-trade risk gates: size vs balance %, per-market exposure,
+        #    total concurrent exposure. assess_trade_risk also returns the
+        #    snapshot we persist on the trade record below.
+        risk_reason, risk_fields = assess_trade_risk(
+            amount=amount,
+            balance=self.balance,
+            positions=self.positions,
+            market_id=market_id,
+        )
+        if risk_reason is not None:
+            print(f"⛔ Trade refused by risk guard '{risk_reason}': "
+                  f"${amount:.2f} | balance ${self.balance:.2f} | "
+                  f"open exposure ${risk_fields['open_exposure_before']:.2f} | "
+                  f"market exposure ${risk_fields['market_exposure_before']:.2f}")
+            return False
+
+        # Stamp entry-time drawdown context for the scorekeeper/retros —
+        # "how much risk appetite did the bot have when it entered?"
+        rs = getattr(self, 'risk_state', None) or {}
+        risk_fields['drawdown_pct_at_entry'] = rs.get('last_drawdown_pct')
+        risk_fields['peak_equity'] = rs.get('peak_equity')
+
         # Calculate expected value
         if outcome == "YES":
             payout = amount / probability if probability > 0 else 0
@@ -331,6 +504,12 @@ class PaperTrader:
             # None so trade rows have a consistent shape; consumers must treat
             # None as "unknown — use an estimate", NOT as zero.
             'inference_cost': inference_cost,
+            # workbench-g4wz: entry-time risk snapshot (additive/optional —
+            # same contract as inference_cost: consumers tolerate absence on
+            # legacy rows). Lets the scorekeeper/retros correlate risk-taking
+            # with outcomes: exposure level, % of balance, drawdown at entry,
+            # and the limits in force when the gate approved this trade.
+            'risk': risk_fields,
             'strategies': strategies,
             # Category and question stored for exposure-cap counting and daily summary
             'category': category or 'other',
