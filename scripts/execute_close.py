@@ -2,6 +2,11 @@
 """
 Execute or dismiss a pending early-close proposal by ID.
 
+NOTE: since the autonomy change, `evaluate_positions.py` executes its own
+close decisions by default, calling `execute_close()` below as a library
+function. This CLI remains the manual path — it's used when the evaluator
+runs in `--propose-only` mode, or to act on a leftover proposal by hand.
+
 Reads pending_closes.json, finds the entry with the given ID, then:
   approve:  closes the position at current AMM price, marks status="approved"
   dismiss:  marks status="dismissed" without trading
@@ -30,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from manifold_bot.paper_trader import PaperTrader
 from manifold_bot.manifold_api import api_client
+from manifold_bot.config import CLOSE_SCORE_THRESHOLD
 from automation.send_telegram import send_telegram_message
 
 
@@ -130,7 +136,8 @@ class MarketResolvedError(RuntimeError):
     """
 
 
-def execute_close(proposal: dict, trader: PaperTrader, *, notify=send_telegram_message) -> bool:
+def execute_close(proposal: dict, trader: PaperTrader, *,
+                  notify=send_telegram_message, auto: bool = False) -> bool:
     """Close the position at current AMM price. Returns True on success.
 
     Refetches the market right before closing to check `isResolved`. If the
@@ -138,6 +145,11 @@ def execute_close(proposal: dict, trader: PaperTrader, *, notify=send_telegram_m
     — we must NOT simulate a manual close on a resolved market. The caller
     (main()) converts that into a non-zero exit code and leaves the proposal
     in 'pending' so the operator can dismiss it explicitly.
+
+    auto=True is the evaluator's autonomous path: the Telegram message is a
+    notification of an action already taken (with the score breakdown that
+    drove it), not a request for permission. auto=False keeps the original
+    human-approved wording.
     """
     market_id = proposal['market_id']
     snapshot_prob = proposal.get('current_probability', 0.5) or 0.5
@@ -154,17 +166,37 @@ def execute_close(proposal: dict, trader: PaperTrader, *, notify=send_telegram_m
     current_prob = _current_prob_from_market(market, snapshot_prob)
     print(f"  Closing {market_id} at probability {current_prob:.3f}")
 
-    pnl = trader.close_position_early(market_id, current_prob)
+    # Stamp WHY onto the closed trade records so the learning loop can later
+    # compare close-time reasoning against the market's eventual resolution.
+    close_context = {
+        'close_type': 'auto' if auto else 'manual_approval',
+        'position_score': proposal.get('position_score'),
+        'close_reason': proposal.get('reason'),
+        'score_breakdown': proposal.get('score_breakdown'),
+        'closed_at_probability': current_prob,
+    }
+    pnl = trader.close_position_early(market_id, current_prob,
+                                      close_context=close_context)
     if pnl is None:
         print(f"  close_position_early returned None — nothing to close for {market_id}")
         return False
 
     q = (proposal.get('question') or market_id)[:70]
+    score = proposal.get('position_score')
+    score_str = f"{score:+.2f}" if isinstance(score, (int, float)) else "?"
+    if auto:
+        header = f"🤖 Auto-closed #{proposal['id']}"
+        why = (f"  Why: score {score_str} < threshold {CLOSE_SCORE_THRESHOLD:+.2f} "
+               f"({proposal.get('reason', '')})\n")
+    else:
+        header = f"✅ Close #{proposal['id']} executed"
+        why = f"  Score: {score_str}  ({proposal.get('reason', '')})\n"
     try:
         notify(
-            f"✅ Close #{proposal['id']} executed\n"
+            f"{header}\n"
             f"{proposal.get('outcome')} on \"{q}\"\n"
             f"  Realised ${pnl:+.2f} at {current_prob:.0%}\n"
+            f"{why}"
             f"  New balance: ${trader.balance:.2f}"
         )
     except Exception as e:

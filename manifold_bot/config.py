@@ -78,13 +78,17 @@ NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 #                    - days_held * DAILY_DECAY_COST
 #                    - (position_class == 'long_or_uncertain' ? LONG_HORIZON_PENALTY : 0)
 #
-# If the score drops below CLOSE_SCORE_THRESHOLD, the evaluator emits a CLOSE
-# proposal (human-approved via execute_close.py, same approval pattern as swaps).
-# Auto-execution is deliberately off — we collect data first, tune thresholds
-# against real outcomes, then consider turning on auto-close.
+# If the score drops below CLOSE_SCORE_THRESHOLD, the evaluator EXECUTES the
+# close itself (default since the autonomy change) and notifies Telegram with
+# the score breakdown — notification of action, not a request for permission.
+# The original propose-only approval gate (execute_close.py --id N) remains
+# available via `evaluate_positions.py --propose-only`; it was retired as the
+# default because expired-unapproved proposals left positions with no exit
+# path. Safety guards (MIN_HOLD_HOURS, reprice staleness, resolved-market
+# check) live in code and still gate every close.
 #
-# Starting values are conservative. Tune after a week of evaluator runs against
-# the Phase 2.2 snapshot trail.
+# Starting values are conservative. Tune against the bet_outcomes
+# era='early_close' trail + each trade's recorded close_context.
 #
 # DAILY_DECAY_COST: dollars of "time value" lost per day held. $0.05/day means
 # a $5 bet breaks even on decay alone in 100 days — slow enough not to punish

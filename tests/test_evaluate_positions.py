@@ -32,6 +32,7 @@ from scripts.evaluate_positions import (
 )
 from scripts import execute_close as execute_close_mod
 from scripts.execute_close import execute_close, find_proposal, MarketResolvedError
+from manifold_bot import paper_trader
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -290,7 +291,7 @@ class TestRunEvaluator(unittest.TestCase):
             return json.load(f)
 
     def test_no_state_file_returns_zero_and_not_an_error(self):
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual((h, c, n), (0, 0, 0))
         self.assertEqual(self.telegram_sent, [])
 
@@ -299,7 +300,7 @@ class TestRunEvaluator(unittest.TestCase):
             'mkt_A': [_pos(market_id='mkt_A', unrealised=1.0, days_ago=2)],
             'mkt_B': [_pos(market_id='mkt_B', unrealised=0.5, days_ago=1)],
         }))
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual((h, c, n), (2, 0, 0))
         self.assertEqual(self.telegram_sent, [])
         self.assertEqual(self._read_pending(), [])
@@ -309,7 +310,7 @@ class TestRunEvaluator(unittest.TestCase):
             'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5,
                            question='Will Foo happen?')],
         }))
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual((h, c, n), (0, 1, 1))
 
         pending = self._read_pending()
@@ -335,7 +336,7 @@ class TestRunEvaluator(unittest.TestCase):
         self._write_state(_state({
             'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
         }))
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Still classified as CLOSE, but no new proposal emitted.
         self.assertEqual(c, 1)
         self.assertEqual(n, 0)
@@ -353,7 +354,7 @@ class TestRunEvaluator(unittest.TestCase):
         self._write_state(_state({
             'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
         }))
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 1)
 
         pending = self._read_pending()
@@ -368,7 +369,7 @@ class TestRunEvaluator(unittest.TestCase):
         self._write_state(_state({
             'mkt_A': [_pos(market_id='mkt_A', status='WON', unrealised=-5.0, days_ago=5)],
         }))
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual((h, c, n), (0, 0, 0))
 
 
@@ -426,8 +427,9 @@ class TestExecuteClose(unittest.TestCase):
                 self.balance = 100.0
                 self.calls = []
 
-            def close_position_early(self, market_id, current_prob):
+            def close_position_early(self, market_id, current_prob, close_context=None):
                 self.calls.append((market_id, current_prob))
+                self.close_context = close_context
                 self.balance += -4.0  # simulate loss realisation
                 return -4.0
 
@@ -442,6 +444,9 @@ class TestExecuteClose(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(trader.calls, [('mkt_A', 0.3)])
         self.assertTrue(any('executed' in m for m in notifications))
+        # The why-of-the-close is stamped through to the trade records.
+        self.assertEqual(trader.close_context['close_type'], 'manual_approval')
+        self.assertEqual(trader.close_context['position_score'], -4.15)
 
     def test_execute_close_falls_back_to_snapshot_prob_on_api_failure(self):
         # If live API fails, close at the snapshot price from the proposal.
@@ -449,7 +454,7 @@ class TestExecuteClose(unittest.TestCase):
 
         class FakeTrader:
             balance = 100.0
-            def close_position_early(self, market_id, current_prob):
+            def close_position_early(self, market_id, current_prob, close_context=None):
                 FakeTrader._last_prob = current_prob
                 return -4.0
 
@@ -589,7 +594,7 @@ class TestExecuteCloseResolvedMarketGuard(unittest.TestCase):
         class FakeTrader:
             balance = 100.0
             calls = []
-            def close_position_early(self, market_id, current_prob):
+            def close_position_early(self, market_id, current_prob, close_context=None):
                 FakeTrader.calls.append((market_id, current_prob))
                 return 1.0
 
@@ -693,7 +698,7 @@ class TestIntraRunDedupe(unittest.TestCase):
         with open(self.state_path, 'w') as f:
             json.dump(state, f)
 
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
 
         self.assertEqual(n, 1, "only one proposal should be emitted for one market")
         self.assertEqual(len(self.telegram_sent), 1)
@@ -716,7 +721,7 @@ class TestIntraRunDedupe(unittest.TestCase):
         with open(self.state_path, 'w') as f:
             json.dump(state, f)
 
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 2)
 
 
@@ -773,7 +778,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
             ],
         })
 
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
 
         self.assertEqual(n, 0, "net-profitable market must not emit a CLOSE proposal")
         self.assertEqual(self.telegram_sent, [])
@@ -793,7 +798,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
             ],
         })
 
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
 
         self.assertEqual(n, 1)
         with open(self.pending_path) as f:
@@ -821,7 +826,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
             ],
         })
 
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 1)
         with open(self.pending_path) as f:
             pending = json.load(f)
@@ -840,7 +845,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
                      days_ago=5, last_repriced_at=stale),
             ],
         })
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 0)  # held with stale_reprice
 
     def test_aggregate_hold_if_any_leg_resolved(self):
@@ -854,7 +859,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
                      days_ago=5, is_resolved_on_api=True),
             ],
         })
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 0)
 
     def test_single_leg_markets_still_work_unchanged(self):
@@ -863,7 +868,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
             'mkt_single': [_pos(market_id='mkt_single', trade_id=1,
                                 unrealised=-3.0, days_ago=5)],
         })
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 1)
         with open(self.pending_path) as f:
             pending = json.load(f)
@@ -891,7 +896,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
                      current_prob=0.5),
             ],
         })
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Weighted avg would be (24 + 0.5)/2 = 12.25h → past 2h floor.
         # Aggregate pnl -$3 would drop score below threshold → CLOSE.
         # But min-leg-age is 0.5h → too_new must hold the whole market.
@@ -910,7 +915,7 @@ class TestMarketLevelAggregation(unittest.TestCase):
                      amount=10.0, unrealised=-3.0, days_ago=0.5),
             ],
         })
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         self.assertEqual(n, 1)
 
 
@@ -967,7 +972,7 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
         if self.pending_path.exists():
             self.pending_path.unlink()
 
-        h, c, n = run_evaluator(notify=lambda m: None)
+        h, c, n = run_evaluator(notify=lambda m: None, execute=False)
         score = None
         if self.pending_path.exists():
             with open(self.pending_path) as f:
@@ -1006,7 +1011,7 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
             'is_resolved_on_api': False,
         }]
         self._write_state({'mkt_cts': legs})
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Score without long penalty: -0.10 - 5*0.05 = -0.35  → HOLD
         # Score with    long penalty: -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
         # If close_time_ms beats persisted class, we should HOLD.
@@ -1022,7 +1027,7 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
                  position_class='long_or_uncertain'),
         ]
         self._write_state({'mkt_fb': legs})
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Score = -0.20 - 1*0.05 - 0.50 = -0.75 → CLOSE
         self.assertEqual(n, 1)
         with open(self.pending_path) as f:
@@ -1037,7 +1042,7 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
                  days_ago=1, position_class='short'),
         ]
         self._write_state({'mkt_short': legs})
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Score = -0.20 - 1*0.05 = -0.25 → HOLD (above -0.50 threshold)
         self.assertEqual(n, 0)
 
@@ -1064,7 +1069,7 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
             'is_resolved_on_api': False,
         }]
         self._write_state({'mkt_med_low': legs})
-        h, c, n = run_evaluator(notify=self._notify)
+        h, c, n = run_evaluator(notify=self._notify, execute=False)
         # Correct score: -0.10 - 5*0.05 = -0.35 → HOLD (above -0.50)
         # Buggy score   : -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
         self.assertEqual(n, 0, "medium term + low resolvability must remain 'medium'")
@@ -1087,13 +1092,303 @@ class TestAggregatePositionClassDeterministic(unittest.TestCase):
                 if self.pending_path.exists():
                     self.pending_path.unlink()
 
-                h, c, n = run_evaluator(notify=self._notify)
+                h, c, n = run_evaluator(notify=self._notify, execute=False)
                 # With normalisation → long_or_uncertain → score
                 #   -0.10 - 5*0.05 - 0.50 = -0.85 → CLOSE
                 # Without normalisation → unknown class → score
                 #   -0.10 - 5*0.05 = -0.35 → HOLD (bug)
                 self.assertEqual(n, 1,
                                  f"{legacy!r} must normalise to long_or_uncertain")
+
+
+# ── Autonomy change: evaluator executes its own close decisions ──────────────
+
+class _FakeExecTrader:
+    """Stand-in for PaperTrader in execute-mode evaluator tests.
+
+    When given a state_path it mimics close_position_early's real persistence:
+    every OPEN leg of the market becomes CLOSED_EARLY and the state file is
+    rewritten — which is exactly what makes auto-close idempotent across runs.
+    """
+
+    def __init__(self, state_path=None, pnl=-3.0, fail_market_ids=()):
+        self.balance = 100.0
+        self.calls = []
+        self.state_path = state_path
+        self.pnl = pnl
+        self.fail_market_ids = set(fail_market_ids)
+
+    def close_position_early(self, market_id, current_prob, close_context=None):
+        if market_id in self.fail_market_ids:
+            raise RuntimeError('simulated close failure')
+        self.calls.append((market_id, current_prob, close_context))
+        self.balance += self.pnl
+        if self.state_path and Path(self.state_path).exists():
+            with open(self.state_path) as f:
+                state = json.load(f)
+            for leg in state.get('positions', {}).get(market_id, []):
+                if leg.get('status') == 'OPEN':
+                    leg['status'] = 'CLOSED_EARLY'
+            with open(self.state_path, 'w') as f:
+                json.dump(state, f)
+        return self.pnl
+
+
+class TestRunEvaluatorAutoExecute(unittest.TestCase):
+    """Default evaluator behavior since the autonomy change: CLOSE decisions
+    are executed in the same run; Telegram is notification-of-action, never a
+    request for permission."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.state_path = tmp / 'paper_trading_state.json'
+        self.pending_path = tmp / 'pending_closes.json'
+        self._patchers = [
+            patch.object(evaluate_positions, '_STATE_PATH', self.state_path),
+            patch.object(evaluate_positions, '_PENDING_CLOSES_PATH', self.pending_path),
+            # execute_close refetches the market before closing; keep it off
+            # the network and unresolved by default.
+            patch.object(execute_close_mod.api_client, 'get_market',
+                         return_value={'probability': 0.3, 'isResolved': False}),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.telegram_sent = []
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmpdir.cleanup()
+
+    def _notify(self, msg):
+        self.telegram_sent.append(msg)
+
+    def _write_state(self, state):
+        with open(self.state_path, 'w') as f:
+            json.dump(state, f)
+
+    def _write_pending(self, proposals):
+        with open(self.pending_path, 'w') as f:
+            json.dump(proposals, f)
+
+    def _read_pending(self):
+        if not self.pending_path.exists():
+            return []
+        with open(self.pending_path) as f:
+            return json.load(f)
+
+    def _forbidden_trader_factory(self):
+        self.fail('trader must not be instantiated in this scenario')
+
+    # ── execute vs propose-only ──────────────────────────────────────────────
+
+    def test_execute_mode_closes_losing_position_and_notifies_action(self):
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5,
+                           question='Will Foo happen?')],
+        }))
+        trader = _FakeExecTrader(state_path=self.state_path)
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=lambda: trader)
+        self.assertEqual((h, c, n), (0, 1, 1))
+
+        # The close actually happened, with the why stamped through.
+        self.assertEqual(len(trader.calls), 1)
+        market_id, prob, ctx = trader.calls[0]
+        self.assertEqual(market_id, 'mkt_A')
+        self.assertEqual(prob, 0.3)
+        self.assertEqual(ctx['close_type'], 'auto')
+        self.assertIn('score_breakdown', ctx)
+
+        # Audit record persisted as executed, with the score components the
+        # learning loop needs.
+        pending = self._read_pending()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['status'], 'executed')
+        self.assertIn('executed_at', pending[0])
+        breakdown = pending[0]['score_breakdown']
+        self.assertEqual(breakdown['unrealised_pnl'], -3.0)
+        self.assertEqual(breakdown['threshold'],
+                         evaluate_positions.CLOSE_SCORE_THRESHOLD)
+
+        # Telegram is a notification of action — never an approval ask.
+        self.assertEqual(len(self.telegram_sent), 1)
+        msg = self.telegram_sent[0]
+        self.assertIn('Auto-closed', msg)
+        self.assertIn('Why: score', msg)
+        self.assertNotIn('approve close', msg)
+
+    def test_propose_only_keeps_old_behavior_and_never_touches_trader(self):
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
+        }))
+        h, c, n = run_evaluator(notify=self._notify, execute=False,
+                                trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (0, 1, 1))
+        self.assertEqual(self._read_pending()[0]['status'], 'pending')
+        self.assertIn('approve close', self.telegram_sent[0])
+
+    # ── safety guards stay in force ──────────────────────────────────────────
+
+    def test_min_hold_hours_respected_in_execute_mode(self):
+        # Deeply losing but younger than MIN_HOLD_HOURS → HOLD, no execution,
+        # no trader instantiation at all.
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-50.0, days_ago=0.02)],
+        }))
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((h, c, n), (1, 0, 0))
+        self.assertEqual(self.telegram_sent, [])
+        self.assertEqual(self._read_pending(), [])
+
+    def test_execute_mode_is_idempotent_across_reruns(self):
+        # First run closes; the state mutation means a re-run has nothing
+        # left to close — exactly one close call total, no second notification.
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
+        }))
+        trader = _FakeExecTrader(state_path=self.state_path)
+        run_evaluator(notify=self._notify, execute=True,
+                      trader_factory=lambda: trader)
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=lambda: trader)
+        self.assertEqual((h, c, n), (0, 0, 0))
+        self.assertEqual(len(trader.calls), 1)
+        self.assertEqual(len(self.telegram_sent), 1)
+        # Audit trail still shows exactly one executed record.
+        executed = [p for p in self._read_pending() if p['status'] == 'executed']
+        self.assertEqual(len(executed), 1)
+
+    def test_dismissal_cooldown_respected_in_execute_mode(self):
+        # A recent explicit human dismissal is real information — the bot
+        # honours the cooldown instead of immediately overriding it.
+        self._write_pending([{
+            'id': 4, 'market_id': 'mkt_A', 'status': 'dismissed',
+            'proposed_at': datetime.now().isoformat(),
+            'dismissed_at': datetime.now().isoformat(),
+        }])
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
+        }))
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=self._forbidden_trader_factory)
+        self.assertEqual((c, n), (1, 0))
+        self.assertEqual(self.telegram_sent, [])
+
+    # ── transition off the approval regime ───────────────────────────────────
+
+    def test_stale_pending_proposal_is_superseded_not_blocking(self):
+        # Live-box transition case: an unactioned 'pending' proposal from the
+        # approval era must not block the close. The bot executes and marks
+        # the old ask superseded so execute_close.py --id N can't double-close.
+        self._write_pending([{
+            'id': 9, 'market_id': 'mkt_A', 'status': 'pending',
+            'proposed_at': datetime.now().isoformat(),
+        }])
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
+        }))
+        trader = _FakeExecTrader(state_path=self.state_path)
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=lambda: trader)
+        self.assertEqual(n, 1)
+        pending = self._read_pending()
+        by_id = {p['id']: p for p in pending}
+        self.assertEqual(by_id[9]['status'], 'superseded')
+        self.assertIn('superseded_at', by_id[9])
+        executed = [p for p in pending if p['status'] == 'executed']
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]['market_id'], 'mkt_A')
+
+    def test_expired_pending_proposals_still_auto_expire(self):
+        old_iso = (datetime.now() - timedelta(hours=CLOSE_EXPIRY_HOURS + 1)).isoformat()
+        self._write_pending([{
+            'id': 3, 'market_id': 'mkt_gone', 'status': 'pending',
+            'proposed_at': old_iso,
+        }])
+        self._write_state(_state({}))
+        run_evaluator(notify=self._notify, execute=True,
+                      trader_factory=self._forbidden_trader_factory)
+        self.assertEqual(self._read_pending()[0]['status'], 'expired')
+
+    # ── failure containment ──────────────────────────────────────────────────
+
+    def test_close_failure_is_contained_and_other_markets_still_close(self):
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', trade_id=1, unrealised=-3.0, days_ago=5)],
+            'mkt_B': [_pos(market_id='mkt_B', trade_id=2, unrealised=-3.0, days_ago=5)],
+        }))
+        trader = _FakeExecTrader(state_path=self.state_path,
+                                 fail_market_ids={'mkt_A'})
+        # Must not raise despite mkt_A's close blowing up.
+        h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                trader_factory=lambda: trader)
+        self.assertEqual((h, c, n), (0, 2, 1))
+
+        statuses = {p['market_id']: p['status'] for p in self._read_pending()}
+        self.assertEqual(statuses['mkt_A'], 'failed')
+        self.assertEqual(statuses['mkt_B'], 'executed')
+        self.assertTrue(any('FAILED' in m for m in self.telegram_sent))
+        self.assertTrue(any('Auto-closed' in m for m in self.telegram_sent))
+
+    def test_resolved_market_is_skipped_not_closed(self):
+        self._write_state(_state({
+            'mkt_A': [_pos(market_id='mkt_A', unrealised=-3.0, days_ago=5)],
+        }))
+        trader = _FakeExecTrader(state_path=self.state_path)
+        with patch.object(execute_close_mod.api_client, 'get_market',
+                          return_value={'probability': 0.3, 'isResolved': True,
+                                        'resolution': 'YES'}):
+            h, c, n = run_evaluator(notify=self._notify, execute=True,
+                                    trader_factory=lambda: trader)
+        self.assertEqual(n, 0)
+        self.assertEqual(trader.calls, [])
+        self.assertEqual(self._read_pending()[0]['status'], 'skipped_resolved')
+
+
+class TestCloseContextStamping(unittest.TestCase):
+    """PaperTrader.close_position_early stamps close_context onto the closed
+    trade records so the learning loop can study close-time reasoning."""
+
+    def _trader_with_open(self):
+        trader = paper_trader.PaperTrader.__new__(paper_trader.PaperTrader)
+        trader.initial_balance = 100.0
+        trader.balance = 90.0
+        trader.positions = {}
+        trader.trade_history = []
+        trader.performance_metrics = {}
+        trader.capital_epochs = []
+        trader.state_file = tempfile.mktemp(suffix='.json')
+        trade = {
+            'trade_id': 1,
+            'timestamp': datetime.now().isoformat(),
+            'market_id': 'mkt_ctx',
+            'outcome': 'YES',
+            'amount': 10.0,
+            'probability': 0.5,
+            'entry_probability': 0.5,
+            'status': 'OPEN',
+        }
+        trader.positions['mkt_ctx'] = [trade]
+        trader.trade_history.append(trade)
+        return trader
+
+    def test_close_context_lands_on_trade_record(self):
+        trader = self._trader_with_open()
+        ctx = {'close_type': 'auto', 'position_score': -1.2, 'close_reason': 'pnl=$-1.00, age=4.0d'}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(paper_trader, '_DB_PATH', Path(tmp) / 'cal.db'):
+                trader.close_position_early('mkt_ctx', 0.4, close_context=ctx)
+        self.assertEqual(trader.positions['mkt_ctx'][0]['close_context'], ctx)
+
+    def test_omitting_close_context_leaves_trade_unchanged(self):
+        trader = self._trader_with_open()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(paper_trader, '_DB_PATH', Path(tmp) / 'cal.db'):
+                trader.close_position_early('mkt_ctx', 0.4)
+        self.assertNotIn('close_context', trader.positions['mkt_ctx'][0])
 
 
 if __name__ == '__main__':

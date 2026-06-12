@@ -20,7 +20,7 @@ This doc asks you to run commands against the live sandbox. The colour/prefix co
 |---|---|---|
 | `🟢 READ` | Pure read. No state mutation anywhere. Safe to run any number of times. | `crontab -l`, `sqlite3 ... SELECT ...`, `cat market_research.json`, `python3 -c 'import json; print(...)'` |
 | `🟡 OBSERVE` | Reads + runs a script in its natural read phase. Safe but may append to log files (`/tmp/*.log`, `data/*_counters.jsonl`). | `python3 scripts/detect_stale_positions.py` (no `--apply`) |
-| `🔴 MUTATE` | Changes state (`paper_trading_state.json`, `bet_outcomes`, balance). Only run when you mean to. | `execute_close.py --id N`, `execute_abandon.py --id N`, `close_position_early(...)` direct calls, `place_paper_bet(...)` |
+| `🔴 MUTATE` | Changes state (`paper_trading_state.json`, `bet_outcomes`, balance). Only run when you mean to. | `evaluate_positions.py` (auto-executes closes by default — pass `--propose-only` for a non-mutating run), `execute_close.py --id N`, `execute_abandon.py --id N`, `close_position_early(...)` direct calls, `place_paper_bet(...)` |
 
 **Every `now run this` block in this doc is `🟢 READ`.** If you see 🔴 elsewhere, stop and confirm intent before running.
 
@@ -76,10 +76,11 @@ Keep this in your head. Everything else hangs off it.
     data/calibration.db: position_snapshots ←── P&L trajectory over time
                  │
                  ▼
-    :30  scripts/evaluate_positions.py      ←── propose CLOSE (if score < -0.50)
-                 │ writes
-                 ▼
-         pending_closes.json          ←── human approves via execute_close.py
+    :30  scripts/evaluate_positions.py      ←── AUTO-CLOSE (if score < -0.50)
+                 │ writes                        Telegram = notification of action;
+                 ▼                               --propose-only restores the old gate
+         pending_closes.json          ←── audit trail of executed/failed closes
+                                          (+ proposals when in --propose-only)
                  │
                  ▼
     :10  scripts/resolve_positions.py       (every hour)
@@ -150,7 +151,7 @@ Each leg has: `trade_id`, `status` (`OPEN` / `WIN` / `LOSE` / `CLOSED_EARLY` / `
 
 ### 2.3 `pending_closes.json` / `pending_abandons.json` (evaluator writes, `execute_*.py` reads)
 
-Lists of proposals awaiting human approval. Each entry: `id`, `market_id`, `reason`, `proposed_at`, `status` (`pending` / `approved` / `dismissed` / `expired`), `position_score`, etc. The evaluator writes new ones hourly (`:30`); you approve via:
+For closes (since the auto-execute change): an audit trail of the evaluator's own close decisions. Each entry: `id`, `market_id`, `reason`, `score_breakdown`, `proposed_at`, `status` (`executed` / `failed` / `skipped_resolved` / `noop` / `superseded`, plus legacy `pending` / `approved` / `dismissed` / `expired`), `position_score`, etc. Abandons (and closes under `--propose-only`) still await human approval via:
 
 ```bash
 python3 scripts/execute_close.py --id 7

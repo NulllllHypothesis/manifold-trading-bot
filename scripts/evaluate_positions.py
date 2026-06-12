@@ -1,34 +1,45 @@
 #!/usr/bin/env python3
 """
-V2 Phase 2.3 — position evaluator.
+V2 Phase 2.3 — position evaluator (autonomous since the auto-execute change).
 
 For every OPEN position in paper_trading_state.json, compute a position_score
 using the Phase 2.2 repricing data, then classify the position as HOLD or
-CLOSE. Emit CLOSE proposals to pending_closes.json (one per losing position)
-and notify Telegram with an "approve close N" CTA.
+CLOSE. By default the evaluator now EXECUTES its own CLOSE decisions in the
+same run (via `scripts.execute_close.execute_close`, the same code path the
+human-approval CLI uses) and sends a Telegram NOTIFICATION of what was done
+and why — Telegram is no longer a request for permission.
 
-**Scope of this phase: propose only.** Auto-execution is deliberately off —
-evaluator never mutates paper_trading_state.json. A human approves via
-`python3 scripts/execute_close.py --id N` (or dismisses).
+Why the approval gate was removed
+---------------------------------
+The propose-only phase existed to collect data before letting the machine
+act. In practice the gate left positions with NO exit path: proposals expired
+unapproved after CLOSE_EXPIRY_HOURS (and on the live box never even reached
+Telegram), so losing positions sat open indefinitely. A human in the loop
+defeats the purpose of an automated bot — the scorekeeper and bet_outcomes
+trail now provide the outcome data the gate was waiting for, and the bot
+learns from its own wins and losses instead of waiting on a human.
 
-Why a separate propose/execute split
-------------------------------------
-1. CLOSE_SCORE_THRESHOLD, DAILY_DECAY_COST, and LONG_HORIZON_PENALTY are
-   starting guesses. We want to see which positions the evaluator flags
-   against real outcomes before we let the machine act on them.
-2. `position_swap_checker.py` already proposes swaps the same way when the
-   book is full. Keeping the approval UX consistent across close/swap means
-   the operator learns one muscle-memory CTA.
-3. If the evaluator mis-scores, the blast radius is a Telegram ping, not a
-   realized loss.
+Safety lives in code, not in human review:
+  - MIN_HOLD_HOURS / staleness / awaiting-resolve guards in classify_position
+    are unchanged and still gate every close.
+  - Closes are idempotent: executed legs become CLOSED_EARLY, so a re-run has
+    nothing left to close.
+  - A close failure on one market is logged + notified and never aborts the
+    cron cycle or the remaining markets.
+  - Markets that resolved between scoring and execution are skipped
+    (MarketResolvedError) and left to resolve_positions.py at :10.
+
+`--propose-only` restores the old behavior (Telegram "approve close N" CTA,
+human approves via `python3 scripts/execute_close.py --id N`).
 
 Run hourly from cron at :30. Produces:
 
-1. `pending_closes.json` — list of unresolved close proposals
-2. Telegram message per new proposal
+1. `pending_closes.json` — audit trail of close decisions (executed /
+   failed / skipped), plus unresolved proposals when in --propose-only mode
+2. Telegram message per executed close (or per proposal in --propose-only)
 
 Exit codes:
-  0 — ran cleanly (regardless of proposals generated)
+  0 — ran cleanly (regardless of closes executed)
   1 — unrecoverable error (state file corrupt, etc.)
 """
 
@@ -48,11 +59,16 @@ from manifold_bot.config import (
     CLOSE_SCORE_THRESHOLD,
     MIN_HOLD_HOURS,
 )
+from manifold_bot.paper_trader import PaperTrader
 from automation.send_telegram import send_telegram_message
 # Single source of truth for the 4-bucket → 3-bucket migration map. Importing
 # rather than duplicating so a future change in one place propagates here.
 from automation.auto_trader import _normalize_position_class
 from manifold_bot.proposal_archive import rotate_if_new_week
+# Reuse the exact close-execution path the human-approval CLI uses (resolved-
+# market guard, AMM refetch, close_context stamping, notification) as a
+# library call — never shelled out.
+from scripts.execute_close import execute_close, MarketResolvedError
 
 
 _STATE_PATH         = _ROOT / "manifold_bot" / "paper_trading_state.json"
@@ -546,18 +562,23 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
-def _existing_pending_ids(pending: List[Dict]) -> set:
+def _existing_pending_ids(pending: List[Dict], *, include_pending: bool = True) -> set:
     """Market IDs that should be suppressed from new close proposals.
 
     Two reasons a market is suppressed:
 
       1. It has an active 'pending' proposal (within CLOSE_EXPIRY_HOURS) —
-         re-proposing would duplicate an open ask to the operator.
+         re-proposing would duplicate an open ask to the operator. Only
+         applies when include_pending=True (propose-only mode). In execute
+         mode a leftover pending proposal must NOT block the close — the
+         evaluator executes and marks the old proposal 'superseded' instead
+         (see _supersede_pending), which is how the live box transitions
+         cleanly off the approval regime.
       2. It has a 'dismissed' proposal within DISMISS_COOLDOWN_HOURS of its
          dismissal — the operator already said "no" and nothing material has
-         changed in an hour; re-pinging them is noise. Cooldown expires so
-         genuinely-new situations (big price move, close-time nearing) still
-         get another proposal once it elapses.
+         changed in an hour. Honoured in BOTH modes: an explicit recent human
+         dismissal is real information, and the cooldown expires on its own
+         so the bot still acts once it elapses.
     """
     now = datetime.now()
     pending_cutoff  = now - timedelta(hours=CLOSE_EXPIRY_HOURS)
@@ -569,6 +590,8 @@ def _existing_pending_ids(pending: List[Dict]) -> set:
         if not market_id:
             continue
         if status == 'pending':
+            if not include_pending:
+                continue
             try:
                 proposed_at = datetime.fromisoformat(p.get('proposed_at', '2000-01-01'))
             except ValueError:
@@ -585,6 +608,20 @@ def _existing_pending_ids(pending: List[Dict]) -> set:
             if dismissed_at > dismiss_cutoff:
                 suppressed.add(market_id)
     return suppressed
+
+
+def _supersede_pending(pending: List[Dict], market_id: str) -> None:
+    """Mark any still-'pending' proposal for market_id as 'superseded'.
+
+    Called just before the evaluator auto-executes a close on that market.
+    The old proposal's open ask ("approve close N") is moot once the bot acts
+    on its own decision; leaving it 'pending' would invite a double-close via
+    execute_close.py --id N. 'superseded' is terminal, like 'expired'.
+    """
+    for p in pending:
+        if p.get('market_id') == market_id and p.get('status') == 'pending':
+            p['status'] = 'superseded'
+            p['superseded_at'] = datetime.now().isoformat()
 
 
 def _auto_expire_old_closes(pending: List[Dict]) -> bool:
@@ -607,6 +644,7 @@ def _auto_expire_old_closes(pending: List[Dict]) -> bool:
 # ── Proposal building + notifications ────────────────────────────────────────
 
 def _build_proposal(close_id: int, market_id: str, pos: Dict, score: float, reason: str) -> Dict:
+    position_class = pos.get('position_class')
     return {
         'id': close_id,
         'market_id': market_id,
@@ -620,6 +658,20 @@ def _build_proposal(close_id: int, market_id: str, pos: Dict, score: float, reas
         'current_unrealised_pnl': pos.get('current_unrealised_pnl'),
         'position_score': score,
         'reason': reason,
+        # Full component breakdown of the score at decision time. Persisted on
+        # the audit record AND stamped onto the closed trades (via
+        # execute_close's close_context) so the learning loop can study which
+        # components drove each close once the market eventually resolves.
+        'score_breakdown': {
+            'unrealised_pnl': pos.get('current_unrealised_pnl'),
+            'days_held': _days_held_from_position(pos),
+            'position_class': position_class,
+            'daily_decay_cost': DAILY_DECAY_COST,
+            'long_horizon_penalty': (
+                LONG_HORIZON_PENALTY if position_class == 'long_or_uncertain' else 0.0
+            ),
+            'threshold': CLOSE_SCORE_THRESHOLD,
+        },
         'proposed_at': datetime.now().isoformat(),
         'status': 'pending',
     }
@@ -650,16 +702,70 @@ def _format_telegram_message(proposal: Dict) -> str:
 
 # ── Main flow ────────────────────────────────────────────────────────────────
 
+def _execute_record(record: Dict, trader: PaperTrader, notify) -> bool:
+    """Execute one close decision, mutating `record` with the outcome.
+
+    Returns True when a close was actually realised. Never raises — any
+    failure on one market must not abort the cron cycle or the remaining
+    markets. Outcome statuses written onto the record:
+
+      'executed'         — position closed, P&L realised
+      'skipped_resolved' — market resolved between scoring and execution;
+                           resolve_positions.py at :10 owns it (retried
+                           harmlessly next run until the resolver flags it)
+      'noop'             — nothing left to close (legs already closed by an
+                           earlier run/path — the idempotent re-run case)
+      'failed'           — unexpected error; logged + notified, retried
+                           next run since 'failed' never suppresses
+    """
+    try:
+        ok = execute_close(record, trader, notify=notify, auto=True)
+    except MarketResolvedError as e:
+        record['status'] = 'skipped_resolved'
+        record['note'] = str(e)
+        print(f"  [{record['market_id'][:12]}] skipped — market already resolved")
+        return False
+    except Exception as e:
+        record['status'] = 'failed'
+        record['error'] = str(e)
+        print(f"[evaluate_positions] auto-close failed for {record['market_id']}: {e}",
+              file=sys.stderr)
+        try:
+            q = (record.get('question') or record['market_id'])[:70]
+            notify(
+                f"⚠️ Auto-close FAILED on \"{q}\"\n"
+                f"  {e}\n"
+                f"  Will retry next evaluator run."
+            )
+        except Exception:
+            pass  # notification failure must never escalate
+        return False
+
+    if ok:
+        record['status'] = 'executed'
+        record['executed_at'] = datetime.now().isoformat()
+        return True
+    record['status'] = 'noop'
+    record['note'] = 'no open legs to close (already closed?)'
+    return False
+
+
 def run_evaluator(
     *,
     notify=send_telegram_message,
     verbose: bool = False,
+    execute: bool = True,
+    trader_factory=PaperTrader,
 ) -> Tuple[int, int, int]:
     """
-    Evaluate every open position. Returns (n_hold, n_close, n_new_proposals).
+    Evaluate every open position. Returns (n_hold, n_close, n_actioned) where
+    n_actioned counts executed closes (execute=True, the default) or new
+    proposals emitted (execute=False, the legacy --propose-only mode).
 
     `notify` is injectable so tests can capture Telegram sends without
-    requiring a live bot token.
+    requiring a live bot token. `trader_factory` is injectable for the same
+    reason; it is only invoked when there is at least one close to execute,
+    so propose-only runs (and all-HOLD runs) never touch trading state.
     """
     state = _load_state()
     if state is None:
@@ -679,12 +785,17 @@ def run_evaluator(
         pending = rotated
         _save_pending_closes(pending)
 
-    already_proposed = _existing_pending_ids(pending)
+    # In execute mode a leftover 'pending' proposal (from the approval era or
+    # a --propose-only run) must not block the close — it gets superseded at
+    # execution time instead. Recent human dismissals suppress in both modes.
+    suppressed = _existing_pending_ids(pending, include_pending=not execute)
     next_id = max((p.get('id', 0) for p in pending), default=0) + 1
 
-    new_proposals: List[Dict] = []
+    new_records: List[Dict] = []
     n_hold = 0
     n_close = 0
+    n_actioned = 0
+    trader = None  # built lazily on the first close to execute
 
     # Scoring/classification is now per-market, aggregating all OPEN legs
     # in that market. close_position_early closes every leg in one call, so
@@ -704,45 +815,71 @@ def run_evaluator(
 
         # action == 'CLOSE'
         n_close += 1
-        if market_id in already_proposed:
+        if market_id in suppressed:
             if verbose:
-                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposal already pending, skipping")
+                why = 'proposal already pending' if not execute else 'dismissal cooldown'
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — {why}, skipping")
             continue
 
-        proposal = _build_proposal(next_id, market_id, aggregate, score, reason)
-        new_proposals.append(proposal)
+        record = _build_proposal(next_id, market_id, aggregate, score, reason)
         next_id += 1
+        legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
+
+        if not execute:
+            new_records.append(record)
+            n_actioned += 1
+            if verbose:
+                print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{record['id']}{legs_tag}")
+            continue
+
+        # Execute mode: act on our own decision, then notify (inside
+        # execute_close) with the score breakdown. Any stale pending ask for
+        # this market is now moot — supersede it so execute_close.py --id N
+        # can't double-close later.
+        _supersede_pending(pending, market_id)
+        if trader is None:
+            trader = trader_factory()
+        if _execute_record(record, trader, notify):
+            n_actioned += 1
         if verbose:
-            legs_tag = f" ({len(legs)} legs)" if len(legs) > 1 else ""
-            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — proposed #{proposal['id']}{legs_tag}")
+            print(f"  [{market_id[:12]}] CLOSE score={score:+.2f} — {record['status']}{legs_tag}")
+        new_records.append(record)
 
-    if new_proposals:
-        pending.extend(new_proposals)
+    if new_records:
+        pending.extend(new_records)
         _save_pending_closes(pending)
-        for p in new_proposals:
-            try:
-                notify(_format_telegram_message(p))
-            except Exception as e:
-                print(f"[evaluate_positions] warning: telegram send failed: {e}", file=sys.stderr)
+        if not execute:
+            for p in new_records:
+                try:
+                    notify(_format_telegram_message(p))
+                except Exception as e:
+                    print(f"[evaluate_positions] warning: telegram send failed: {e}", file=sys.stderr)
 
-    return (n_hold, n_close, len(new_proposals))
+    return (n_hold, n_close, n_actioned)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     parser.add_argument('--verbose', '-v', action='store_true', help='Print per-position classification')
+    parser.add_argument('--propose-only', action='store_true',
+                        help='Legacy behavior: emit Telegram "approve close N" proposals '
+                             'instead of executing closes (default: execute)')
     args = parser.parse_args()
 
     print(f"==> Evaluating positions at {datetime.now().isoformat()}")
     try:
-        hold, close, new = run_evaluator(verbose=args.verbose)
+        hold, close, acted = run_evaluator(verbose=args.verbose,
+                                           execute=not args.propose_only)
     except Exception as e:
         print(f"[evaluate_positions] unrecoverable error: {e}", file=sys.stderr)
         return 1
 
     print(f"    HOLD:         {hold}")
     print(f"    CLOSE flagged:{close}")
-    print(f"    New proposals:{new}  (others already pending)")
+    if args.propose_only:
+        print(f"    New proposals:{acted}  (others already pending)")
+    else:
+        print(f"    Executed:     {acted}  (others skipped/failed — see pending_closes.json)")
     return 0
 
 
