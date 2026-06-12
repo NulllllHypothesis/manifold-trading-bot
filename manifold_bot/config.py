@@ -196,3 +196,44 @@ MIN_ESTIMATED_EV_FLOOR = 0.0
 # Tighten toward 0.2 if Phase 3 ev_error data shows the model is still
 # overestimating; loosen toward 0.5 if it's too pessimistic.
 STAT_PROB_EDGE_SHRINKAGE = 0.3
+
+# ── Per-trade risk guardrails + drawdown circuit breaker (workbench-g4wz) ─────
+#
+# These are *code* guardrails — the bot assesses every trade itself instead of
+# relying on a human reviewing the book. Enforced at the PaperTrader level
+# (manifold_bot/risk.py + place_paper_bet) so EVERY entry path is covered:
+# auto_trader, execute_swap, manual scripts. auto_trader additionally
+# pre-checks so rejections land in trader_counters with a reason.
+#
+# All percentages are fractions of *cost-basis equity* (cash balance + the
+# total stake currently locked in OPEN positions) unless stated otherwise.
+
+# A single trade may not exceed this fraction of the current cash balance.
+# Matches AutoTrader.max_position_size (10%). Side effect by design: when the
+# balance gets small enough that 10% of it is below the effective bet size,
+# the bot stops opening new positions — risk-off when nearly broke is correct.
+MAX_TRADE_BALANCE_PCT = 0.10
+
+# Total stake across all OPEN positions (including the new trade) may not
+# exceed this fraction of equity. MAX_POSITIONS caps the position *count*;
+# this caps the *dollars* at risk, which the count cap alone does not.
+MAX_TOTAL_EXPOSURE_PCT = 0.50
+
+# Total stake in any single market (including the new trade) may not exceed
+# this fraction of equity. auto_trader already blocks adding to an OPEN
+# position, but the swap path and manual scripts can still stack into one
+# market — this is the hard dollar ceiling for all of them.
+MAX_MARKET_EXPOSURE_PCT = 0.10
+
+# Halt-on-drawdown circuit breaker. Peak equity is tracked per capital epoch
+# (a deliberate top-up/reset starts a fresh peak; on first deploy the peak
+# initializes to *current* equity so historical losses don't instantly trip
+# it). When equity falls DRAWDOWN_HALT_PCT below the peak, the breaker trips
+# and place_paper_bet refuses all new entries. Position resolution / closing
+# is never blocked — only new risk. The breaker auto-resets when the
+# drawdown recovers to DRAWDOWN_RESUME_PCT or better (hysteresis so it
+# doesn't flap right at the threshold). Paper-only today, but tuned as if
+# real money: losing a quarter of the bankroll from peak means the strategy
+# is broken and adding positions is throwing good money after bad.
+DRAWDOWN_HALT_PCT = 0.25
+DRAWDOWN_RESUME_PCT = 0.20
