@@ -70,7 +70,7 @@ MIN_LIQUIDITY = 200
 # When absent, news_fetcher.fetch_headlines() returns [] and news_strategy never fires.
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 
-# ── Phase 2.3 — early close / swap decision model ──────────────────────────────
+# ── Phase 2.3 / 2.3b — early close decision model ─────────────────────────────
 #
 # position_score per open position, used by scripts/evaluate_positions.py:
 #
@@ -78,13 +78,22 @@ NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 #                    - days_held * DAILY_DECAY_COST
 #                    - (position_class == 'long_or_uncertain' ? LONG_HORIZON_PENALTY : 0)
 #
-# If the score drops below CLOSE_SCORE_THRESHOLD, the evaluator emits a CLOSE
-# proposal (human-approved via execute_close.py, same approval pattern as swaps).
-# Auto-execution is deliberately off — we collect data first, tune thresholds
-# against real outcomes, then consider turning on auto-close.
+# Phase 2.3 (PR #15) shipped this propose-only: score below threshold emitted
+# a Telegram "approve close N" ask. Phase 2.3b — explicitly planned in PR #15
+# ("after ~1 week of proposals + approvals, Phase 2.3b can flip a flag to
+# auto-approve") — keeps the two-stage propose→approve shape but makes the
+# APPROVER a machine step: the evaluator records the proposal, then
+# RE-VALIDATES it against a fresh live-API probability (not the :05 reprice
+# snapshot) and executes only if the breach survives re-validation (see
+# CLOSE_CONFIRM_MARGIN_FACTOR below). Telegram is a notification of action
+# taken, never a request for permission. The original human path remains
+# available via `evaluate_positions.py --propose-only` (debug/legacy only).
+# Safety guards (MIN_HOLD_HOURS, reprice staleness, resolved-market check)
+# live in code and still gate every close.
 #
-# Starting values are conservative. Tune after a week of evaluator runs against
-# the Phase 2.2 snapshot trail.
+# Starting values are conservative. Tune against the bet_outcomes
+# era='early_close' trail + each trade's recorded close_context, and re-run
+# scripts/backtest_close_thresholds.py weekly as snapshot history accumulates.
 #
 # DAILY_DECAY_COST: dollars of "time value" lost per day held. $0.05/day means
 # a $5 bet breaks even on decay alone in 100 days — slow enough not to punish
@@ -109,6 +118,32 @@ CLOSE_SCORE_THRESHOLD = -0.50
 # Phase 2.2 :05 reprice cycle, short enough that genuinely bad trades
 # aren't held indefinitely.
 MIN_HOLD_HOURS = 2.0
+# CLOSE_CONFIRM_MARGIN_FACTOR — Phase 2.3b's autonomous approver.
+#
+# The human approval step in Phase 2.3 was a stand-in for missing evidence:
+# "does this breach hold up, or did one stale/noisy tick of the :05 snapshot
+# trip the threshold?" Re-validation supplies that evidence directly. When a
+# market's SNAPSHOT score breaches CLOSE_SCORE_THRESHOLD, the evaluator
+# refetches the live probability and recomputes the score fresh, then:
+#
+#   fresh_score <= CLOSE_SCORE_THRESHOLD * CLOSE_CONFIRM_MARGIN_FACTOR
+#       → execute IMMEDIATELY in the same run ('immediate_clear_margin').
+#         With defaults that is fresh score <= -1.00 — a 2× breach confirmed
+#         on live data is clear-cut; waiting a cycle only adds decay.
+#   CLOSE_SCORE_THRESHOLD > fresh_score > threshold × factor (borderline)
+#       → record the proposal and wait ONE evaluator cycle; execute on the
+#         next :30 run only if a fresh refetch still breaches the threshold
+#         ('persisted_next_cycle'). This is the one-tick-noise filter.
+#   fresh_score >= CLOSE_SCORE_THRESHOLD
+#       → 'recovered': the snapshot breach was noise; no close.
+#   refetch fails
+#       → DEFER to the next cycle. The evaluator never executes a close on
+#         the stale snapshot alone.
+#
+# NOTE: the margin math assumes CLOSE_SCORE_THRESHOLD < 0 (multiplying a
+# negative threshold by 2 moves it DEEPER into close territory). If the
+# threshold is ever raised to >= 0, revisit this.
+CLOSE_CONFIRM_MARGIN_FACTOR = 2.0
 
 # ── Phase 2.4 — stale position detection (STRANDED / ABANDONED) ───────────────
 #

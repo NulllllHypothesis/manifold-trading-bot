@@ -659,7 +659,8 @@ class PaperTrader:
         self.save_state()
         return round(total_loss, 4)
 
-    def close_position_early(self, market_id: str, current_prob: float) -> Optional[float]:
+    def close_position_early(self, market_id: str, current_prob: float,
+                             close_context: Optional[Dict] = None) -> Optional[float]:
         """
         Close an open position early at the current market probability.
 
@@ -668,6 +669,14 @@ class PaperTrader:
 
           YES position: current_value = amount * current_prob / entry_prob
           NO  position: current_value = amount * (1 - current_prob) / (1 - entry_prob)
+
+        Args:
+            close_context: optional dict describing WHY the close happened
+                (position_score, close_reason, close_type='auto'|'manual_approval',
+                 score components). Stamped onto each closed trade record so the
+                learning loop can later compare close-time reasoning against the
+                market's eventual resolution. None → nothing stamped (legacy
+                callers unchanged).
 
         Returns:
             float: The realised P&L (current_value - amount), or None if no open position.
@@ -706,6 +715,8 @@ class PaperTrader:
             trade['status'] = 'CLOSED_EARLY'
             trade['actual_outcome'] = 'CLOSED_EARLY'
             trade['profit'] = round(pnl, 4)
+            if close_context:
+                trade['close_context'] = close_context
             total_pnl += pnl
             any_closed = True
 
