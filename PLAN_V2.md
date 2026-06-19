@@ -1,6 +1,10 @@
-# Manifold Trading Bot — Plan V2
+# Manifold Trading Bot, Plan V2
 
-> **Status**: Planning document. Nothing in here is implemented yet.
+> **Project Status: parked, May 2026.** This is a historical planning document, not a current roadmap. Active development on the project ended in May 2026; the README explains the rationale for parking. PLAN.md captures the V1 buildout (March to mid-April 2026); PLAN_V2.md captures the second phase of work that immediately preceded the freeze. Both are preserved as engineering artefacts, not as forward plans. For the live state of the codebase, start at the README.
+
+---
+
+> **Original status (2026-04-17)**: Planning document. Nothing in here is implemented yet.
 > **Predecessor**: See [PLAN.md](PLAN.md) for V1 (everything built through the 15-page dashboard).
 > **Written**: 2026-04-17
 > **Scope**: Address the structural problems the dashboard exposed in the live system.

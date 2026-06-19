@@ -172,5 +172,5 @@ manifold-trading-bot/
 │   ├── AUTOMATION_README.md     # this file
 │   └── technical_overview.md    # deep-dive architecture doc
 │
-└── memory/              # Daily session notes read by OpenClaw on startup
+└── meta/memory/         # Daily session notes (moved into meta/ during 2026-05 portfolio freeze)
 ```
